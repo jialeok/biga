@@ -8297,7 +8297,7 @@
                     const col2 = cells[1] ? cells[1].trim() : '';
 
                     if (!stock || !col2) return;
-                    if (col2 === '-') return; // 涨幅为横杠（停牌/未开市）跳过，不破坏已有数据
+                    if (col2 === '-') return; // 涨幅为横杠（停牌/未开市）跳过
 
                     const col2HasPercent = col2.includes('%');
                     const col2IsNum = /^[+-]?\d+\.?\d*$/.test(col2) || /^[+-]?\d+\.?\d*%$/.test(col2);
@@ -8398,26 +8398,17 @@
                     
                     if (isNewPercent && existingNote) {
                         // 新导入的是涨幅，替换原有涨幅，保留其他内容
-                        // 提取原有注释中的题材（括号内容）和涨停/跌停
                         const bracketMatches = existingNote.match(/\([^)]+\)/g) || [];
                         const ztDtMatches = existingNote.match(/涨停|跌停/g) || [];
                         const uniqueZtDt = [...new Set(ztDtMatches)];
-                        // 提取原有裸露的占比数值（不在括号内的 % 数值，如 7%、29%）
-                        const strippedExisting = existingNote.replace(/\([^)]+\)/g, '').replace(/涨停|跌停/g, '').replace(/[+-]?\d+\.?\d*%/g, '').trim();
-                        const barePercentMatches = existingNote.replace(/\([^)]+\)/g, '').match(/\d+\.?\d*%/g) || [];
-                        // 只保留不像竞价涨幅的纯占比（不带+/-前缀，且是整数或一位小数，如7%、29%）
-                        const bareOccupancy = barePercentMatches.filter(p => /^\d+\.?\d*%$/.test(p));
+                        // 保留原有裸露占比（不带+/-前缀的纯数字%，如7%、29%）
+                        const bareOccupancy = existingNote.replace(/\([^)]+\)/g, '').match(/(?<![+-])\b\d+\.?\d*%/g) || [];
 
                         // 构建新注释：新涨幅 + 涨停/跌停 + 占比 + 题材
                         let newNoteBuilt = newNote.trim();
-                        if (uniqueZtDt.length > 0) {
-                            newNoteBuilt += uniqueZtDt.join('');
-                        }
-                        if (bareOccupancy.length > 0) {
-                            newNoteBuilt += bareOccupancy.join('');
-                        }
+                        if (uniqueZtDt.length > 0) newNoteBuilt += uniqueZtDt.join('');
+                        if (bareOccupancy.length > 0) newNoteBuilt += bareOccupancy.join('');
                         newNoteBuilt += bracketMatches.join('');
-                        // 将中文标点转换为英文逗号（节省空间）
                         const normalizedNote = newNoteBuilt.replace(/[，、;；]/g, ',');
                         auctionList[existingIndex].note = normalizedNote;
                     } else if (existingNote && !existingNote.includes(newNote)) {
@@ -11392,7 +11383,7 @@
 
         function extractChangeFromNote(note) {
             if (!note) return '-';
-            const matches = note.match(/-?\d+\.?\d*%/g);
+            const matches = note.match(/[+-]?\d+\.?\d*%/g);
             if (matches && matches.length > 0) {
                 return matches[0];
             }
