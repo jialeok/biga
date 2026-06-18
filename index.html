@@ -8300,7 +8300,7 @@
                     if (col2 === '-') return; // 涨幅为横杠（停牌/未开市）跳过，不破坏已有数据
 
                     const col2HasPercent = col2.includes('%');
-                    const col2IsNum = /^-?\d+\.?\d*$/.test(col2) || /^-?\d+\.?\d*%$/.test(col2);
+                    const col2IsNum = /^[+-]?\d+\.?\d*$/.test(col2) || /^[+-]?\d+\.?\d*%$/.test(col2);
                     let note = '';
                     if (col2HasPercent || col2IsNum) {
                         note = col2;
@@ -8310,8 +8310,8 @@
                     noteList.push({ stock, note });
                 } else {
                     const trimmedLine = line.trim();
-                    const percentMatch = trimmedLine.match(/^(.+?)\s+(-?\d+\.?\d*)%$/);
-                    const spaceMatch = trimmedLine.match(/^(.+?)\s+(-?\d+\.?\d*)$/);
+                    const percentMatch = trimmedLine.match(/^(.+?)\s+([+-]?\d+\.?\d*)%$/);
+                    const spaceMatch = trimmedLine.match(/^(.+?)\s+([+-]?\d+\.?\d*)$/);
                     
                     let stock = '';
                     let note = '';
@@ -8393,8 +8393,8 @@
                     const existingNote = auctionList[existingIndex].note || '';
                     const newNote = noteItem.note || '';
                     
-                    // 检查新导入的是否是纯涨幅（如 2.3% 或 -1.5%）
-                    const isNewPercent = /^-?\d+\.?\d*%$/.test(newNote.trim());
+                    // 检查新导入的是否是纯涨幅（如 +2.3% 或 -1.5% 或 2.3%）
+                    const isNewPercent = /^[+-]?\d+\.?\d*%$/.test(newNote.trim());
                     
                     if (isNewPercent && existingNote) {
                         // 新导入的是涨幅，替换原有涨幅，保留其他内容
@@ -8402,11 +8402,19 @@
                         const bracketMatches = existingNote.match(/\([^)]+\)/g) || [];
                         const ztDtMatches = existingNote.match(/涨停|跌停/g) || [];
                         const uniqueZtDt = [...new Set(ztDtMatches)];
-                        
-                        // 构建新注释：新涨幅 + 涨停/跌停 + 题材
+                        // 提取原有裸露的占比数值（不在括号内的 % 数值，如 7%、29%）
+                        const strippedExisting = existingNote.replace(/\([^)]+\)/g, '').replace(/涨停|跌停/g, '').replace(/[+-]?\d+\.?\d*%/g, '').trim();
+                        const barePercentMatches = existingNote.replace(/\([^)]+\)/g, '').match(/\d+\.?\d*%/g) || [];
+                        // 只保留不像竞价涨幅的纯占比（不带+/-前缀，且是整数或一位小数，如7%、29%）
+                        const bareOccupancy = barePercentMatches.filter(p => /^\d+\.?\d*%$/.test(p));
+
+                        // 构建新注释：新涨幅 + 涨停/跌停 + 占比 + 题材
                         let newNoteBuilt = newNote.trim();
                         if (uniqueZtDt.length > 0) {
                             newNoteBuilt += uniqueZtDt.join('');
+                        }
+                        if (bareOccupancy.length > 0) {
+                            newNoteBuilt += bareOccupancy.join('');
                         }
                         newNoteBuilt += bracketMatches.join('');
                         // 将中文标点转换为英文逗号（节省空间）
