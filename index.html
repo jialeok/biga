@@ -8312,6 +8312,8 @@
                     const trimmedLine = line.trim();
                     const percentMatch = trimmedLine.match(/^(.+?)\s+([+-]?\d+\.?\d*)%$/);
                     const spaceMatch = trimmedLine.match(/^(.+?)\s+([+-]?\d+\.?\d*)$/);
+                    // 题材文字：股票名称 空格 非数字内容（如 大连友谊 零售、腾讯概念）
+                    const conceptMatch = trimmedLine.match(/^(.+?)\s+([^\d].+)$/);
                     
                     let stock = '';
                     let note = '';
@@ -8322,6 +8324,10 @@
                     } else if (spaceMatch) {
                         stock = spaceMatch[1].trim();
                         note = spaceMatch[2] + '%';
+                    } else if (conceptMatch) {
+                        stock = conceptMatch[1].trim();
+                        const concept = conceptMatch[2].trim();
+                        note = '(' + concept + ')';
                     } else {
                         return;
                     }
