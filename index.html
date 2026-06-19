@@ -353,6 +353,41 @@
             background: #f9fafb;
         }
 
+        .bidding-table tr.duiban-row-clickable {
+            cursor: pointer;
+        }
+
+        .bidding-table tr.duiban-row-clickable:active td {
+            background: #f1f5f9;
+        }
+
+        /* 最近多板% 9:25修改历史弹出提示 */
+        .duiban-history-popup {
+            position: fixed;
+            z-index: 9999;
+            background: #1f2937;
+            color: #fff;
+            font-size: 12px;
+            line-height: 1.6;
+            padding: 10px 14px;
+            border-radius: 10px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+            max-width: 240px;
+            pointer-events: none;
+        }
+
+        .duiban-history-popup .dh-row {
+            white-space: nowrap;
+        }
+
+        .duiban-history-popup .dh-row + .dh-row {
+            margin-top: 4px;
+        }
+
+        .duiban-history-popup .dh-label {
+            color: #9ca3af;
+        }
+
         .bidding-table tr.account-premium-row td:first-child {
             font-size: 11px;
         }
@@ -13122,9 +13157,25 @@
             html += '<tbody>';
             biddingData.forEach((row, index) => {
                 const isAccountPremium = (row.name || '') === '账号溢价';
-                const rowClass = isAccountPremium ? 'account-premium-row' : '';
-                
-                html += `<tr class="${rowClass}">`;
+                const isDuibanRow = (row.name || '').trim() === '最近多板%';
+
+                // "最近多板%"行：是否存在可展示的修改历史
+                // 条件：modifiedAt存在（即保存过两次及以上），且初始值和当前值均非空
+                const duibanHasHistory = isDuibanRow &&
+                    row.time930_initial !== undefined &&
+                    row.time930_initial !== '' &&
+                    row.time930 !== '' && row.time930 !== undefined && row.time930 !== null &&
+                    row.time930_modifiedAt !== undefined && row.time930_modifiedAt !== null;
+
+                let rowClass = isAccountPremium ? 'account-premium-row' : '';
+                let rowExtraAttr = '';
+                // 有修改历史才绑定点击弹窗
+                if (isDuibanRow && duibanHasHistory) {
+                    rowClass += ' duiban-row-clickable';
+                    rowExtraAttr = ` data-duiban-initial="${row.time930_initial}" data-duiban-final="${row.time930}" data-duiban-initial-modified="${row.time930_initial_modifiedAt || ''}" data-duiban-modified="${row.time930_modifiedAt || ''}" onclick="onDuibanRowClick(this, event)"`;
+                }
+
+                html += `<tr class="${rowClass.trim()}"${rowExtraAttr}>`;
                 
                 let nameDisplay = row.name || '';
                 html += `<td>${nameDisplay}</td>`;
@@ -13158,7 +13209,25 @@
                 
                 html += `<td>${formatValue(row.time915)}</td>`;
                 html += `<td>${formatValue(row.time920)}</td>`;
-                html += `<td>${formatValue(row.time930)}</td>`;
+
+                // "最近多板%"这一行的9:25格子：满足条件时变色提示（红=变强，绿=变弱）
+                if (isDuibanRow) {
+                    const time920Num = parseFloat(row.time920);
+                    const time930Num = parseFloat(row.time930);
+                    const baseValid = row.time920 && !isNaN(time920Num);
+                    let duibanCellStyle = '';
+                    // 有修改历史才变色（第一次保存不变色）
+                    if (duibanHasHistory && baseValid && !isNaN(time930Num) && time930Num !== time920Num) {
+                        if (time930Num > time920Num) {
+                            duibanCellStyle = 'background:rgba(239,68,68,0.15);color:#dc2626;border-radius:4px;';
+                        } else if (time930Num < time920Num) {
+                            duibanCellStyle = 'background:rgba(16,185,129,0.15);color:#059669;border-radius:4px;';
+                        }
+                    }
+                    html += `<td style="${duibanCellStyle}">${formatValue(row.time930)}</td>`;
+                } else {
+                    html += `<td>${formatValue(row.time930)}</td>`;
+                }
                 
                 // 增减列：根据值应用样式
                 let changeDisplay = row.change || '';
@@ -13188,6 +13257,103 @@
             } else {
                 toggleBtn.textContent = '▼';
             }
+
+            // 每次重新渲染（包括切换日期）时，关闭可能残留的历史提示框
+            closeDuibanHistoryPopup();
+        }
+
+        // "最近多板%"历史提示弹窗：记录当前绑定的关闭监听器引用，避免重复绑定导致无法移除（手机端堆叠bug的根因）
+        let duibanPopupClickCloseHandler = null;
+        let duibanPopupScrollCloseHandler = null;
+
+        // 点击"最近多板%"这一行 → 弹出9:25修改历史（首次值+时间 / 最终值+时间，分两行显示，时间格式为 分:秒，不带文字标签）
+        function onDuibanRowClick(rowEl, event) {
+            event.stopPropagation();
+
+            // 再次点击同一行时，视为"再点一次=收起"，直接关闭弹窗，不重新打开
+            const existingPopup = document.getElementById('duibanHistoryPopup');
+            if (existingPopup) {
+                closeDuibanHistoryPopup();
+                return;
+            }
+
+            // 兜底：清掉可能残留的旧弹窗和旧监听器，防止叠加显示
+            closeDuibanHistoryPopup();
+
+            const initial = rowEl.getAttribute('data-duiban-initial');
+            const final = rowEl.getAttribute('data-duiban-final');
+            const initialModifiedAt = rowEl.getAttribute('data-duiban-initial-modified');
+            const finalModifiedAt = rowEl.getAttribute('data-duiban-modified');
+
+            // 时间格式：分:秒
+            const formatMMSS = (ts) => {
+                if (!ts) return '';
+                const d = new Date(parseInt(ts));
+                if (isNaN(d.getTime())) return '';
+                const pad = n => String(n).padStart(2, '0');
+                return `${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+            };
+
+            const initialTimeStr = formatMMSS(initialModifiedAt);
+            const finalTimeStr = formatMMSS(finalModifiedAt);
+
+            // 两行：首次值+时间 / 最终值+时间
+            const row1 = `${initialTimeStr ? initialTimeStr + '　' : ''}${initial}%`;
+            const row2 = `${finalTimeStr ? finalTimeStr + '　' : ''}${final}%`;
+
+            const popup = document.createElement('div');
+            popup.className = 'duiban-history-popup';
+            popup.id = 'duibanHistoryPopup';
+            popup.innerHTML = `<div class="dh-row">${row1}</div><div class="dh-row">${row2}</div>`;
+
+            document.body.appendChild(popup);
+
+            // 定位在9:25格子（第4个td）正下方居中
+            const tds = rowEl.querySelectorAll('td');
+            const anchorEl = tds.length >= 4 ? tds[3] : rowEl;
+            const rect = anchorEl.getBoundingClientRect();
+            let top = rect.bottom + 6;
+            // 先挂载到body才能量到实际宽度，用visibility:hidden避免闪烁
+            popup.style.visibility = 'hidden';
+            // 粗估：单行约 "28:35  -0.6%" = 约13字符 * ~8px = 104px，加padding
+            // 定位后再修正，先用格子中心临时对齐
+            let left = rect.left + rect.width / 2;
+            popup.style.top = top + 'px';
+            popup.style.left = left + 'px';
+            // 等浏览器渲染出实际宽度后居中修正
+            requestAnimationFrame(() => {
+                const pw = popup.offsetWidth;
+                let finalLeft = rect.left + rect.width / 2 - pw / 2;
+                if (finalLeft + pw > window.innerWidth - 10) finalLeft = window.innerWidth - pw - 10;
+                if (finalLeft < 10) finalLeft = 10;
+                popup.style.left = finalLeft + 'px';
+                popup.style.visibility = '';
+            });
+
+            // 延迟绑定，避免本次点击事件冒泡立刻触发关闭
+            setTimeout(() => {
+                duibanPopupClickCloseHandler = function() { closeDuibanHistoryPopup(); };
+                document.addEventListener('click', duibanPopupClickCloseHandler, { once: true });
+
+                // 下拉/滚动时也自动关闭；capture:true 保证内部滚动容器的滚动也能被捕获到
+                duibanPopupScrollCloseHandler = function() { closeDuibanHistoryPopup(); };
+                document.addEventListener('scroll', duibanPopupScrollCloseHandler, { once: true, capture: true });
+            }, 0);
+        }
+
+        // 关闭"最近多板%"9:25修改历史提示框（点击其它地方/滚动/双击进入编辑/切换日期时调用）
+        function closeDuibanHistoryPopup() {
+            // 用class统一清理所有同类弹窗，防止历史遗留的重复弹窗删不干净
+            document.querySelectorAll('.duiban-history-popup').forEach(p => p.remove());
+
+            if (duibanPopupClickCloseHandler) {
+                document.removeEventListener('click', duibanPopupClickCloseHandler);
+                duibanPopupClickCloseHandler = null;
+            }
+            if (duibanPopupScrollCloseHandler) {
+                document.removeEventListener('scroll', duibanPopupScrollCloseHandler, true);
+                duibanPopupScrollCloseHandler = null;
+            }
         }
 
         // 切换竞价变化看板展开/收起
@@ -13207,6 +13373,9 @@
 
         // 打开竞价变化编辑
         function openBiddingEdit() {
+            // 进入编辑前先关闭可能还开着的"最近多板%"历史提示弹窗
+            closeDuibanHistoryPopup();
+
             const boardEl = document.getElementById('biddingBoard');
             
             if (boardEl.classList.contains('minimized')) {
@@ -13466,6 +13635,11 @@
                 row.time930 = '';
                 row.change = '';
                 row.close = '';
+                // 同步清除"最近多板%"行的9:25修改历史锁定字段，
+                // 否则下次重新填入保存后，旧的初始值会干扰变色和弹窗逻辑
+                delete row.time930_initial;
+                delete row.time930_initial_modifiedAt;
+                delete row.time930_modifiedAt;
             });
             
             getBiddingData()[currentDate] = biddingData;
@@ -13602,7 +13776,33 @@
                     close
                 });
             }
-            
+
+            // "最近多板%"这一行的9:25（time930）修改历史锁定逻辑
+            // 只针对这一行，记录第一次保存的值（锁定不变）和最后一次保存的时间
+            (function lockDuibanTime930History() {
+                const oldBiddingData = getTodayBidding(); // 保存前的旧数据，用于取回已锁定的初始值
+                const newRow = biddingData.find(r => r.name && r.name.trim() === '最近多板%');
+                if (!newRow) return;
+                const oldRow = oldBiddingData ? oldBiddingData.find(r => r.name && r.name.trim() === '最近多板%') : null;
+
+                if (oldRow && oldRow.time930_initial !== undefined && oldRow.time930_initial !== '') {
+                    // 已经锁定过有效初始值：保持不变（包括首次锁定时间），只更新最后修改时间
+                    newRow.time930_initial = oldRow.time930_initial;
+                    newRow.time930_initial_modifiedAt = oldRow.time930_initial_modifiedAt;
+                    newRow.time930_modifiedAt = Date.now();
+                } else if (newRow.time930 && newRow.time930.trim() !== '') {
+                    // 本次 time930 有实际值（且旧初始值不存在或为空）：锁定初始值，不算"已修改"
+                    newRow.time930_initial = newRow.time930;
+                    newRow.time930_initial_modifiedAt = Date.now();
+                    newRow.time930_modifiedAt = undefined;
+                } else {
+                    // 本次 time930 也是空的，不锁定，清除历史字段
+                    newRow.time930_initial = undefined;
+                    newRow.time930_initial_modifiedAt = undefined;
+                    newRow.time930_modifiedAt = undefined;
+                }
+            })();
+
             getBiddingData()[currentDate] = biddingData;
             saveData();
             
