@@ -1897,6 +1897,177 @@
             overscroll-behavior: contain;
         }
 
+        /* 星标签统计看板（早盘竞价上方） */
+        .star-stats-board {
+            margin: 0 15px 10px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 16px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            padding: 16px 16px 14px;
+        }
+
+        .star-stats-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .star-stats-title-icon {
+            color: #7c3aed;
+        }
+
+        .star-stats-donut-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 10px 0 6px;
+        }
+
+        .star-stats-donut-svg {
+            width: 100%;
+            max-width: 320px;
+            height: auto;
+            display: block;
+        }
+
+        .star-stats-donut-center-value {
+            font-size: 22px;
+            font-weight: 800;
+            fill: #1f2937;
+        }
+
+        .star-stats-donut-center-label {
+            font-size: 11px;
+            fill: #94a3b8;
+        }
+
+        .star-stats-legend {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 8px 14px;
+            margin-top: 10px;
+        }
+
+        .star-stats-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 12px;
+            color: #475569;
+        }
+
+        .star-stats-legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }
+
+        .star-stats-legend-value {
+            font-weight: 700;
+            color: #1f2937;
+        }
+
+        .star-stats-summary {
+            display: flex;
+            justify-content: center;
+            gap: 18px;
+            margin: 12px 2px 4px;
+            padding: 10px 8px;
+            background: #f8fafc;
+            border-radius: 12px;
+            flex-wrap: wrap;
+        }
+
+        .star-stats-summary-item {
+            text-align: center;
+        }
+
+        .star-stats-summary-label {
+            font-size: 10px;
+            color: #94a3b8;
+            margin-bottom: 3px;
+        }
+
+        .star-stats-summary-value {
+            font-size: 14px;
+            font-weight: 700;
+            color: #1f2937;
+        }
+
+        .star-stats-summary-value.topic-name {
+            color: #7c3aed;
+            max-width: 140px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .star-stats-divider {
+            height: 1px;
+            background: #eef1f6;
+            margin: 14px 0 12px;
+        }
+
+        .star-stats-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .star-stats-bar-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .star-stats-bar-label {
+            width: 44px;
+            flex-shrink: 0;
+            font-size: 12px;
+            font-weight: 600;
+            color: #475569;
+            text-align: right;
+        }
+
+        .star-stats-bar-track {
+            flex: 1;
+            height: 18px;
+            background: #f1f5f9;
+            border-radius: 9px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .star-stats-bar-fill {
+            height: 100%;
+            border-radius: 9px;
+            min-width: 3px;
+            transition: width 0.4s ease;
+        }
+
+        .star-stats-bar-value {
+            width: 26px;
+            flex-shrink: 0;
+            font-size: 12px;
+            font-weight: 700;
+            color: #1f2937;
+            text-align: left;
+        }
+
+        .star-stats-empty {
+            text-align: center;
+            color: #94a3b8;
+            font-size: 12px;
+            padding: 20px 0;
+        }
+
         .auction-scroll-container {
             max-height: none;
             overflow-y: visible;
@@ -5343,6 +5514,12 @@
                     <div class="comment-placeholder" id="commentPlaceholder">暂无评论，点击添加...</div>
                 </div>
             </div>
+        </div>
+
+        <!-- 星标签统计看板 -->
+        <div class="star-stats-board trading-day-element" id="starStatsBoard">
+            <div class="star-stats-title"><span class="star-stats-title-icon">★</span><span>题材星标签统计</span></div>
+            <div id="starStatsContent"></div>
         </div>
 
         <!-- 最近多板早盘竞价看板 -->
@@ -8978,6 +9155,7 @@
             isStrengthSortEnabled = !isStrengthSortEnabled;
             renderAuctionPage2();
             renderAuctionPage3();
+            renderAuctionStatsBoard();
         }
 
         // 渲染早盘竞价看板
@@ -9056,6 +9234,7 @@
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
                 renderAuctionPage2();
                 renderAuctionPage3();
+                renderAuctionStatsBoard();
                 initAuctionSwipe();
                 return;
             }
@@ -9446,6 +9625,7 @@
             
             renderAuctionPage2();
             renderAuctionPage3();
+            renderAuctionStatsBoard();
             initAuctionSwipe();
         }
         
@@ -10805,6 +10985,160 @@
             });
             
             auctionContent3.innerHTML = html;
+        }
+
+        // 渲染星标签统计看板（星无/星现/星平/星增/星减 占比伞形图 + 数量横向柱状图）
+        function renderAuctionStatsBoard() {
+            const container = document.getElementById('starStatsContent');
+            if (!container) return;
+
+            const todayAuction = getTodayAuction();
+            const yesterdayDate = getYesterdayDate(currentDate);
+            const yesterdayAuction = yesterdayDate ? (getAuctionData()[yesterdayDate] || []) : [];
+            const todayGroups = getTopicGroups(todayAuction || []);
+            const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
+
+            if (!todayGroups || todayGroups.length === 0) {
+                container.innerHTML = '<div class="star-stats-empty">暂无题材数据</div>';
+                return;
+            }
+
+            // 分类统计：星无、星现、星平、星增、星减
+            const cats = {
+                xianian: { label: '星无', count: 0, color: '#94a3b8' },
+                xingxian: { label: '星现', count: 0, color: '#f43f5e' },
+                xingping: { label: '星平', count: 0, color: '#3b82f6' },
+                xingzeng: { label: '星增', count: 0, color: '#f59e0b' },
+                xingjian: { label: '星减', count: 0, color: '#10b981' }
+            };
+
+            let maxStockTopic = null;
+            let maxStockCount = 0;
+
+            todayGroups.forEach(group => {
+                if (!group.topic || group.topic === '---' || group.topic === '其它' || group.topic === '并购重组') return;
+
+                const todayStarCount = group.starCount || 0;
+                const yesterdayGroup = yesterdayGroups.find(g => g.topic === group.topic);
+                const yesterdayStarCount = yesterdayGroup ? (yesterdayGroup.starCount || 0) : 0;
+
+                if (todayStarCount === 0 && yesterdayStarCount > 0) {
+                    cats.xianian.count++;
+                } else if (todayStarCount > 0 && yesterdayStarCount === 0) {
+                    cats.xingxian.count++;
+                } else if (todayStarCount > 0 && todayStarCount === yesterdayStarCount) {
+                    cats.xingping.count++;
+                } else if (todayStarCount > yesterdayStarCount) {
+                    cats.xingzeng.count++;
+                } else if (todayStarCount > 0 && todayStarCount < yesterdayStarCount) {
+                    cats.xingjian.count++;
+                }
+
+                const stockCount = group.stocks ? group.stocks.length : 0;
+                if (stockCount > maxStockCount) {
+                    maxStockCount = stockCount;
+                    maxStockTopic = group.topic;
+                }
+            });
+
+            const topicCount = todayGroups.filter(g => g.topic && g.topic !== '---' && g.topic !== '其它' && g.topic !== '并购重组').length;
+            const total = cats.xianian.count + cats.xingxian.count + cats.xingping.count + cats.xingzeng.count + cats.xingjian.count;
+
+            if (total === 0) {
+                container.innerHTML = `
+                    <div class="star-stats-summary">
+                        <div class="star-stats-summary-item">
+                            <div class="star-stats-summary-label">题材数量</div>
+                            <div class="star-stats-summary-value">${topicCount}</div>
+                        </div>
+                        <div class="star-stats-summary-item">
+                            <div class="star-stats-summary-label">个股总数最多题材</div>
+                            <div class="star-stats-summary-value topic-name">${maxStockTopic ? maxStockTopic + '（' + maxStockCount + '）' : '-'}</div>
+                        </div>
+                    </div>
+                    <div class="star-stats-empty">暂无星变化数据</div>
+                `;
+                return;
+            }
+
+            // 构建伞形图（甜甜圈图，SVG）
+            const order = ['xianian', 'xingxian', 'xingping', 'xingzeng', 'xingjian'];
+            const size = 220;
+            const cx = size / 2, cy = size / 2;
+            const strokeWidth = 34;
+            const r = (size - strokeWidth) / 2;
+            const circumference = 2 * Math.PI * r;
+
+            let offsetAcc = 0;
+            let segments = '';
+            order.forEach(key => {
+                const c = cats[key];
+                if (c.count <= 0) return;
+                const fraction = c.count / total;
+                const dash = fraction * circumference;
+                const gap = circumference - dash;
+                const rotation = (offsetAcc / total) * 360 - 90;
+                segments += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${c.color}" stroke-width="${strokeWidth}"
+                    stroke-dasharray="${dash} ${gap}" stroke-dashoffset="0"
+                    transform="rotate(${rotation} ${cx} ${cy})" stroke-linecap="butt"></circle>`;
+                offsetAcc += c.count;
+            });
+
+            const donutSvg = `
+                <svg class="star-stats-donut-svg" viewBox="0 0 ${size} ${size}">
+                    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#f1f5f9" stroke-width="${strokeWidth}"></circle>
+                    ${segments}
+                    <text x="${cx}" y="${cy - 4}" text-anchor="middle" class="star-stats-donut-center-value">${total}</text>
+                    <text x="${cx}" y="${cy + 16}" text-anchor="middle" class="star-stats-donut-center-label">题材总数</text>
+                </svg>
+            `;
+
+            const legendHtml = order.map(key => {
+                const c = cats[key];
+                const pct = total > 0 ? Math.round((c.count / total) * 100) : 0;
+                return `
+                    <div class="star-stats-legend-item">
+                        <span class="star-stats-legend-dot" style="background:${c.color}"></span>
+                        <span>${c.label}</span>
+                        <span class="star-stats-legend-value">${c.count}（${pct}%）</span>
+                    </div>
+                `;
+            }).join('');
+
+            // 横向柱状图（数量）
+            const maxCount = Math.max(...order.map(key => cats[key].count), 1);
+            const barsHtml = order.map(key => {
+                const c = cats[key];
+                const widthPct = Math.round((c.count / maxCount) * 100);
+                return `
+                    <div class="star-stats-bar-row">
+                        <div class="star-stats-bar-label">${c.label}</div>
+                        <div class="star-stats-bar-track">
+                            <div class="star-stats-bar-fill" style="width:${widthPct}%;background:${c.color}"></div>
+                        </div>
+                        <div class="star-stats-bar-value">${c.count}</div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="star-stats-donut-wrap">
+                    ${donutSvg}
+                    <div class="star-stats-legend">${legendHtml}</div>
+                </div>
+                <div class="star-stats-summary">
+                    <div class="star-stats-summary-item">
+                        <div class="star-stats-summary-label">题材数量</div>
+                        <div class="star-stats-summary-value">${topicCount}</div>
+                    </div>
+                    <div class="star-stats-summary-item">
+                        <div class="star-stats-summary-label">个股总数最多题材</div>
+                        <div class="star-stats-summary-value topic-name">${maxStockTopic ? maxStockTopic + '（' + maxStockCount + '）' : '-'}</div>
+                    </div>
+                </div>
+                <div class="star-stats-divider"></div>
+                <div class="star-stats-bars">${barsHtml}</div>
+            `;
         }
 
         // 第四页数据存储（按日期存储）
