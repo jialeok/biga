@@ -11022,7 +11022,8 @@
                 const yesterdayGroup = yesterdayGroups.find(g => g.topic === group.topic);
                 const yesterdayStarCount = yesterdayGroup ? (yesterdayGroup.starCount || 0) : 0;
 
-                if (todayStarCount === 0 && yesterdayStarCount > 0) {
+                if (todayStarCount === 0) {
+                    // 今天没星：无论昨天有没有星，都算星无
                     cats.xianian.count++;
                 } else if (todayStarCount > 0 && yesterdayStarCount === 0) {
                     cats.xingxian.count++;
