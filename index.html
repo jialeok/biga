@@ -11045,12 +11045,33 @@
             const topicCount = todayGroups.filter(g => g.topic && g.topic !== '---' && g.topic !== '其它' && g.topic !== '并购重组').length;
             const total = cats.xianian.count + cats.xingxian.count + cats.xingping.count + cats.xingzeng.count + cats.xingjian.count;
 
+            // 个股数量对比（今日 vs 昨日的早盘竞价看板股票总数）
+            const todayStockCount = (todayAuction || []).length;
+            const yesterdayStockCount = (yesterdayAuction || []).length;
+            let stockCountArrow = '';
+            let stockCountArrowColor = '';
+            if (todayStockCount > yesterdayStockCount) {
+                stockCountArrow = '↑';
+                stockCountArrowColor = '#f43f5e'; // 红色：增多
+            } else if (todayStockCount < yesterdayStockCount) {
+                stockCountArrow = '↓';
+                stockCountArrowColor = '#10b981'; // 绿色：减少
+            } else {
+                stockCountArrow = '-';
+                stockCountArrowColor = '#94a3b8'; // 灰色：持平
+            }
+            const stockCountHtml = `${todayStockCount}<span style="color:${stockCountArrowColor};margin-left:2px;">${stockCountArrow}</span>`;
+
             if (total === 0) {
                 container.innerHTML = `
                     <div class="star-stats-summary">
                         <div class="star-stats-summary-item">
                             <div class="star-stats-summary-label">题材数量</div>
                             <div class="star-stats-summary-value">${topicCount}</div>
+                        </div>
+                        <div class="star-stats-summary-item">
+                            <div class="star-stats-summary-label">个股数量</div>
+                            <div class="star-stats-summary-value">${stockCountHtml}</div>
                         </div>
                         <div class="star-stats-summary-item">
                             <div class="star-stats-summary-label">个股总数最多题材</div>
@@ -11162,6 +11183,10 @@
                     <div class="star-stats-summary-item">
                         <div class="star-stats-summary-label">题材数量</div>
                         <div class="star-stats-summary-value">${topicCount}</div>
+                    </div>
+                    <div class="star-stats-summary-item">
+                        <div class="star-stats-summary-label">个股数量</div>
+                        <div class="star-stats-summary-value">${stockCountHtml}</div>
                     </div>
                     <div class="star-stats-summary-item">
                         <div class="star-stats-summary-label">个股总数最多题材</div>
