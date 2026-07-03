@@ -11085,12 +11085,31 @@
                 offsetAcc += c.count;
             });
 
+            // 读取早盘竞价强度（复用页面顶部已计算好的强度数值与箭头，不改变原有逻辑）
+            const strengthValueEl = document.getElementById('auctionStrengthValue');
+            const strengthArrowEl = document.getElementById('auctionStrengthArrow');
+            const strengthText = strengthValueEl ? strengthValueEl.textContent.trim() : '-';
+            const strengthArrow = strengthArrowEl ? strengthArrowEl.textContent.trim() : '-';
+
+            let centerColor = '#1f2937';
+            let displayArrow = '';
+            if (strengthArrow === '⬇') {
+                centerColor = '#10b981'; // 强度变弱：绿色
+                displayArrow = '↓';
+            } else if (strengthArrow === '⬆') {
+                centerColor = '#ef4444'; // 强度变强：红色
+                displayArrow = '↑';
+            } else {
+                centerColor = '#1f2937';
+                displayArrow = '';
+            }
+
             const donutSvg = `
                 <svg class="star-stats-donut-svg" viewBox="0 0 ${size} ${size}">
                     <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#f1f5f9" stroke-width="${strokeWidth}"></circle>
                     ${segments}
-                    <text x="${cx}" y="${cy - 4}" text-anchor="middle" class="star-stats-donut-center-value">${total}</text>
-                    <text x="${cx}" y="${cy + 16}" text-anchor="middle" class="star-stats-donut-center-label">题材总数</text>
+                    <text x="${cx}" y="${cy - 4}" text-anchor="middle" class="star-stats-donut-center-value" style="fill:${centerColor}">${strengthText}${displayArrow}</text>
+                    <text x="${cx}" y="${cy + 16}" text-anchor="middle" class="star-stats-donut-center-label">强度</text>
                 </svg>
             `;
 
