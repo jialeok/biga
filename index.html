@@ -11091,9 +11091,16 @@
             const strengthText = strengthValueEl ? strengthValueEl.textContent.trim() : '-';
             const strengthArrow = strengthArrowEl ? strengthArrowEl.textContent.trim() : '-';
 
+            // 读取当天"记忘看板/竞价变化"得出结论（同一天数据），空仓时视为假强度，强制绿色
+            const todayJiwang = getTodayJiwang();
+            const isKongcang = todayJiwang && todayJiwang.jielun === '空仓';
+
             let centerColor = '#1f2937';
             let displayArrow = '';
-            if (strengthArrow === '⬇') {
+            if (isKongcang) {
+                centerColor = '#10b981'; // 空仓：无论强度箭头方向，一律视为假强度，绿色
+                displayArrow = strengthArrow === '⬇' ? '↓' : (strengthArrow === '⬆' ? '↑' : '');
+            } else if (strengthArrow === '⬇') {
                 centerColor = '#10b981'; // 强度变弱：绿色
                 displayArrow = '↓';
             } else if (strengthArrow === '⬆') {
