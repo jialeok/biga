@@ -11049,17 +11049,14 @@
             const todayStockCount = (todayAuction || []).length;
             const yesterdayStockCount = (yesterdayAuction || []).length;
             let stockCountArrow = '';
-            let stockCountArrowColor = '';
             if (todayStockCount > yesterdayStockCount) {
                 stockCountArrow = '↑';
-                stockCountArrowColor = '#f43f5e'; // 红色：增多
             } else if (todayStockCount < yesterdayStockCount) {
                 stockCountArrow = '↓';
-                stockCountArrowColor = '#10b981'; // 绿色：减少
             } else {
                 stockCountArrow = '-';
-                stockCountArrowColor = '#94a3b8'; // 灰色：持平
             }
+            const stockCountArrowColor = '#1f2937'; // 统一黑色，箭头方向逻辑不变
             const stockCountHtml = `${todayStockCount}<span style="color:${stockCountArrowColor};margin-left:2px;">${stockCountArrow}</span>`;
 
             if (total === 0) {
