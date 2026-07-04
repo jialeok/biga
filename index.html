@@ -17643,14 +17643,14 @@
             }
         }
         
-        // 渲染"总计统计"（固定从2026-02-01统计到今天，不随周/月切换而改变）
+        // 渲染"总计统计"（固定从2026-02-01统计到"当前翻看的日期"，不随周/月切换而重新框定统计口径，
+        // 但会随你翻页查看的日期变化——翻到6-27就统计到6-27，翻到今天就统计到今天）
         // suffix: '' 用于本周/上周统计看板的元素id，'M' 用于本月统计看板的元素id
         function renderTotalStats(suffix) {
             const TOTAL_START_DATE = '2026-02-01';
 
-            // 结束日期：始终为“今天”，而不是当前正在查看的 currentDate
-            const now = new Date();
-            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+            // 结束日期：使用当前正在翻看的 currentDate（而不是系统真实的今天）
+            const todayStr = currentDate;
 
             let tradingDaysCount = 0;
             let emptyCount = 0;
