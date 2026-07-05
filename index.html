@@ -1892,11 +1892,11 @@
 
         .auction-toolbar {
             display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
+            flex-wrap: nowrap;
+            justify-content: space-between;
             align-items: center;
-            gap: 10px 16px;
-            padding: 8px 12px;
+            gap: 6px;
+            padding: 8px 10px;
             background: #f8f7ff;
             border-bottom: 1px solid #ede9fe;
         }
@@ -1904,11 +1904,11 @@
         .auction-toggle-item {
             display: flex;
             align-items: center;
-            gap: 5px;
+            gap: 4px;
         }
 
         .auction-toggle-label {
-            font-size: 11px;
+            font-size: 10.5px;
             color: #6d28d9;
             font-weight: 500;
             white-space: nowrap;
@@ -1917,8 +1917,8 @@
         .auction-toggle-switch {
             position: relative;
             display: inline-block;
-            width: 34px;
-            height: 19px;
+            width: 30px;
+            height: 17px;
             flex-shrink: 0;
         }
 
@@ -1937,14 +1937,14 @@
             bottom: 0;
             background-color: #cbd5e1;
             transition: 0.2s;
-            border-radius: 19px;
+            border-radius: 17px;
         }
 
         .auction-toggle-slider:before {
             position: absolute;
             content: "";
-            height: 15px;
-            width: 15px;
+            height: 13px;
+            width: 13px;
             left: 2px;
             bottom: 2px;
             background-color: #ffffff;
@@ -1958,7 +1958,7 @@
         }
 
         .auction-toggle-switch input:checked + .auction-toggle-slider:before {
-            transform: translateX(15px);
+            transform: translateX(13px);
         }
 
         #auctionContent3 {
@@ -5640,14 +5640,14 @@
                                 </label>
                             </div>
                             <div class="auction-toggle-item">
-                                <span class="auction-toggle-label">按数据排序</span>
+                                <span class="auction-toggle-label">数据排序</span>
                                 <label class="auction-toggle-switch">
                                     <input type="checkbox" id="auctionSortByDataToggle" onchange="onAuctionSortByDataToggleChange()">
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
                             <div class="auction-toggle-item">
-                                <span class="auction-toggle-label">竞价量环比排序</span>
+                                <span class="auction-toggle-label">环比排序</span>
                                 <label class="auction-toggle-switch">
                                     <input type="checkbox" id="auctionSortByRatioToggle" onchange="onAuctionSortByRatioToggleChange()">
                                     <span class="auction-toggle-slider"></span>
@@ -12683,9 +12683,23 @@
             const volumeSvg = renderMiniTrendSvg(volumePoints, '#6366f1'); // 靛蓝色：竞价量
             const yestSvg = renderMiniTrendSvg(yestPoints, '#10b981');    // 绿色：昨日成交量
 
+            // 计算"今日竞价量 / 昨日竞价量"比值：history最后一项是今天，倒数第二项是昨天
+            // 若昨天是断点（无数据）或昨日竞价量为0，则不显示比值
+            let ratioHtml = '';
+            if (history.length >= 2) {
+                const todayVal = history[history.length - 1].volume;
+                const yestVal = history[history.length - 2].volume;
+                if (todayVal !== null && yestVal !== null && yestVal !== 0) {
+                    const ratio = (todayVal / yestVal).toFixed(1);
+                    ratioHtml = `<span style="color:#6366f1; font-weight:600;">今/昨比 ${ratio}</span>`;
+                }
+            }
+
             return `
                 <div style="padding: 6px 8px 8px; background: #f8fafc;">
-                    <div style="font-size:10px; color:#94a3b8; margin-bottom:2px;">竞价量(万) 近5日</div>
+                    <div style="font-size:10px; color:#94a3b8; margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;">
+                        <span>竞价量(万) 近5日</span>${ratioHtml}
+                    </div>
                     ${volumeSvg}
                     <div style="font-size:10px; color:#94a3b8; margin: 4px 0 2px;">昨日成交量(万) 近5日</div>
                     ${yestSvg}
