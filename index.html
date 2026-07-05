@@ -2570,18 +2570,23 @@
 
         .auction-topic-expand-row {
             display: flex;
-            justify-content: flex-end;
-            padding: 2px 10px 0;
+            justify-content: center;
+            align-items: center;
+            padding: 9px 0;
             cursor: pointer;
         }
 
         .auction-topic-expand-arrow {
-            font-size: 11px;
+            font-size: 12px;
             color: #9333ea;
-            opacity: 0.6;
+            background: rgba(147, 51, 234, 0.12);
             transition: transform 0.2s;
-            display: inline-block;
-            padding: 4px 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
         }
 
         .auction-topic-expand-arrow.expanded {
