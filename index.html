@@ -12607,9 +12607,7 @@
                 // 与"按数据排序"互斥，打开这个就关闭另一个
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
                 if (sortToggle) sortToggle.checked = false;
-                // 联动打开"全部展开"，方便核对排序结果
-                const expandToggle = document.getElementById('auctionExpandAllToggle');
-                if (expandToggle) expandToggle.checked = true;
+                // 注意：不再联动打开"全部展开"，需用户手动开启
             }
             renderAuction();
         }
