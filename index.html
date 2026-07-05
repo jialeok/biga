@@ -12647,7 +12647,8 @@
                 const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
                 if (prevVolume === null || prevVolume === 0) return;
                 const ratio = todayVolume / prevVolume;
-                if (ratio >= 1.5) {
+                const roundedRatio = Math.round(ratio * 10) / 10; // 四舍五入到一位小数，与表格显示的"今/昨比"保持一致
+                if (roundedRatio >= 1.5) {
                     stockNames.add(item.stock.trim());
                 }
             });
