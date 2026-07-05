@@ -5692,6 +5692,13 @@
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">环比排序</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByRatioToggle2" onchange="onAuctionSortByRatioToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
                         </div>
                         <div class="auction-highratio-stat" id="auctionHighRatioStat2">
                             竞放量数：<span id="auctionHighRatioCount2" style="font-weight:700;">-</span><span id="auctionHighRatioArrow2" style="font-weight:700;"></span>
@@ -9402,10 +9409,12 @@
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
                 const ratioToggle = document.getElementById('auctionSortByRatioToggle');
                 const expandToggle2 = document.getElementById('auctionExpandAllToggle2');
+                const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
                 if (expandToggle) expandToggle.checked = false;
                 if (sortToggle) sortToggle.checked = false;
                 if (ratioToggle) ratioToggle.checked = false;
                 if (expandToggle2) expandToggle2.checked = false;
+                if (ratioToggle2) ratioToggle2.checked = false;
             }
             _lastAuctionRenderDate = currentDate;
 
@@ -9785,6 +9794,11 @@
                     let lastTapTime = 0;
                     
                     const startHandler = function(e) {
+                        // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
+                        if (e.touches && e.touches.length > 1) {
+                            clearTimeout(pressTimer);
+                            return;
+                        }
                         isLongPress = false;
                         isMoved = false;
                         pressTimer = setTimeout(() => {
@@ -9881,6 +9895,11 @@
                     });
                     
                     const startHandler = function(e) {
+                        // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
+                        if (e.touches && e.touches.length > 1) {
+                            clearTimeout(pressTimer);
+                            return;
+                        }
                         isMoved = false;
                         isLongPress = false;
                         pressTimer = setTimeout(() => {
@@ -10352,6 +10371,8 @@
 
             // 计算竞放量达标股票集合（今日竞价量/昨日竞价量四舍五入后 >= 1.5），复用第一页逻辑
             const highRatioInfo2 = getHighRatioStocksForDate(currentDate);
+            // 是否开启"环比排序"（分组内部按 今日竞价量/昨日竞价量 从高到低排列）
+            const sortByRatioEnabled2 = document.getElementById('auctionSortByRatioToggle2')?.checked;
 
             // 统计每只股票出现在多少个题材中（排除"其它"）
             const stockTopicCount = {};
@@ -10481,7 +10502,32 @@
                         </div>
                 `;
                 
-                group.stocks.forEach(stock => {
+                // 若开启"环比排序"，题材分组顺序不变，仅对分组内部个股按 今日竞价量/昨日竞价量 从高到低排列
+                // 昨日无记录/竞价量为0/断点的股票排在本分组最后（沿用与第一页一致的判定口径）
+                let stocksToRender = group.stocks;
+                if (sortByRatioEnabled2) {
+                    const prevAuctionListForSort = prevAuctionList;
+                    stocksToRender = group.stocks.slice().sort((a, b) => {
+                        const getRatio = (s) => {
+                            if (!s.stock) return null;
+                            const todayItem = auctionList.find(item => item.stock && item.stock.trim() === s.stock.trim());
+                            const todayVolume = todayItem && todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
+                            if (todayVolume === null || todayVolume === 0) return null;
+                            const prevItem = prevAuctionListForSort.find(p => p.stock && p.stock.trim() === s.stock.trim());
+                            const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                            if (prevVolume === null || prevVolume === 0) return null;
+                            return todayVolume / prevVolume;
+                        };
+                        const ratioA = getRatio(a);
+                        const ratioB = getRatio(b);
+                        if (ratioA === null && ratioB === null) return 0;
+                        if (ratioA === null) return 1;
+                        if (ratioB === null) return -1;
+                        return ratioB - ratioA;
+                    });
+                }
+                
+                stocksToRender.forEach(stock => {
                     let ratioClass = 'auction-topic-ratio';
                     if (stock.ratioValue >= 10) {
                         ratioClass = 'auction-topic-ratio highlight';
@@ -12126,6 +12172,11 @@
                 el.style.webkitTouchCallout = 'none';
                 
                 const startHandler = function(e) {
+                    // 多指触摸（如三指下滑截图手势）不触发长按编辑，直接跳过
+                    if (e.touches && e.touches.length > 1) {
+                        clearTimeout(pressTimer);
+                        return;
+                    }
                     isMoved = false;
                     pressTimer = setTimeout(() => {
                         const stockName = el.dataset.stock;
@@ -12143,6 +12194,12 @@
                 const endHandler = function(e) {
                     clearTimeout(pressTimer);
                 };
+
+                // 触摸被系统手势（如截图、来电）中断时，浏览器会触发 touchcancel 而非 touchend，
+                // 必须监听并清除计时器，否则会在手势结束后误判为"长按"从而弹出编辑框
+                const cancelHandler = function(e) {
+                    clearTimeout(pressTimer);
+                };
                 
                 el.addEventListener('mousedown', startHandler);
                 el.addEventListener('mouseup', endHandler);
@@ -12150,6 +12207,7 @@
                 el.addEventListener('touchstart', startHandler, { passive: true });
                 el.addEventListener('touchmove', moveHandler, { passive: true });
                 el.addEventListener('touchend', endHandler);
+                el.addEventListener('touchcancel', cancelHandler);
                 el.addEventListener('contextmenu', function(e) {
                     e.preventDefault();
                 });
@@ -12672,8 +12730,9 @@
         }
 
         // 展开第二页所有允许展开的行（排除"其它"和"并购重组"分组），同一股票只在第一次出现时真正渲染，避免重复占用空间
+        // 展开第二页所有允许展开的行（排除"其它"和"并购重组"分组）
+        // 每个题材分组内部的所有个股都独立展开，即使同一只股票在多个分组下会重复展开好几次（用户明确需要按题材分组做完整对比）
         function expandAllAuctionTrendPanelsP2() {
-            const renderedStocks = new Set();
             document.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
                 const stockName = (rowEl.dataset.stock || '').trim();
                 const rowKey = rowEl.dataset.rowkey;
@@ -12682,17 +12741,9 @@
                 const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
                 if (!panel) return;
 
-                if (renderedStocks.has(stockName)) {
-                    // 同一股票已经在别处展开过趋势图，这里不重复渲染，保持收起状态
-                    panel.style.display = 'none';
-                    panel.innerHTML = '';
-                    return;
-                }
-
                 const history = getAuctionStockHistory(stockName, currentDate, 5);
                 panel.innerHTML = renderAuctionTrendHtml(history);
                 panel.style.display = 'block';
-                renderedStocks.add(stockName);
             });
         }
 
@@ -12712,6 +12763,11 @@
             } else {
                 collapseAllAuctionTrendPanelsP2();
             }
+        }
+
+        // 第二页"环比排序"开关变化时的处理（分组顺序不变，仅重排分组内部个股）
+        function onAuctionSortByRatioToggle2Change() {
+            renderAuctionPage2();
         }
 
         // "全部展开"开关变化时的处理
