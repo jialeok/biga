@@ -1890,6 +1890,76 @@
             overscroll-behavior: contain;
         }
 
+        .auction-toolbar {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 22px;
+            padding: 8px 15px;
+            background: #f8f7ff;
+            border-bottom: 1px solid #ede9fe;
+        }
+
+        .auction-toggle-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .auction-toggle-label {
+            font-size: 11.5px;
+            color: #6d28d9;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .auction-toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 34px;
+            height: 19px;
+            flex-shrink: 0;
+        }
+
+        .auction-toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .auction-toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #cbd5e1;
+            transition: 0.2s;
+            border-radius: 19px;
+        }
+
+        .auction-toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 15px;
+            width: 15px;
+            left: 2px;
+            bottom: 2px;
+            background-color: #ffffff;
+            transition: 0.2s;
+            border-radius: 50%;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+        }
+
+        .auction-toggle-switch input:checked + .auction-toggle-slider {
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+        }
+
+        .auction-toggle-switch input:checked + .auction-toggle-slider:before {
+            transform: translateX(15px);
+        }
+
         #auctionContent3 {
             max-height: none;
             overflow-y: visible;
@@ -5560,6 +5630,22 @@
             <div class="auction-swipe-container" id="auctionSwipeContainer">
                 <div class="auction-swipe-wrapper" id="auctionSwipeWrapper">
                     <div class="auction-page auction-page-1 active" id="auctionPage1">
+                        <div class="auction-toolbar" id="auctionToolbar">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionExpandAllToggle" onchange="onAuctionExpandAllToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">按数据排序</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByDataToggle" onchange="onAuctionSortByDataToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
                         <div class="auction-content" id="auctionContent" ondblclick="event.stopPropagation();openAuctionEdit()">
                         </div>
                     </div>
@@ -9260,7 +9346,19 @@
         }
 
         // 渲染早盘竞价看板
+        // 记录上一次渲染早盘竞价看板时的日期，用于判断"是否切换了日期"从而重置展开/排序开关
+        let _lastAuctionRenderDate = null;
+
         function renderAuction() {
+            // 日期发生变化时，"全部展开"和"按数据排序"两个开关重置为默认关闭状态（不记忆）
+            if (_lastAuctionRenderDate !== null && _lastAuctionRenderDate !== currentDate) {
+                const expandToggle = document.getElementById('auctionExpandAllToggle');
+                const sortToggle = document.getElementById('auctionSortByDataToggle');
+                if (expandToggle) expandToggle.checked = false;
+                if (sortToggle) sortToggle.checked = false;
+            }
+            _lastAuctionRenderDate = currentDate;
+
             const auctionList = getTodayAuction();
             
             // 实时检查股票列表中的标签，自动标记颜色并锁定
@@ -9444,7 +9542,25 @@
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
             }
             
-            auctionList.forEach((item, index) => {
+            // 构建渲染顺序：默认按原始顺序；若开启"按数据排序"，则按近5日有效数据天数从多到少排列
+            // 注意：无论如何排序，每行显示的"序号"始终是该股票的原始序号（不重新编号）
+            let renderOrder = auctionList.map((item, idx) => idx);
+            const sortByDataEnabled = document.getElementById('auctionSortByDataToggle')?.checked;
+            if (sortByDataEnabled) {
+                const dataCountCache = renderOrder.map(idx => {
+                    const it = auctionList[idx];
+                    if (!it || !it.stock) return 0;
+                    const history = getAuctionStockHistory(it.stock.trim(), currentDate, 5);
+                    return history.filter(h => h.volume !== null || h.yestVolume !== null).length;
+                });
+                renderOrder = renderOrder
+                    .map((idx, pos) => ({ idx, count: dataCountCache[pos] }))
+                    .sort((a, b) => b.count - a.count)
+                    .map(x => x.idx);
+            }
+
+            renderOrder.forEach((index) => {
+                const item = auctionList[index];
                 const volume = parseFloat(item.volume) || 0;
                 const yestVolume = parseFloat(item.yestVolume) || 0;
                 let ratio = '-';
@@ -9619,6 +9735,11 @@
                     toggleAuctionTrendPanel(idx);
                 });
             });
+            
+            // 若"全部展开"开关已打开，渲染完成后自动展开所有趋势面板
+            if (document.getElementById('auctionExpandAllToggle')?.checked) {
+                expandAllAuctionTrendPanels();
+            }
             
             // 绑定股票名称点击弹出注释 + 长按显示买入提示 + 单击跳转到第二页
             document.querySelectorAll('.auction-stock-name').forEach(el => {
@@ -12338,6 +12459,57 @@
         }
         
         // 切换行选中状态
+        // 展开某一行的趋势面板（供"全部展开"复用，不做toggle判断，直接展开）
+        function expandAuctionTrendPanel(index) {
+            const panel = document.getElementById('auctionTrendPanel-' + index);
+            if (!panel) return;
+            const auctionList = getTodayAuction();
+            const item = auctionList[index];
+            if (!item || !item.stock) return;
+            const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5);
+            panel.innerHTML = renderAuctionTrendHtml(history);
+            panel.style.display = 'block';
+        }
+
+        // 展开当前列表所有行的趋势面板
+        function expandAllAuctionTrendPanels() {
+            const auctionList = getTodayAuction();
+            auctionList.forEach((item, idx) => {
+                expandAuctionTrendPanel(idx);
+            });
+        }
+
+        // 收起当前列表所有行的趋势面板
+        function collapseAllAuctionTrendPanels() {
+            document.querySelectorAll('.auction-trend-panel').forEach(panel => {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+            });
+        }
+
+        // "全部展开"开关变化时的处理
+        function onAuctionExpandAllToggleChange() {
+            const checked = document.getElementById('auctionExpandAllToggle').checked;
+            if (checked) {
+                expandAllAuctionTrendPanels();
+            } else {
+                collapseAllAuctionTrendPanels();
+                // 关闭"全部展开"时，若"按数据排序"仍开启，保持排序但不强制展开
+            }
+        }
+
+        // "按数据排序"开关变化时的处理
+        function onAuctionSortByDataToggleChange() {
+            const sortChecked = document.getElementById('auctionSortByDataToggle').checked;
+            if (sortChecked) {
+                // 联动打开"全部展开"，方便核对排序结果
+                const expandToggle = document.getElementById('auctionExpandAllToggle');
+                if (expandToggle) expandToggle.checked = true;
+            }
+            // 重新渲染以应用新的排序顺序（renderAuction 内部会读取两个开关的最新状态）
+            renderAuction();
+        }
+
         // 展开/收起某只股票的5日竞价量+昨日成交量趋势图
         function toggleAuctionTrendPanel(index) {
             const panel = document.getElementById('auctionTrendPanel-' + index);
@@ -12350,13 +12522,7 @@
                 return;
             }
 
-            const auctionList = getTodayAuction();
-            const item = auctionList[index];
-            if (!item || !item.stock) return;
-
-            const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5);
-            panel.innerHTML = renderAuctionTrendHtml(history);
-            panel.style.display = 'block';
+            expandAuctionTrendPanel(index);
         }
 
         // 获取某只股票最近N个交易日（含当天）的竞价量/昨日成交量历史
