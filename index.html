@@ -2348,6 +2348,24 @@
             background: #e5e7eb;
         }
 
+        /* 竞放量达标行（今日竞价量/昨日竞价量 >= 1.5）：极浅护眼色背景，优先覆盖其他状态色，且不改变文字颜色 */
+        .auction-item.high-ratio {
+            background: #fffbeb;
+        }
+
+        .auction-item.high-ratio:hover {
+            background: #fef3c7;
+        }
+
+        .auction-highratio-stat {
+            text-align: center;
+            font-size: 11.5px;
+            color: #92400e;
+            background: #fffbeb;
+            padding: 5px 10px;
+            border-bottom: 1px solid #ede9fe;
+        }
+
         .auction-ratio-clickable {
             cursor: pointer;
         }
@@ -5653,6 +5671,9 @@
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="auctionHighRatioStat">
+                            竞放量数：<span id="auctionHighRatioCount" style="font-weight:700;">-</span><span id="auctionHighRatioArrow" style="font-weight:700;"></span>
                         </div>
                         <div class="auction-content" id="auctionContent" ondblclick="event.stopPropagation();openAuctionEdit()">
                         </div>
@@ -9551,6 +9572,32 @@
                 if (strengthValueEl) strengthValueEl.textContent = '-';
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
             }
+
+            // 计算"竞放量数"（今日竞价量/昨日竞价量 >= 1.5 的股票数量）及与昨天的对比箭头
+            const highRatioToday = getHighRatioStocksForDate(currentDate);
+            const highRatioCountEl = document.getElementById('auctionHighRatioCount');
+            const highRatioArrowEl = document.getElementById('auctionHighRatioArrow');
+            if (highRatioCountEl) {
+                highRatioCountEl.textContent = highRatioToday.count;
+            }
+            if (highRatioArrowEl) {
+                const prevDateForRatio = getPreviousTradingDay(currentDate);
+                if (prevDateForRatio) {
+                    const highRatioYesterday = getHighRatioStocksForDate(prevDateForRatio);
+                    if (highRatioToday.count > highRatioYesterday.count) {
+                        highRatioArrowEl.textContent = ' ⬆';
+                        highRatioArrowEl.style.color = '#dc2626';
+                    } else if (highRatioToday.count < highRatioYesterday.count) {
+                        highRatioArrowEl.textContent = ' ⬇';
+                        highRatioArrowEl.style.color = '#16a34a';
+                    } else {
+                        highRatioArrowEl.textContent = ' -';
+                        highRatioArrowEl.style.color = '#92400e';
+                    }
+                } else {
+                    highRatioArrowEl.textContent = '';
+                }
+            }
             
             // 构建渲染顺序：默认按原始顺序；
             // 若开启"按数据排序"，按近5日有效数据天数从多到少排列；
@@ -9643,6 +9690,10 @@
                     itemClass = 'auction-item selected'; // 持有状态（固定）显示浅紫色
                 } else if (isSelected && !isFixed) {
                     itemClass = 'auction-item manual-selected'; // 手动选中显示浅橙色
+                }
+                // 竞放量达标（今日竞价量/昨日竞价量 >= 1.5）：新背景色优先覆盖以上任何状态色
+                if (item.stock && highRatioToday.stockNames.has(item.stock.trim())) {
+                    itemClass += ' high-ratio';
                 }
                 let ratioClass = 'auction-ratio auction-ratio-clickable';
                 if (isHighlight) {
@@ -12580,6 +12631,31 @@
 
         // 获取某只股票最近N个交易日（含当天）的竞价量/昨日成交量历史
         // 返回按时间正序排列的数组：[{date, volume, yestVolume}, ...]，没有记录的天 volume/yestVolume 为 null
+        // 计算指定日期的"竞放量"股票（今日竞价量/昨日竞价量 >= 1.5）
+        // 返回 { count, stockNames: Set }：数量，以及达标股票名称集合（用于行高亮）
+        // 昨天断点/无记录/竞价量为0的股票不计入分子分母，也不算达标
+        function getHighRatioStocksForDate(dateStr) {
+            const auctionData = getAuctionData();
+            const todayList = auctionData[dateStr] || [];
+            const prevDate = getPreviousTradingDay(dateStr);
+            const prevList = prevDate ? (auctionData[prevDate] || []) : [];
+
+            const stockNames = new Set();
+            todayList.forEach(item => {
+                if (!item || !item.stock) return;
+                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
+                if (todayVolume === null || todayVolume === 0) return;
+                const prevItem = prevList.find(p => p.stock && p.stock.trim() === item.stock.trim());
+                const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                if (prevVolume === null || prevVolume === 0) return;
+                const ratio = todayVolume / prevVolume;
+                if (ratio >= 1.5) {
+                    stockNames.add(item.stock.trim());
+                }
+            });
+            return { count: stockNames.size, stockNames };
+        }
+
         function getAuctionStockHistory(stockName, endDate, count) {
             const auctionData = getAuctionData();
             const days = [];
