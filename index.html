@@ -2568,16 +2568,20 @@
             margin-left: auto;
         }
 
-        .auction-topic-header-expandable {
+        .auction-topic-expand-row {
+            display: flex;
+            justify-content: flex-end;
+            padding: 2px 10px 0;
             cursor: pointer;
         }
 
         .auction-topic-expand-arrow {
-            font-size: 10px;
+            font-size: 11px;
             color: #9333ea;
-            margin-left: 6px;
+            opacity: 0.6;
             transition: transform 0.2s;
             display: inline-block;
+            padding: 4px 6px;
         }
 
         .auction-topic-expand-arrow.expanded {
@@ -10510,19 +10514,18 @@
                 
                 // 判断该题材是否允许展开（排除"其它"和"并购重组"）
                 const topicAllowsGroupExpand = group.topic !== '其它' && group.topic !== '并购重组';
-                const groupExpandArrow = topicAllowsGroupExpand
-                    ? `<span class="auction-topic-expand-arrow" data-topic="${group.topic}">▼</span>`
+                const groupExpandRow = topicAllowsGroupExpand
+                    ? `<div class="auction-topic-expand-row" data-topic="${group.topic}"><span class="auction-topic-expand-arrow">▼</span></div>`
                     : '';
-                const headerExtraClass = topicAllowsGroupExpand ? ' auction-topic-header-expandable' : '';
                 
                 html += `
                     <div class="auction-topic-group" data-topic-group="${group.topic}">
-                        <div class="auction-topic-header${headerExtraClass}" data-topic="${group.topic}">
+                        ${groupExpandRow}
+                        <div class="auction-topic-header" data-topic="${group.topic}">
                             <span class="auction-topic-left">【${group.topic}】${rankAppearText}</span>
                             <span class="auction-topic-stars">${starText}</span>
                             <span class="auction-topic-strength">${strengthText}</span>
                             <span class="auction-topic-count">${group.stocks.length}只</span>
-                            ${groupExpandArrow}
                         </div>
                 `;
                 
@@ -12562,16 +12565,21 @@
                     }
                 }
                 
-                // 第二页题材标题点击事件委托
+                // 第二页"展开/收起本题材趋势图"独立行的点击事件委托（与标题栏跳转逻辑完全分离，不受第三页跳转场景影响）
+                const expandRow = e.target.closest('.auction-topic-expand-row');
+                if (expandRow) {
+                    const expandTopic = expandRow.dataset.topic;
+                    if (expandTopic) {
+                        toggleTopicGroupTrendPanels(expandTopic);
+                    }
+                }
+                
+                // 第二页题材标题点击事件委托（仅在"从第三页跳转过来"场景下用于跳回第三页）
                 const header = e.target.closest('.auction-topic-header');
                 if (header) {
                     const topic = header.dataset.topic;
                     if (topic && lastJumpFromPage3) {
-                        // 从第三页跳转过来的场景：点标题栏跳回第三页（原有功能保持不变）
                         jumpFromPage2ToPage3(topic);
-                    } else if (topic && header.classList.contains('auction-topic-header-expandable')) {
-                        // 正常浏览场景：点标题栏单独展开/收起这个题材分组的趋势图，与"全部展开"总开关互不影响
-                        toggleTopicGroupTrendPanels(topic);
                     }
                 }
             });
