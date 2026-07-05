@@ -2568,6 +2568,22 @@
             margin-left: auto;
         }
 
+        .auction-topic-header-expandable {
+            cursor: pointer;
+        }
+
+        .auction-topic-expand-arrow {
+            font-size: 10px;
+            color: #9333ea;
+            margin-left: 6px;
+            transition: transform 0.2s;
+            display: inline-block;
+        }
+
+        .auction-topic-expand-arrow.expanded {
+            transform: rotate(180deg);
+        }
+
         .auction-topic-history-group {
             margin-bottom: 0;
             border-bottom: 1px solid #e2e8f0;
@@ -10492,13 +10508,21 @@
                     strengthText = ` 强度<span style="color:#ef4444;">${group.strength}%</span>`;
                 }
                 
+                // 判断该题材是否允许展开（排除"其它"和"并购重组"）
+                const topicAllowsGroupExpand = group.topic !== '其它' && group.topic !== '并购重组';
+                const groupExpandArrow = topicAllowsGroupExpand
+                    ? `<span class="auction-topic-expand-arrow" data-topic="${group.topic}">▼</span>`
+                    : '';
+                const headerExtraClass = topicAllowsGroupExpand ? ' auction-topic-header-expandable' : '';
+                
                 html += `
-                    <div class="auction-topic-group">
-                        <div class="auction-topic-header" data-topic="${group.topic}">
+                    <div class="auction-topic-group" data-topic-group="${group.topic}">
+                        <div class="auction-topic-header${headerExtraClass}" data-topic="${group.topic}">
                             <span class="auction-topic-left">【${group.topic}】${rankAppearText}</span>
                             <span class="auction-topic-stars">${starText}</span>
                             <span class="auction-topic-strength">${strengthText}</span>
                             <span class="auction-topic-count">${group.stocks.length}只</span>
+                            ${groupExpandArrow}
                         </div>
                 `;
                 
@@ -12543,7 +12567,11 @@
                 if (header) {
                     const topic = header.dataset.topic;
                     if (topic && lastJumpFromPage3) {
+                        // 从第三页跳转过来的场景：点标题栏跳回第三页（原有功能保持不变）
                         jumpFromPage2ToPage3(topic);
+                    } else if (topic && header.classList.contains('auction-topic-header-expandable')) {
+                        // 正常浏览场景：点标题栏单独展开/收起这个题材分组的趋势图，与"全部展开"总开关互不影响
+                        toggleTopicGroupTrendPanels(topic);
                     }
                 }
             });
@@ -12745,6 +12773,10 @@
                 panel.innerHTML = renderAuctionTrendHtml(history);
                 panel.style.display = 'block';
             });
+            // 同步所有题材标题栏的箭头方向为"展开"
+            document.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
+                arrowEl.classList.add('expanded');
+            });
         }
 
         // 收起第二页所有趋势面板
@@ -12753,6 +12785,56 @@
                 panel.style.display = 'none';
                 panel.innerHTML = '';
             });
+            // 同步所有题材标题栏的箭头方向为"收起"
+            document.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
+                arrowEl.classList.remove('expanded');
+            });
+        }
+
+        // 单独展开/收起某一个题材分组下所有个股的趋势图，与"全部展开"总开关互不影响
+        function toggleTopicGroupTrendPanels(topic) {
+            const groupEl = document.querySelector(`.auction-topic-group[data-topic-group="${CSS.escape(topic)}"]`);
+            if (!groupEl) return;
+
+            const rows = groupEl.querySelectorAll('.auction-trend-trigger-p2');
+            if (rows.length === 0) return;
+
+            // 判断当前分组状态：只要组内有任意一行已展开，就视为"已展开"，这次操作统一收起；否则统一展开
+            let anyExpanded = false;
+            rows.forEach(rowEl => {
+                const rowKey = rowEl.dataset.rowkey;
+                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                if (panel && panel.style.display !== 'none' && panel.innerHTML.trim() !== '') {
+                    anyExpanded = true;
+                }
+            });
+
+            rows.forEach(rowEl => {
+                const stockName = (rowEl.dataset.stock || '').trim();
+                const rowKey = rowEl.dataset.rowkey;
+                if (!stockName || !rowKey) return;
+                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                if (!panel) return;
+
+                if (anyExpanded) {
+                    panel.style.display = 'none';
+                    panel.innerHTML = '';
+                } else {
+                    const history = getAuctionStockHistory(stockName, currentDate, 5);
+                    panel.innerHTML = renderAuctionTrendHtml(history);
+                    panel.style.display = 'block';
+                }
+            });
+
+            // 更新箭头方向：展开状态朝上（180度），收起状态朝下（默认）
+            const arrowEl = groupEl.querySelector('.auction-topic-expand-arrow');
+            if (arrowEl) {
+                if (anyExpanded) {
+                    arrowEl.classList.remove('expanded');
+                } else {
+                    arrowEl.classList.add('expanded');
+                }
+            }
         }
 
         // 第二页"全部展开"开关变化时的处理
