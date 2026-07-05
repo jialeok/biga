@@ -2828,6 +2828,11 @@
             background: #f3e8ff;
         }
 
+        /* 竞放量达标行（今日竞价量/昨日竞价量四舍五入后 >= 1.5）：极浅护眼色背景，优先覆盖其他状态色 */
+        .auction-topic-row.high-ratio {
+            background: #fffbeb;
+        }
+
         .auction-topic-stock {
             flex: 0 0 75px;
             font-size: 13px;
@@ -5679,6 +5684,18 @@
                         </div>
                     </div>
                     <div class="auction-page auction-page-2" id="auctionPage2">
+                        <div class="auction-toolbar" id="auctionToolbar2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionExpandAllToggle2" onchange="onAuctionExpandAllToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="auctionHighRatioStat2">
+                            竞放量数：<span id="auctionHighRatioCount2" style="font-weight:700;">-</span><span id="auctionHighRatioArrow2" style="font-weight:700;"></span>
+                        </div>
                         <div class="auction-content" id="auctionContent2" ondblclick="event.stopPropagation();openCoreTopicModal()">
                         </div>
                     </div>
@@ -9384,9 +9401,11 @@
                 const expandToggle = document.getElementById('auctionExpandAllToggle');
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
                 const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                const expandToggle2 = document.getElementById('auctionExpandAllToggle2');
                 if (expandToggle) expandToggle.checked = false;
                 if (sortToggle) sortToggle.checked = false;
                 if (ratioToggle) ratioToggle.checked = false;
+                if (expandToggle2) expandToggle2.checked = false;
             }
             _lastAuctionRenderDate = currentDate;
 
@@ -10331,6 +10350,9 @@
             const auctionData = getAuctionData();
             const prevAuctionList = prevDate ? (auctionData[prevDate] || []) : [];
 
+            // 计算竞放量达标股票集合（今日竞价量/昨日竞价量四舍五入后 >= 1.5），复用第一页逻辑
+            const highRatioInfo2 = getHighRatioStocksForDate(currentDate);
+
             // 统计每只股票出现在多少个题材中（排除"其它"）
             const stockTopicCount = {};
             groups.forEach(group => {
@@ -10426,6 +10448,7 @@
                     </div>
             `;
 
+            let page2RowSeq = 0;
             sortedGroups.forEach(group => {
                 // 统计本周该题材在昨日最大成交额看板中出现的次数
                 let rankAppearCount = 0;
@@ -10527,15 +10550,27 @@
                             rowClass = 'auction-topic-row selected';
                         }
                     }
+                    // 竞放量达标：新背景色优先覆盖以上任何状态色（同一股票每次出现都高光）
+                    if (stock.stock && highRatioInfo2.stockNames.has(stock.stock.trim())) {
+                        rowClass += ' high-ratio';
+                    }
+
+                    // 是否允许展开趋势图：排除"其它"和"并购重组"这两个分组
+                    const topicAllowsExpand = group.topic !== '其它' && group.topic !== '并购重组';
+                    const rowKey = 'p2-' + group.topic + '-' + page2RowSeq++;
+                    const trendTriggerClass = topicAllowsExpand ? 'auction-trend-trigger-p2' : '';
                     
                     html += `
-                        <div class="${rowClass}">
+                        <div class="${rowClass} ${trendTriggerClass}" data-stock="${stock.stock || ''}" data-rowkey="${rowKey}">
                             <div class="auction-topic-stock auction-topic-no-select" style="${stockStyle}">${stock.stock || '-'}</div>
                             <div class="${changeClass} auction-topic-no-select">${changeValue}</div>
                             <div class="auction-topic-name auction-topic-editable auction-topic-no-select" data-stock="${stock.stock}" style="${topicNameStyle}">${topicsDisplay}</div>
                             <div class="${ratioClass} auction-topic-no-select">${stock.ratio}${ratioArrow}</div>
                         </div>
                     `;
+                    if (topicAllowsExpand) {
+                        html += `<div class="auction-trend-panel" id="auctionTrendPanelP2-${rowKey}" data-stock="${stock.stock || ''}" style="display:none;"></div>`;
+                    }
                 });
                 
                 html += `</div>`;
@@ -10546,6 +10581,49 @@
             auctionContent2.innerHTML = html;
             
             bindAuctionTopicEdit();
+
+            // 绑定第二页"点击行展开/收起趋势图"事件
+            document.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
+                rowEl.style.cursor = 'pointer';
+                rowEl.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const stockName = this.dataset.stock;
+                    const rowKey = this.dataset.rowkey;
+                    if (stockName && rowKey) {
+                        toggleAuctionTrendPanelP2(rowKey, stockName);
+                    }
+                });
+            });
+
+            // 若"全部展开"开关已打开，渲染完成后自动展开（切换排序/搜索/重新渲染后维持状态）
+            if (document.getElementById('auctionExpandAllToggle2')?.checked) {
+                expandAllAuctionTrendPanelsP2();
+            }
+
+            // 更新"竞放量数"统计及与昨天的对比箭头（第二页复用第一页同一套计算函数）
+            const highRatioCountEl2 = document.getElementById('auctionHighRatioCount2');
+            const highRatioArrowEl2 = document.getElementById('auctionHighRatioArrow2');
+            if (highRatioCountEl2) {
+                highRatioCountEl2.textContent = highRatioInfo2.count;
+            }
+            if (highRatioArrowEl2) {
+                const prevDateForRatio2 = getPreviousTradingDay(currentDate);
+                if (prevDateForRatio2) {
+                    const highRatioYesterday2 = getHighRatioStocksForDate(prevDateForRatio2);
+                    if (highRatioInfo2.count > highRatioYesterday2.count) {
+                        highRatioArrowEl2.textContent = ' ⬆';
+                        highRatioArrowEl2.style.color = '#dc2626';
+                    } else if (highRatioInfo2.count < highRatioYesterday2.count) {
+                        highRatioArrowEl2.textContent = ' ⬇';
+                        highRatioArrowEl2.style.color = '#16a34a';
+                    } else {
+                        highRatioArrowEl2.textContent = ' -';
+                        highRatioArrowEl2.style.color = '#92400e';
+                    }
+                } else {
+                    highRatioArrowEl2.textContent = '';
+                }
+            }
         }
 
         // 获取第三页题材排序顺序
@@ -12572,6 +12650,68 @@
                 panel.style.display = 'none';
                 panel.innerHTML = '';
             });
+        }
+
+        // ===== 第二页（按题材分组）专用的趋势图展开逻辑 =====
+
+        // 展开/收起第二页某一行的趋势面板（rowKey 用于定位具体行，因为同一股票可能在多个题材下重复出现）
+        function toggleAuctionTrendPanelP2(rowKey, stockName) {
+            const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+            if (!panel) return;
+
+            const isOpen = panel.style.display !== 'none';
+            if (isOpen) {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+                return;
+            }
+
+            const history = getAuctionStockHistory(stockName.trim(), currentDate, 5);
+            panel.innerHTML = renderAuctionTrendHtml(history);
+            panel.style.display = 'block';
+        }
+
+        // 展开第二页所有允许展开的行（排除"其它"和"并购重组"分组），同一股票只在第一次出现时真正渲染，避免重复占用空间
+        function expandAllAuctionTrendPanelsP2() {
+            const renderedStocks = new Set();
+            document.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
+                const stockName = (rowEl.dataset.stock || '').trim();
+                const rowKey = rowEl.dataset.rowkey;
+                if (!stockName || !rowKey) return;
+
+                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                if (!panel) return;
+
+                if (renderedStocks.has(stockName)) {
+                    // 同一股票已经在别处展开过趋势图，这里不重复渲染，保持收起状态
+                    panel.style.display = 'none';
+                    panel.innerHTML = '';
+                    return;
+                }
+
+                const history = getAuctionStockHistory(stockName, currentDate, 5);
+                panel.innerHTML = renderAuctionTrendHtml(history);
+                panel.style.display = 'block';
+                renderedStocks.add(stockName);
+            });
+        }
+
+        // 收起第二页所有趋势面板
+        function collapseAllAuctionTrendPanelsP2() {
+            document.querySelectorAll('[id^="auctionTrendPanelP2-"]').forEach(panel => {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+            });
+        }
+
+        // 第二页"全部展开"开关变化时的处理
+        function onAuctionExpandAllToggle2Change() {
+            const checked = document.getElementById('auctionExpandAllToggle2').checked;
+            if (checked) {
+                expandAllAuctionTrendPanelsP2();
+            } else {
+                collapseAllAuctionTrendPanelsP2();
+            }
         }
 
         // "全部展开"开关变化时的处理
