@@ -1892,10 +1892,11 @@
 
         .auction-toolbar {
             display: flex;
+            flex-wrap: wrap;
             justify-content: center;
             align-items: center;
-            gap: 22px;
-            padding: 8px 15px;
+            gap: 10px 16px;
+            padding: 8px 12px;
             background: #f8f7ff;
             border-bottom: 1px solid #ede9fe;
         }
@@ -1903,11 +1904,11 @@
         .auction-toggle-item {
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 5px;
         }
 
         .auction-toggle-label {
-            font-size: 11.5px;
+            font-size: 11px;
             color: #6d28d9;
             font-weight: 500;
             white-space: nowrap;
@@ -5645,6 +5646,13 @@
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">竞价量环比排序</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByRatioToggle" onchange="onAuctionSortByRatioToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
                         </div>
                         <div class="auction-content" id="auctionContent" ondblclick="event.stopPropagation();openAuctionEdit()">
                         </div>
@@ -9350,12 +9358,14 @@
         let _lastAuctionRenderDate = null;
 
         function renderAuction() {
-            // 日期发生变化时，"全部展开"和"按数据排序"两个开关重置为默认关闭状态（不记忆）
+            // 日期发生变化时，三个开关（全部展开/按数据排序/竞价量环比排序）重置为默认关闭状态（不记忆）
             if (_lastAuctionRenderDate !== null && _lastAuctionRenderDate !== currentDate) {
                 const expandToggle = document.getElementById('auctionExpandAllToggle');
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
+                const ratioToggle = document.getElementById('auctionSortByRatioToggle');
                 if (expandToggle) expandToggle.checked = false;
                 if (sortToggle) sortToggle.checked = false;
+                if (ratioToggle) ratioToggle.checked = false;
             }
             _lastAuctionRenderDate = currentDate;
 
@@ -9542,10 +9552,14 @@
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
             }
             
-            // 构建渲染顺序：默认按原始顺序；若开启"按数据排序"，则按近5日有效数据天数从多到少排列
+            // 构建渲染顺序：默认按原始顺序；
+            // 若开启"按数据排序"，按近5日有效数据天数从多到少排列；
+            // 若开启"竞价量环比排序"，按 今日竞价量/昨日竞价量 从高到低排列（无昨日数据的排最后）
             // 注意：无论如何排序，每行显示的"序号"始终是该股票的原始序号（不重新编号）
             let renderOrder = auctionList.map((item, idx) => idx);
             const sortByDataEnabled = document.getElementById('auctionSortByDataToggle')?.checked;
+            const sortByRatioEnabled = document.getElementById('auctionSortByRatioToggle')?.checked;
+
             if (sortByDataEnabled) {
                 const dataCountCache = renderOrder.map(idx => {
                     const it = auctionList[idx];
@@ -9556,6 +9570,28 @@
                 renderOrder = renderOrder
                     .map((idx, pos) => ({ idx, count: dataCountCache[pos] }))
                     .sort((a, b) => b.count - a.count)
+                    .map(x => x.idx);
+            } else if (sortByRatioEnabled) {
+                const prevDate = getPreviousTradingDay(currentDate);
+                const prevDayList = prevDate ? (getAuctionData()[prevDate] || []) : [];
+                const ratioCache = renderOrder.map(idx => {
+                    const it = auctionList[idx];
+                    const todayVolume = it && it.volume ? parseFloat(it.volume) : 0;
+                    if (!it || !it.stock || !todayVolume) return null; // 今日竞价量本身没有，也视为无法计算
+                    const prevItem = prevDayList.find(p => p.stock && p.stock.trim() === it.stock.trim());
+                    const prevVolume = prevItem && prevItem.volume ? parseFloat(prevItem.volume) : 0;
+                    if (!prevVolume) return null; // 昨日无记录或昨日竞价量为0，视为无法计算
+                    return todayVolume / prevVolume;
+                });
+                renderOrder = renderOrder
+                    .map((idx, pos) => ({ idx, ratio: ratioCache[pos] }))
+                    .sort((a, b) => {
+                        // null（无法计算）永远排在最后；两者都有值则按比值从高到低
+                        if (a.ratio === null && b.ratio === null) return 0;
+                        if (a.ratio === null) return 1;
+                        if (b.ratio === null) return -1;
+                        return b.ratio - a.ratio;
+                    })
                     .map(x => x.idx);
             }
 
@@ -12502,11 +12538,28 @@
         function onAuctionSortByDataToggleChange() {
             const sortChecked = document.getElementById('auctionSortByDataToggle').checked;
             if (sortChecked) {
+                // 与"竞价量环比排序"互斥，打开这个就关闭另一个
+                const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                if (ratioToggle) ratioToggle.checked = false;
                 // 联动打开"全部展开"，方便核对排序结果
                 const expandToggle = document.getElementById('auctionExpandAllToggle');
                 if (expandToggle) expandToggle.checked = true;
             }
-            // 重新渲染以应用新的排序顺序（renderAuction 内部会读取两个开关的最新状态）
+            // 重新渲染以应用新的排序顺序（renderAuction 内部会读取开关的最新状态）
+            renderAuction();
+        }
+
+        // "竞价量环比排序"开关变化时的处理（今日竞价量 / 昨日竞价量，从高到低）
+        function onAuctionSortByRatioToggleChange() {
+            const ratioChecked = document.getElementById('auctionSortByRatioToggle').checked;
+            if (ratioChecked) {
+                // 与"按数据排序"互斥，打开这个就关闭另一个
+                const sortToggle = document.getElementById('auctionSortByDataToggle');
+                if (sortToggle) sortToggle.checked = false;
+                // 联动打开"全部展开"，方便核对排序结果
+                const expandToggle = document.getElementById('auctionExpandAllToggle');
+                if (expandToggle) expandToggle.checked = true;
+            }
             renderAuction();
         }
 
