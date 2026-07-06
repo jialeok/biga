@@ -18205,6 +18205,9 @@
             });
 
             const total = riseCount + fallCount + flatCount;
+            console.log('[最近多板调试] currentDate=', currentDate, '早盘竞价股票数=', auctionList.length,
+                'notes样本=', auctionList.slice(0, 5).map(i => i.note),
+                'rise=', riseCount, 'fall=', fallCount, 'flat=', flatCount, 'total=', total);
             // 没有任何一只股票带涨跌幅数据时，不做统计更新（避免把已有的手动数据清空）
             if (total === 0) return;
 
@@ -18390,10 +18393,23 @@
             const jingtuVal = firstRow.jingtu || '';
             const tushiVal = firstRow.tushi || '';
 
+            // 兼容旧的"跌:涨"单字符串格式，拆成两个独立数字
+            let dieVal = '';
+            let zhangVal = '';
+            if (dieZhangbiVal.includes(':')) {
+                const parts = dieZhangbiVal.split(':');
+                dieVal = (parts[0] || '').trim();
+                zhangVal = (parts[1] || '').trim();
+            }
+
             const html = `
                 <div class="duiban-edit-row" id="duiban-row-0">
-                    <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-0" value="${shuliangVal}" placeholder="总数量">
-                    <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-0" value="${dieZhangbiVal}" placeholder="跌:涨" style="width:90px !important;">
+                    <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-0" value="${shuliangVal}" placeholder="总数量" oninput="onDuibanShuliangInput(this)">
+                    <div style="display:flex;align-items:center;gap:4px;width:90px !important;">
+                        <input type="text" class="form-input duiban-edit-die-input" name="die-0" value="${dieVal}" placeholder="跌" style="width:38px !important;text-align:center;padding-left:4px;padding-right:4px;" oninput="onDuibanDieZhangInput(this, 'die')">
+                        <span style="color:#94a3b8;">:</span>
+                        <input type="text" class="form-input duiban-edit-zhang-input" name="zhang-0" value="${zhangVal}" placeholder="涨" style="width:38px !important;text-align:center;padding-left:4px;padding-right:4px;" oninput="onDuibanDieZhangInput(this, 'zhang')">
+                    </div>
                     <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-0" value="${jingtuVal}" placeholder="竞符合数">
                     <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-0" value="${tushiVal}" placeholder="图示/石墨链接">
                 </div>
@@ -18401,6 +18417,38 @@
 
             formContainer.innerHTML = html;
             document.getElementById('duibanModal').classList.add('active');
+        }
+
+        // 总数量输入时：如果跌/涨其中一个已填，自动算出另一个
+        function onDuibanShuliangInput(shuliangInput) {
+            const row = shuliangInput.closest('.duiban-edit-row');
+            const dieInput = row.querySelector('[name="die-0"]');
+            const zhangInput = row.querySelector('[name="zhang-0"]');
+            const total = parseInt(shuliangInput.value) || 0;
+            if (!total) return;
+            const dieVal = dieInput.value.trim();
+            const zhangVal = zhangInput.value.trim();
+            if (dieVal !== '' && zhangVal === '') {
+                zhangInput.value = Math.max(0, total - (parseInt(dieVal) || 0));
+            } else if (zhangVal !== '' && dieVal === '') {
+                dieInput.value = Math.max(0, total - (parseInt(zhangVal) || 0));
+            }
+        }
+
+        // 跌/涨其中一个输入时：如果总数量已填，自动算出另一个
+        function onDuibanDieZhangInput(input, type) {
+            const row = input.closest('.duiban-edit-row');
+            const shuliangInput = row.querySelector('[name="shuliang-0"]');
+            const dieInput = row.querySelector('[name="die-0"]');
+            const zhangInput = row.querySelector('[name="zhang-0"]');
+            const total = parseInt(shuliangInput.value) || 0;
+            if (!total) return;
+            const value = parseInt(input.value) || 0;
+            if (type === 'die') {
+                zhangInput.value = Math.max(0, total - value);
+            } else {
+                dieInput.value = Math.max(0, total - value);
+            }
         }
 
         // 关闭最近多板编辑
@@ -18411,12 +18459,15 @@
         // 保存最近多板数据（单行布局：只读取第一行输入，旧数据里多余的行原样拼接保留，不丢数据）
         function saveDuiban() {
             const row = document.getElementById('duiban-row-0');
-            const dieZhangbiInput = row ? row.querySelector('[name="dieZhangbi-0"]') : null;
+            const dieInput = row ? row.querySelector('[name="die-0"]') : null;
+            const zhangInput = row ? row.querySelector('[name="zhang-0"]') : null;
             const jingtuInput = row ? row.querySelector('[name="jingtu-0"]') : null;
             const shuliangInput = row ? row.querySelector('[name="shuliang-0"]') : null;
             const tushiInput = row ? row.querySelector('[name="tushi-0"]') : null;
 
-            const dieZhangbi = dieZhangbiInput ? dieZhangbiInput.value.trim() : '';
+            const dieVal = dieInput ? dieInput.value.trim() : '';
+            const zhangVal = zhangInput ? zhangInput.value.trim() : '';
+            const dieZhangbi = (dieVal || zhangVal) ? `${dieVal}:${zhangVal}` : '';
             const jingtu = jingtuInput ? jingtuInput.value.trim() : '';
             const shuliang = shuliangInput ? shuliangInput.value.trim() : '';
             const tushi = tushiInput ? tushiInput.value.trim() : '';
