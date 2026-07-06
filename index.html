@@ -1895,8 +1895,8 @@
             flex-wrap: nowrap;
             justify-content: space-between;
             align-items: center;
-            gap: 6px;
-            padding: 8px 10px;
+            gap: 4px;
+            padding: 8px 8px;
             background: #f8f7ff;
             border-bottom: 1px solid #ede9fe;
         }
@@ -1904,7 +1904,7 @@
         .auction-toggle-item {
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: 3px;
         }
 
         .auction-toggle-label {
@@ -1917,8 +1917,8 @@
         .auction-toggle-switch {
             position: relative;
             display: inline-block;
-            width: 30px;
-            height: 17px;
+            width: 28px;
+            height: 16px;
             flex-shrink: 0;
         }
 
@@ -1937,14 +1937,14 @@
             bottom: 0;
             background-color: #cbd5e1;
             transition: 0.2s;
-            border-radius: 17px;
+            border-radius: 16px;
         }
 
         .auction-toggle-slider:before {
             position: absolute;
             content: "";
-            height: 13px;
-            width: 13px;
+            height: 12px;
+            width: 12px;
             left: 2px;
             bottom: 2px;
             background-color: #ffffff;
@@ -1958,7 +1958,7 @@
         }
 
         .auction-toggle-switch input:checked + .auction-toggle-slider:before {
-            transform: translateX(13px);
+            transform: translateX(12px);
         }
 
         #auctionContent3 {
@@ -5688,16 +5688,23 @@
                                 </label>
                             </div>
                             <div class="auction-toggle-item">
-                                <span class="auction-toggle-label">数据排序</span>
+                                <span class="auction-toggle-label">数据</span>
                                 <label class="auction-toggle-switch">
                                     <input type="checkbox" id="auctionSortByDataToggle" onchange="onAuctionSortByDataToggleChange()">
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
                             <div class="auction-toggle-item">
-                                <span class="auction-toggle-label">环比排序</span>
+                                <span class="auction-toggle-label">环比</span>
                                 <label class="auction-toggle-switch">
                                     <input type="checkbox" id="auctionSortByRatioToggle" onchange="onAuctionSortByRatioToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByParallelToggle" onchange="onAuctionSortByParallelToggleChange()">
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
@@ -5718,9 +5725,16 @@
                                 </label>
                             </div>
                             <div class="auction-toggle-item">
-                                <span class="auction-toggle-label">环比排序</span>
+                                <span class="auction-toggle-label">环比</span>
                                 <label class="auction-toggle-switch">
                                     <input type="checkbox" id="auctionSortByRatioToggle2" onchange="onAuctionSortByRatioToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByParallelToggle2" onchange="onAuctionSortByParallelToggle2Change()">
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
@@ -9433,13 +9447,17 @@
                 const expandToggle = document.getElementById('auctionExpandAllToggle');
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
                 const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                const parallelToggle = document.getElementById('auctionSortByParallelToggle');
                 const expandToggle2 = document.getElementById('auctionExpandAllToggle2');
                 const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
+                const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
                 if (expandToggle) expandToggle.checked = false;
                 if (sortToggle) sortToggle.checked = false;
                 if (ratioToggle) ratioToggle.checked = false;
+                if (parallelToggle) parallelToggle.checked = false;
                 if (expandToggle2) expandToggle2.checked = false;
                 if (ratioToggle2) ratioToggle2.checked = false;
+                if (parallelToggle2) parallelToggle2.checked = false;
             }
             _lastAuctionRenderDate = currentDate;
 
@@ -9653,12 +9671,14 @@
             }
             
             // 构建渲染顺序：默认按原始顺序；
-            // 若开启"按数据排序"，按近5日有效数据天数从多到少排列；
-            // 若开启"竞价量环比排序"，按 今日竞价量/昨日竞价量 从高到低排列（无昨日数据的排最后）
+            // 若开启"数据"，按近5日有效数据天数从多到少排列；
+            // 若开启"环比"，按 今日竞价量/昨日竞价量 从高到低排列（无昨日数据的排最后）；
+            // 若开启"平行"，今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面（不满足的排后面）
             // 注意：无论如何排序，每行显示的"序号"始终是该股票的原始序号（不重新编号）
             let renderOrder = auctionList.map((item, idx) => idx);
             const sortByDataEnabled = document.getElementById('auctionSortByDataToggle')?.checked;
             const sortByRatioEnabled = document.getElementById('auctionSortByRatioToggle')?.checked;
+            const sortByParallelEnabled = document.getElementById('auctionSortByParallelToggle')?.checked;
 
             if (sortByDataEnabled) {
                 const dataCountCache = renderOrder.map(idx => {
@@ -9691,6 +9711,15 @@
                         if (a.ratio === null) return 1;
                         if (b.ratio === null) return -1;
                         return b.ratio - a.ratio;
+                    })
+                    .map(x => x.idx);
+            } else if (sortByParallelEnabled) {
+                const parallelStockNames = getParallelStocksForDate(currentDate);
+                renderOrder = renderOrder
+                    .map(idx => ({ idx, qualifies: auctionList[idx] && auctionList[idx].stock && parallelStockNames.has(auctionList[idx].stock.trim()) }))
+                    .sort((a, b) => {
+                        if (a.qualifies === b.qualifies) return 0;
+                        return a.qualifies ? -1 : 1; // 达标的排前面，其余原相对顺序不变（stable sort）
                     })
                     .map(x => x.idx);
             }
@@ -10396,8 +10425,11 @@
 
             // 计算竞放量达标股票集合（今日竞价量/昨日竞价量四舍五入后 >= 1.5），复用第一页逻辑
             const highRatioInfo2 = getHighRatioStocksForDate(currentDate);
-            // 是否开启"环比排序"（分组内部按 今日竞价量/昨日竞价量 从高到低排列）
+            // 是否开启"环比"（分组内部按 今日竞价量/昨日竞价量 从高到低排列）
             const sortByRatioEnabled2 = document.getElementById('auctionSortByRatioToggle2')?.checked;
+            // 是否开启"平行"（分组内部把 今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面）
+            const sortByParallelEnabled2 = document.getElementById('auctionSortByParallelToggle2')?.checked;
+            const parallelStockNames2 = sortByParallelEnabled2 ? getParallelStocksForDate(currentDate) : null;
 
             // 统计每只股票出现在多少个题材中（排除"其它"）
             const stockTopicCount = {};
@@ -10534,7 +10566,7 @@
                         </div>
                 `;
                 
-                // 若开启"环比排序"，题材分组顺序不变，仅对分组内部个股按 今日竞价量/昨日竞价量 从高到低排列
+                // 若开启"环比"，题材分组顺序不变，仅对分组内部个股按 今日竞价量/昨日竞价量 从高到低排列
                 // 昨日无记录/竞价量为0/断点的股票排在本分组最后（沿用与第一页一致的判定口径）
                 let stocksToRender = group.stocks;
                 if (sortByRatioEnabled2) {
@@ -10556,6 +10588,14 @@
                         if (ratioA === null) return 1;
                         if (ratioB === null) return -1;
                         return ratioB - ratioA;
+                    });
+                } else if (sortByParallelEnabled2 && parallelStockNames2) {
+                    // 若开启"平行"，题材分组顺序不变，仅将分组内 今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的个股排到本分组最前面
+                    stocksToRender = group.stocks.slice().sort((a, b) => {
+                        const qualifiesA = a.stock && parallelStockNames2.has(a.stock.trim());
+                        const qualifiesB = b.stock && parallelStockNames2.has(b.stock.trim());
+                        if (qualifiesA === qualifiesB) return 0;
+                        return qualifiesA ? -1 : 1;
                     });
                 }
                 
@@ -12861,7 +12901,25 @@
         }
 
         // 第二页"环比排序"开关变化时的处理（分组顺序不变，仅重排分组内部个股）
+        // 第二页"环比"开关变化时的处理（分组顺序不变，仅重排分组内部个股）
         function onAuctionSortByRatioToggle2Change() {
+            const ratioChecked = document.getElementById('auctionSortByRatioToggle2').checked;
+            if (ratioChecked) {
+                // 与"平行"互斥，打开这个就关闭另一个
+                const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
+                if (parallelToggle2) parallelToggle2.checked = false;
+            }
+            renderAuctionPage2();
+        }
+
+        // 第二页"平行"开关变化时的处理：今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排到分组最前面
+        function onAuctionSortByParallelToggle2Change() {
+            const parallelChecked = document.getElementById('auctionSortByParallelToggle2').checked;
+            if (parallelChecked) {
+                // 与"环比"互斥，打开这个就关闭另一个
+                const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
+                if (ratioToggle2) ratioToggle2.checked = false;
+            }
             renderAuctionPage2();
         }
 
@@ -12880,9 +12938,11 @@
         function onAuctionSortByDataToggleChange() {
             const sortChecked = document.getElementById('auctionSortByDataToggle').checked;
             if (sortChecked) {
-                // 与"竞价量环比排序"互斥，打开这个就关闭另一个
+                // 与"环比"、"平行"互斥，打开这个就关闭另外两个
                 const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                const parallelToggle = document.getElementById('auctionSortByParallelToggle');
                 if (ratioToggle) ratioToggle.checked = false;
+                if (parallelToggle) parallelToggle.checked = false;
                 // 联动打开"全部展开"，方便核对排序结果
                 const expandToggle = document.getElementById('auctionExpandAllToggle');
                 if (expandToggle) expandToggle.checked = true;
@@ -12891,14 +12951,32 @@
             renderAuction();
         }
 
-        // "竞价量环比排序"开关变化时的处理（今日竞价量 / 昨日竞价量，从高到低）
+        // "环比"开关变化时的处理（今日竞价量 / 昨日竞价量，从高到低）
         function onAuctionSortByRatioToggleChange() {
             const ratioChecked = document.getElementById('auctionSortByRatioToggle').checked;
             if (ratioChecked) {
-                // 与"按数据排序"互斥，打开这个就关闭另一个
+                // 与"数据"、"平行"互斥，打开这个就关闭另外两个
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
+                const parallelToggle = document.getElementById('auctionSortByParallelToggle');
                 if (sortToggle) sortToggle.checked = false;
-                // 注意：不再联动打开"全部展开"，需用户手动开启
+                if (parallelToggle) parallelToggle.checked = false;
+                // 注意：不联动打开"全部展开"，需用户手动开启
+            }
+            renderAuction();
+        }
+
+        // "平行"开关变化时的处理：今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面
+        function onAuctionSortByParallelToggleChange() {
+            const parallelChecked = document.getElementById('auctionSortByParallelToggle').checked;
+            if (parallelChecked) {
+                // 与"数据"、"环比"互斥，打开这个就关闭另外两个
+                const sortToggle = document.getElementById('auctionSortByDataToggle');
+                const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                if (sortToggle) sortToggle.checked = false;
+                if (ratioToggle) ratioToggle.checked = false;
+                // 联动打开"全部展开"，方便核对排序结果
+                const expandToggle = document.getElementById('auctionExpandAllToggle');
+                if (expandToggle) expandToggle.checked = true;
             }
             renderAuction();
         }
@@ -12944,6 +13022,45 @@
                 }
             });
             return { count: stockNames.size, stockNames };
+        }
+
+        // 判断"平行"条件：T日竞价量 > T-1交易日竞价量，且 T-1交易日成交量 > T-2交易日成交量
+        // 两个条件都满足才算达标；任一环节断点/无数据都判定为不满足
+        // 字段说明：某天记录里的"yestVolume"字段，代表的是"该天的前一交易日的总成交量"
+        //   因此"T-1交易日自身的总成交量" = 今日(T)记录里的 yestVolume 字段
+        //        "T-2交易日自身的总成交量" = T-1记录里的 yestVolume 字段
+        // 返回 Set<股票名称>，包含指定日期下所有满足条件的股票
+        function getParallelStocksForDate(dateStr) {
+            const auctionData = getAuctionData();
+            const todayList = auctionData[dateStr] || [];
+            const t1Date = getPreviousTradingDay(dateStr);
+            const t1List = t1Date ? (auctionData[t1Date] || []) : [];
+
+            const stockNames = new Set();
+            todayList.forEach(item => {
+                if (!item || !item.stock) return;
+                const name = item.stock.trim();
+
+                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
+                // T的yestVolume字段 = T-1交易日自身的总成交量
+                const t1OwnVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
+
+                const t1Item = t1List.find(p => p.stock && p.stock.trim() === name);
+                const t1Volume = t1Item && t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
+                // T-1的yestVolume字段 = T-2交易日自身的总成交量
+                const t2OwnVolume = t1Item && t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
+
+                // 条件1：今日竞价量 > T-1交易日竞价量
+                if (todayVolume === null || t1Volume === null) return;
+                if (!(todayVolume > t1Volume)) return;
+
+                // 条件2：T-1交易日成交量 > T-2交易日成交量
+                if (t1OwnVolume === null || t2OwnVolume === null) return;
+                if (!(t1OwnVolume > t2OwnVolume)) return;
+
+                stockNames.add(name);
+            });
+            return stockNames;
         }
 
         function getAuctionStockHistory(stockName, endDate, count) {
