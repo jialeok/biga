@@ -6888,25 +6888,6 @@
                 <span id="auctionImportStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
             </div>
 
-            <!-- 竞价量补录模式：默认关闭，专门用于粘贴"股票名称+竞价量"两列数据（如从第三方AI工具整理出的历史数据），只补齐空缺的竞价量，不覆盖已有值，也不涉及昨日成交量 -->
-            <div id="auctionVolumeOnlyArea" style="margin-bottom: 16px; padding: 10px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px;">
-                <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-size: 13px; color: #166534; font-weight: 600;">竞价量补录模式</span>
-                    <label class="auction-toggle-switch">
-                        <input type="checkbox" id="auctionVolumeOnlyToggle" onchange="onAuctionVolumeOnlyToggleChange()">
-                        <span class="auction-toggle-slider"></span>
-                    </label>
-                </div>
-                <div id="auctionVolumeOnlyBody" style="display: none; margin-top: 8px;">
-                    <div style="font-size: 11px; color: #16a34a; margin-bottom: 6px;">
-                        仅两列：股票名称[TAB]竞价量（支持"258.5万"或"3528"两种写法）。只补齐当前空缺的竞价量，已有数值不会被覆盖，也不会更新昨日成交量。
-                    </div>
-                    <textarea id="auctionVolumeOnlyInput" placeholder="从 AI 工具复制后直接粘贴到这里&#10;格式：股票名称[TAB]竞价量&#10;例：星网锐捷    153.97万&#10;例：恒尚节能    4.06万" style="width: 100%; height: 90px; padding: 8px; font-size: 12px; border: 1px solid #bbf7d0; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
-                    <button type="button" onclick="importAuctionVolumeOnly()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff; border: none; border-radius: 4px; cursor: pointer;">补录竞价量</button>
-                    <span id="auctionVolumeOnlyStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
-                </div>
-            </div>
-
             <!-- 历史数据补录模式：默认关闭，专门用于补录任意历史日期缺失的竞价量/昨日成交量。
                  只匹配"目标日期当天早盘竞价列表里已存在的股票"，只补空缺字段，不覆盖已有值；
                  目标日期列表里不存在的股票一律跳过，绝不新增/删除股票，不改变股票列表结构。 -->
@@ -6920,14 +6901,10 @@
                 </div>
                 <div id="auctionHistoryFillBody" style="display: none; margin-top: 8px;">
                     <div style="font-size: 11px; color: #1e40af; margin-bottom: 8px;">
-                        只补数值，不改变任何日期的股票列表（不新增、不删除股票）。只对"目标日期当天列表里已存在"的股票补齐空缺字段，已有数值不会被覆盖。目标日期列表里不存在的股票会被跳过。
+                        只补空值，不新增/删除股票；三列自动补两项，两列按右侧类型补一项
                     </div>
                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
-                        <span style="font-size: 12px; color: #1e40af;">目标日期：</span>
                         <input type="date" id="auctionHistoryFillDate" style="padding: 4px 6px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px;">
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 8px; flex-wrap: wrap;">
-                        <span style="font-size: 12px; color: #1e40af;">两列数据时，第二列是：</span>
                         <label style="font-size: 12px; color: #374151; display:flex; align-items:center; gap:4px;">
                             <input type="radio" name="auctionHistoryFillColType" value="volume" checked> 竞价量
                         </label>
@@ -6935,12 +6912,7 @@
                             <input type="radio" name="auctionHistoryFillColType" value="yestVolume"> 昨日成交量
                         </label>
                     </div>
-                    <div style="font-size: 11px; color: #1e40af; margin-bottom: 6px;">
-                        支持两种格式：<br>
-                        三列（Tab分隔）：股票名称[TAB]竞价量[TAB]昨日成交量 —— 两个字段一起补<br>
-                        两列（Tab分隔）：股票名称[TAB]数字 —— 按上面选择的类型补对应字段
-                    </div>
-                    <textarea id="auctionHistoryFillInput" placeholder="从 Excel 或 AI 工具复制后直接粘贴到这里&#10;三列例：金科股份    8667.20    519.02&#10;两列例：星网锐捷    153.97万" style="width: 100%; height: 90px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <textarea id="auctionHistoryFillInput" placeholder="三列：股票名称[TAB]竞价量[TAB]昨日成交量&#10;两列：股票名称[TAB]数字（按上方选择类型补录）" style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
                     <button type="button" onclick="importAuctionHistoryFill()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; border: none; border-radius: 4px; cursor: pointer;">补录历史数据</button>
                     <span id="auctionHistoryFillStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
                 </div>
@@ -8711,12 +8683,7 @@
             }
             
             formContainer.innerHTML = html;
-            // 每次打开弹窗时，"竞价量补录"开关重置为默认关闭状态
-            const volumeOnlyToggle = document.getElementById('auctionVolumeOnlyToggle');
-            const volumeOnlyBody = document.getElementById('auctionVolumeOnlyBody');
-            if (volumeOnlyToggle) volumeOnlyToggle.checked = false;
-            if (volumeOnlyBody) volumeOnlyBody.style.display = 'none';
-            // 每次打开弹窗时，"历史数据补录"开关同样重置为默认关闭状态，日期清空（下次开启时自动填当前日历日期）
+            // 每次打开弹窗时，"历史数据补录"开关重置为默认关闭状态，日期清空（下次开启时自动填当前日历日期）
             const historyFillToggle = document.getElementById('auctionHistoryFillToggle');
             const historyFillBody = document.getElementById('auctionHistoryFillBody');
             const historyFillDate = document.getElementById('auctionHistoryFillDate');
@@ -9144,15 +9111,6 @@
             }
         }
 
-        // "竞价量补录"开关变化时的处理：控制专用输入区域的显示/隐藏
-        function onAuctionVolumeOnlyToggleChange() {
-            const checked = document.getElementById('auctionVolumeOnlyToggle').checked;
-            const body = document.getElementById('auctionVolumeOnlyBody');
-            if (body) {
-                body.style.display = checked ? 'block' : 'none';
-            }
-        }
-
         // 解析"258.5万"或"3528"这类竞价量文本，统一返回数字字符串（不做单位换算）
         // 带"万"字：提取"万"字前面的数字；不带"万"字：直接使用这个数字
         function parseVolumeOnlyText(text) {
@@ -9345,123 +9303,6 @@
             }
         }
 
-        // 从"竞价量补录"专用输入框导入两列数据（股票名称 + 竞价量）
-        // 规则：已有股票只在竞价量字段为空时才填入，不覆盖已有数值；不存在的股票新增一条记录；完全不涉及昨日成交量
-        function importAuctionVolumeOnly() {
-            const textarea = document.getElementById('auctionVolumeOnlyInput');
-            const rawText = textarea ? textarea.value : '';
-            const pasteText = rawText.trim();
-            const statusEl = document.getElementById('auctionVolumeOnlyStatus');
-
-            if (!pasteText) {
-                if (statusEl) {
-                    statusEl.textContent = '请先粘贴数据！';
-                    statusEl.style.color = '#dc2626';
-                }
-                textarea && textarea.focus();
-                return;
-            }
-
-            // 备份早盘竞价数据（用于撤回），与现有导入功能共用同一套备份/撤回机制
-            backupAuctionData('import');
-
-            const lines = pasteText.split(/\r?\n/);
-            const auctionData = getAuctionData();
-            const auctionList = [...(auctionData[currentDate] || [])];
-
-            let filledCount = 0;   // 已有股票补齐空缺竞价量的数量
-            let skippedCount = 0;  // 已有股票但竞价量已有值，跳过的数量
-            let newCount = 0;      // 新增股票的数量
-            let invalidCount = 0;  // 无法解析的行数
-
-            lines.forEach((line, index) => {
-                if (!line.trim()) return;
-                if (index === 0 && (line.includes('股票名称') || line.includes('竞价量'))) return;
-
-                const cells = line.split('\t');
-                let stock = '';
-                let volumeText = '';
-                if (cells.length >= 2) {
-                    stock = cells[0] ? cells[0].trim() : '';
-                    volumeText = cells[1] ? cells[1].trim() : '';
-                } else {
-                    // 兼容非Tab分隔（如多个空格）：股票名称 + 竞价量
-                    const spaceMatch = line.trim().match(/^(.+?)\s+([\d.]+\s*万?)$/);
-                    if (spaceMatch) {
-                        stock = spaceMatch[1].trim();
-                        volumeText = spaceMatch[2].trim();
-                    }
-                }
-
-                if (!stock || !volumeText) {
-                    invalidCount++;
-                    return;
-                }
-
-                const parsedVolume = parseVolumeOnlyText(volumeText);
-                if (parsedVolume === null) {
-                    invalidCount++;
-                    return;
-                }
-
-                const existingIndex = auctionList.findIndex(item => item.stock && item.stock.trim() === stock);
-                if (existingIndex >= 0) {
-                    const existingVolume = auctionList[existingIndex].volume;
-                    const isEmpty = existingVolume === '' || existingVolume === null || existingVolume === undefined;
-                    if (isEmpty) {
-                        auctionList[existingIndex] = {
-                            ...auctionList[existingIndex],
-                            volume: parsedVolume
-                        };
-                        filledCount++;
-                    } else {
-                        skippedCount++;
-                    }
-                } else {
-                    const historyTopics = getStockHistoryTopics(stock);
-                    auctionList.push({
-                        stock,
-                        volume: parsedVolume,
-                        yestVolume: '',
-                        note: historyTopics || '',
-                        selected: false,
-                        bought: false,
-                        sold: false,
-                        fixed: false
-                    });
-                    newCount++;
-                }
-            });
-
-            if (filledCount === 0 && newCount === 0) {
-                if (statusEl) {
-                    statusEl.textContent = invalidCount > 0
-                        ? `未能解析到有效数据（${invalidCount}行格式无法识别）`
-                        : (skippedCount > 0 ? `所有股票竞价量已有数值，未做改动（跳过${skippedCount}条）` : '未能解析到有效数据！');
-                    statusEl.style.color = '#dc2626';
-                }
-                return;
-            }
-
-            auctionData[currentDate] = auctionList;
-            saveModule('auction');
-            invalidateTopicCache();
-
-            textarea.value = '';
-            let statusMsg = '✅ ';
-            if (filledCount > 0) statusMsg += `补齐${filledCount}条`;
-            if (newCount > 0) statusMsg += ` 新增${newCount}条`;
-            if (skippedCount > 0) statusMsg += ` 跳过${skippedCount}条(已有值)`;
-            if (invalidCount > 0) statusMsg += ` 无法识别${invalidCount}行`;
-            if (statusEl) {
-                statusEl.textContent = statusMsg;
-                statusEl.style.color = '#059669';
-            }
-
-            setTimeout(() => renderAuctionForm(), 0);
-            setTimeout(() => renderAuction(), 20);
-            setTimeout(() => renderList(), 40);
-        }
 
         function replaceConceptFromPaste() {
             const textarea = document.getElementById('auctionPasteInput');
