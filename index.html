@@ -6704,7 +6704,6 @@
                 </div>
                 <div id="duibanEditTableBody"></div>
             </div>
-            <button type="button" class="add-etf-row-btn" onclick="addDuibanRow()">+ 添加新行</button>
             <button type="button" class="submit-btn" onclick="saveDuiban()" style="margin-top:15px;padding:14px 20px;font-size:15px">保存</button>
             <button type="button" class="clear-btn" onclick="event.stopPropagation();clearDuiban()" style="margin-top:30px;padding:12px 20px;font-size:14px">清除数据</button>
         </div>
@@ -9097,6 +9096,8 @@
                     // 所有收盘涨幅同步完成，再同步题材，最后统一保存一次
                     syncStockTopicsFromAuction();
                     saveModule('stocks');
+                    // 涨跌幅可能已批量新增/覆盖，重新统计"最近多板"的总数量和跌涨比
+                    recalcDuibanFromAuction();
                 }
             }
 
@@ -9406,6 +9407,9 @@
                 renderAuctionForm();
                 renderAuction();
                 renderList();
+
+                // 概念替换可能改变了note的格式，保险起见重新统计一次"最近多板"
+                recalcDuibanFromAuction();
             }
 
             document.getElementById('auctionPasteInput').value = '';
@@ -9600,6 +9604,9 @@
             
             // 保存前备份（用于撤回）
             backupAuctionData('save');
+
+            // 预建题材缓存：避免下面循环里对每只无注释的股票单独扫描最近66天历史数据（股票多时会明显卡顿）
+            buildTopicCache();
             
             const formContainer = document.getElementById('auctionFormContainer');
             const rows = formContainer.querySelectorAll('.auction-form-row');
@@ -9652,6 +9659,9 @@
             syncStockTopicsFromAuction();
             saveModule('stocks');
             renderList();
+
+            // 涨跌幅数据可能已变化，重新统计"最近多板"的总数量和跌涨比
+            recalcDuibanFromAuction();
             
             const board = document.getElementById('auctionBoard');
             if (board) {
@@ -18159,6 +18169,60 @@
             localStorage.setItem('duibanData', JSON.stringify(data));
         }
 
+        // 根据早盘竞价看板当天所有股票的涨跌幅（note字段），自动统计"最近多板"的总数量和跌涨比。
+        // 只统计note中含有涨跌幅信息（百分比或涨停/跌停）的股票；纯题材注释或空白note不计入。
+        // 涨停按涨、跌停按跌计算；0%记入总数但不计涨也不计跌（平盘）。
+        // 结果写入duibanData当天记录的第一行（保留竞符合数、图示不动，因为这两项仍由用户手动维护）；
+        // 若旧数据本来有多行，只更新第一行，其余行原样保留，不丢数据。
+        function recalcDuibanFromAuction() {
+            const auctionList = getTodayAuction();
+            let riseCount = 0;
+            let fallCount = 0;
+            let flatCount = 0;
+
+            auctionList.forEach(item => {
+                if (!item.note) return;
+                const note = item.note;
+
+                if (note.includes('涨停')) {
+                    riseCount++;
+                    return;
+                }
+                if (note.includes('跌停')) {
+                    fallCount++;
+                    return;
+                }
+                const percentMatch = note.match(/-?\d+\.?\d*%/);
+                if (percentMatch) {
+                    const value = parseFloat(percentMatch[0]);
+                    if (value > 0) riseCount++;
+                    else if (value < 0) fallCount++;
+                    else flatCount++;
+                }
+            });
+
+            const total = riseCount + fallCount + flatCount;
+            // 没有任何一只股票带涨跌幅数据时，不做统计更新（避免把已有的手动数据清空）
+            if (total === 0) return;
+
+            const duibanData = JSON.parse(localStorage.getItem('duibanData') || '{}');
+            const existingList = duibanData[currentDate] || [];
+            const firstRow = existingList[0] || {};
+
+            const updatedFirstRow = {
+                ...firstRow,
+                shuliang: String(total),
+                dieZhangbi: `${fallCount}:${riseCount}`
+            };
+
+            const newList = [updatedFirstRow, ...existingList.slice(1)];
+            duibanData[currentDate] = newList;
+            localStorage.setItem('duibanData', JSON.stringify(duibanData));
+
+            renderDuiban();
+            renderWeekendStats();
+        }
+
         // 获取今日最近多板评论
         function getTodayDuibanComment() {
             const data = JSON.parse(localStorage.getItem('duibanComment') || '{}');
@@ -18305,41 +18369,30 @@
         }
 
         // 打开最近多板评论编辑
+        // 记录当前打开编辑弹窗时，旧数据里除第一行外的其余行（用于保存时原样保留，不丢数据）
+        let _duibanExtraRows = [];
+
         function openDuibanEdit() {
             const duibanList = getTodayDuiban();
             const formContainer = document.getElementById('duibanEditTableBody');
-            
-            let html = '';
-            if (duibanList.length === 0) {
-                html = `
-                    <div class="duiban-edit-row" id="duiban-row-0">
-                        <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-0" value="56" placeholder="总数量" oninput="onDuibanTotalChange(this, this.nextElementSibling)">
-                        <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-0" value=":" placeholder="56 (跌:涨)" onblur="autoCalculateDuibanDieZhangbi(this, this.previousElementSibling)" style="width:90px !important;">
-                        <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-0" placeholder="竞符合数">
-                        <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-0" placeholder="图示">
-                        <div class="duiban-row-actions">
-                            <button type="button" class="duiban-remove-btn" onclick="removeDuibanRow(0)">×</button>
-                        </div>
-                    </div>
-                `;
-            } else {
-                duibanList.forEach((item, index) => {
-                    const shuliangVal = item.shuliang || '56';
-                    const dieZhangbiVal = item.dieZhangbi || ':';
-                    html += `
-                        <div class="duiban-edit-row" id="duiban-row-${index}">
-                            <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-${index}" value="${shuliangVal}" placeholder="总数量" oninput="onDuibanTotalChange(this, this.nextElementSibling)">
-                            <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-${index}" value="${dieZhangbiVal}" placeholder="${shuliangVal} (跌:涨)" onblur="autoCalculateDuibanDieZhangbi(this, this.previousElementSibling)" style="width:90px !important;">
-                            <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-${index}" value="${item.jingtu || ''}" placeholder="竞符合数">
-                            <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-${index}" value="${item.tushi || ''}" placeholder="图示">
-                            <div class="duiban-row-actions">
-                                <button type="button" class="duiban-remove-btn" onclick="removeDuibanRow(${index})">×</button>
-                            </div>
-                        </div>
-                    `;
-                });
-            }
-            
+
+            const firstRow = duibanList[0] || {};
+            _duibanExtraRows = duibanList.slice(1); // 旧数据若有多行，多余的行原样保留，不在编辑框里展示
+
+            const shuliangVal = firstRow.shuliang || '';
+            const dieZhangbiVal = firstRow.dieZhangbi || '';
+            const jingtuVal = firstRow.jingtu || '';
+            const tushiVal = firstRow.tushi || '';
+
+            const html = `
+                <div class="duiban-edit-row" id="duiban-row-0">
+                    <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-0" value="${shuliangVal}" placeholder="总数量">
+                    <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-0" value="${dieZhangbiVal}" placeholder="跌:涨" style="width:90px !important;">
+                    <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-0" value="${jingtuVal}" placeholder="竞符合数">
+                    <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-0" value="${tushiVal}" placeholder="图示/石墨链接">
+                </div>
+            `;
+
             formContainer.innerHTML = html;
             document.getElementById('duibanModal').classList.add('active');
         }
@@ -18349,84 +18402,25 @@
             document.getElementById('duibanModal').classList.remove('active');
         }
 
-        // 添加最近多板行
-        function addDuibanRow() {
-            const formContainer = document.getElementById('duibanEditTableBody');
-            const rows = formContainer.querySelectorAll('.duiban-edit-row');
-            const rowCount = rows.length;
-            
-            const newRow = document.createElement('div');
-            newRow.className = 'duiban-edit-row';
-            newRow.id = `duiban-row-${rowCount}`;
-            newRow.innerHTML = `
-                <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-${rowCount}" value="56" placeholder="总数量" oninput="onDuibanTotalChange(this, this.nextElementSibling)">
-                <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-${rowCount}" value=":" placeholder="56 (跌:涨)" onblur="autoCalculateDuibanDieZhangbi(this, this.previousElementSibling)" style="width:90px !important;">
-                <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-${rowCount}" placeholder="竞符合数">
-                <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-${rowCount}" placeholder="图示">
-                <div class="duiban-row-actions">
-                    <button type="button" class="duiban-remove-btn" onclick="removeDuibanRow(${rowCount})">×</button>
-                </div>
-            `;
-            
-            formContainer.appendChild(newRow);
-        }
-
-        // 移除最近多板行
-        function removeDuibanRow(index) {
-            const row = document.getElementById(`duiban-row-${index}`);
-            if (row) {
-                row.remove();
-                renumberDuibanRows();
-            }
-        }
-
-        // 重新编号最近多板行
-        function renumberDuibanRows() {
-            const formContainer = document.getElementById('duibanEditTableBody');
-            const rows = formContainer.querySelectorAll('.duiban-edit-row');
-            rows.forEach((row, i) => {
-                row.id = `duiban-row-${i}`;
-                
-                const dieZhangbiInput = row.querySelector('input[name^="dieZhangbi-"]');
-                const jingtuInput = row.querySelector('input[name^="jingtu-"]');
-                const shuliangInput = row.querySelector('input[name^="shuliang-"]');
-                const tushiInput = row.querySelector('input[name^="tushi-"]');
-                const removeBtn = row.querySelector('.duiban-remove-btn');
-                
-                if (dieZhangbiInput) dieZhangbiInput.name = `dieZhangbi-${i}`;
-                if (jingtuInput) jingtuInput.name = `jingtu-${i}`;
-                if (shuliangInput) shuliangInput.name = `shuliang-${i}`;
-                if (tushiInput) tushiInput.name = `tushi-${i}`;
-                if (removeBtn) removeBtn.onclick = function() { removeDuibanRow(i); };
-            });
-        }
-
-        // 保存最近多板数据
+        // 保存最近多板数据（单行布局：只读取第一行输入，旧数据里多余的行原样拼接保留，不丢数据）
         function saveDuiban() {
-            const formContainer = document.getElementById('duibanEditTableBody');
-            const rows = formContainer.querySelectorAll('.duiban-edit-row');
+            const row = document.getElementById('duiban-row-0');
+            const dieZhangbiInput = row ? row.querySelector('[name="dieZhangbi-0"]') : null;
+            const jingtuInput = row ? row.querySelector('[name="jingtu-0"]') : null;
+            const shuliangInput = row ? row.querySelector('[name="shuliang-0"]') : null;
+            const tushiInput = row ? row.querySelector('[name="tushi-0"]') : null;
+
+            const dieZhangbi = dieZhangbiInput ? dieZhangbiInput.value.trim() : '';
+            const jingtu = jingtuInput ? jingtuInput.value.trim() : '';
+            const shuliang = shuliangInput ? shuliangInput.value.trim() : '';
+            const tushi = tushiInput ? tushiInput.value.trim() : '';
+
             const duibanList = [];
-            
-            rows.forEach((row, index) => {
-                const dieZhangbiInput = row.querySelector(`[name="dieZhangbi-${index}"]`);
-                const jingtuInput = row.querySelector(`[name="jingtu-${index}"]`);
-                const shuliangInput = row.querySelector(`[name="shuliang-${index}"]`);
-                const tushiInput = row.querySelector(`[name="tushi-${index}"]`);
-                
-                const dieZhangbi = dieZhangbiInput ? dieZhangbiInput.value.trim() : '';
-                const jingtu = jingtuInput ? jingtuInput.value.trim() : '';
-                const shuliang = shuliangInput ? shuliangInput.value.trim() : '';
-                const tushi = tushiInput ? tushiInput.value.trim() : '';
-                
-                if (dieZhangbi || jingtu || shuliang || tushi) {
-                    duibanList.push({
-                        dieZhangbi,
-                        jingtu,
-                        shuliang,
-                        tushi
-                    });
-                }
-            });
+            if (dieZhangbi || jingtu || shuliang || tushi) {
+                duibanList.push({ dieZhangbi, jingtu, shuliang, tushi });
+            }
+            // 旧数据里第一行之后的其余行，原样拼接保留
+            duibanList.push(..._duibanExtraRows);
             
             saveTodayDuiban(duibanList);
             renderDuiban();
@@ -18437,6 +18431,7 @@
         // 清除最近多板数据
         function clearDuiban() {
             if (confirm('确定要清除所有最近多板数据吗？')) {
+                _duibanExtraRows = [];
                 saveTodayDuiban([]);
                 renderDuiban();
                 renderWeekendStats();
