@@ -2348,13 +2348,22 @@
             background: #e5e7eb;
         }
 
-        /* 竞放量达标行（今日竞价量/昨日竞价量 >= 1.5）：极浅护眼色背景，优先覆盖其他状态色，且不改变文字颜色 */
+        /* 竞放量达标行（今日竞价量/昨日竞价量 >= 1.5）：极浅护眼色背景，仅在"环比"开关打开时显示 */
         .auction-item.high-ratio {
             background: #fffbeb;
         }
 
         .auction-item.high-ratio:hover {
             background: #fef3c7;
+        }
+
+        /* 平行达标行（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：独立护眼色，仅在"平行"开关打开时显示，优先于竞放量高光 */
+        .auction-item.parallel-match {
+            background: #ecfdf5;
+        }
+
+        .auction-item.parallel-match:hover {
+            background: #d1fae5;
         }
 
         .auction-highratio-stat {
@@ -2853,9 +2862,14 @@
             background: #f3e8ff;
         }
 
-        /* 竞放量达标行（今日竞价量/昨日竞价量四舍五入后 >= 1.5）：极浅护眼色背景，优先覆盖其他状态色 */
+        /* 竞放量达标行（今日竞价量/昨日竞价量四舍五入后 >= 1.5）：极浅护眼色背景，仅在"环比"开关打开时显示 */
         .auction-topic-row.high-ratio {
             background: #fffbeb;
+        }
+
+        /* 平行达标行：独立护眼色，仅在"平行"开关打开时显示，优先于竞放量高光 */
+        .auction-topic-row.parallel-match {
+            background: #ecfdf5;
         }
 
         .auction-topic-stock {
@@ -9646,6 +9660,8 @@
 
             // 计算"竞放量数"（今日竞价量/昨日竞价量 >= 1.5 的股票数量）及与昨天的对比箭头
             const highRatioToday = getHighRatioStocksForDate(currentDate);
+            // 计算"平行"达标股票集合（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量），供高光判断复用
+            const parallelStocksToday = getParallelStocksForDate(currentDate);
             const highRatioCountEl = document.getElementById('auctionHighRatioCount');
             const highRatioArrowEl = document.getElementById('auctionHighRatioArrow');
             if (highRatioCountEl) {
@@ -9773,8 +9789,13 @@
                 } else if (isSelected && !isFixed) {
                     itemClass = 'auction-item manual-selected'; // 手动选中显示浅橙色
                 }
-                // 竞放量达标（今日竞价量/昨日竞价量 >= 1.5）：新背景色优先覆盖以上任何状态色
-                if (item.stock && highRatioToday.stockNames.has(item.stock.trim())) {
+                // 竞放量高光（今日竞价量/昨日竞价量 >= 1.5）：仅在"环比"开关打开时才显示
+                // 平行高光（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：仅在"平行"开关打开时才显示，优先于竞放量高光
+                const isParallelMatch = sortByParallelEnabled && item.stock && parallelStocksToday.has(item.stock.trim());
+                const isHighRatioMatch = sortByRatioEnabled && item.stock && highRatioToday.stockNames.has(item.stock.trim());
+                if (isParallelMatch) {
+                    itemClass += ' parallel-match';
+                } else if (isHighRatioMatch) {
                     itemClass += ' high-ratio';
                 }
                 let ratioClass = 'auction-ratio auction-ratio-clickable';
@@ -10668,8 +10689,12 @@
                             rowClass = 'auction-topic-row selected';
                         }
                     }
-                    // 竞放量达标：新背景色优先覆盖以上任何状态色（同一股票每次出现都高光）
-                    if (stock.stock && highRatioInfo2.stockNames.has(stock.stock.trim())) {
+                    // 竞放量高光：仅在"环比"开关打开时才显示；平行高光：仅在"平行"开关打开时才显示，优先于竞放量高光
+                    const isParallelMatch2 = sortByParallelEnabled2 && parallelStockNames2 && stock.stock && parallelStockNames2.has(stock.stock.trim());
+                    const isHighRatioMatch2 = sortByRatioEnabled2 && stock.stock && highRatioInfo2.stockNames.has(stock.stock.trim());
+                    if (isParallelMatch2) {
+                        rowClass += ' parallel-match';
+                    } else if (isHighRatioMatch2) {
                         rowClass += ' high-ratio';
                     }
 
@@ -12974,9 +12999,7 @@
                 const ratioToggle = document.getElementById('auctionSortByRatioToggle');
                 if (sortToggle) sortToggle.checked = false;
                 if (ratioToggle) ratioToggle.checked = false;
-                // 联动打开"全部展开"，方便核对排序结果
-                const expandToggle = document.getElementById('auctionExpandAllToggle');
-                if (expandToggle) expandToggle.checked = true;
+                // 注意：不再联动打开"全部展开"，需用户手动开启（与第二页保持一致）
             }
             renderAuction();
         }
