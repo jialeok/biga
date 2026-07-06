@@ -6906,6 +6906,45 @@
                     <span id="auctionVolumeOnlyStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
                 </div>
             </div>
+
+            <!-- 历史数据补录模式：默认关闭，专门用于补录任意历史日期缺失的竞价量/昨日成交量。
+                 只匹配"目标日期当天早盘竞价列表里已存在的股票"，只补空缺字段，不覆盖已有值；
+                 目标日期列表里不存在的股票一律跳过，绝不新增/删除股票，不改变股票列表结构。 -->
+            <div id="auctionHistoryFillArea" style="margin-bottom: 16px; padding: 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 13px; color: #1d4ed8; font-weight: 600;">历史数据补录模式</span>
+                    <label class="auction-toggle-switch">
+                        <input type="checkbox" id="auctionHistoryFillToggle" onchange="onAuctionHistoryFillToggleChange()">
+                        <span class="auction-toggle-slider"></span>
+                    </label>
+                </div>
+                <div id="auctionHistoryFillBody" style="display: none; margin-top: 8px;">
+                    <div style="font-size: 11px; color: #1e40af; margin-bottom: 8px;">
+                        只补数值，不改变任何日期的股票列表（不新增、不删除股票）。只对"目标日期当天列表里已存在"的股票补齐空缺字段，已有数值不会被覆盖。目标日期列表里不存在的股票会被跳过。
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
+                        <span style="font-size: 12px; color: #1e40af;">目标日期：</span>
+                        <input type="date" id="auctionHistoryFillDate" style="padding: 4px 6px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px;">
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 8px; flex-wrap: wrap;">
+                        <span style="font-size: 12px; color: #1e40af;">两列数据时，第二列是：</span>
+                        <label style="font-size: 12px; color: #374151; display:flex; align-items:center; gap:4px;">
+                            <input type="radio" name="auctionHistoryFillColType" value="volume" checked> 竞价量
+                        </label>
+                        <label style="font-size: 12px; color: #374151; display:flex; align-items:center; gap:4px;">
+                            <input type="radio" name="auctionHistoryFillColType" value="yestVolume"> 昨日成交量
+                        </label>
+                    </div>
+                    <div style="font-size: 11px; color: #1e40af; margin-bottom: 6px;">
+                        支持两种格式：<br>
+                        三列（Tab分隔）：股票名称[TAB]竞价量[TAB]昨日成交量 —— 两个字段一起补<br>
+                        两列（Tab分隔）：股票名称[TAB]数字 —— 按上面选择的类型补对应字段
+                    </div>
+                    <textarea id="auctionHistoryFillInput" placeholder="从 Excel 或 AI 工具复制后直接粘贴到这里&#10;三列例：金科股份    8667.20    519.02&#10;两列例：星网锐捷    153.97万" style="width: 100%; height: 90px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <button type="button" onclick="importAuctionHistoryFill()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; border: none; border-radius: 4px; cursor: pointer;">补录历史数据</button>
+                    <span id="auctionHistoryFillStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
+                </div>
+            </div>
             
             <form onsubmit="saveAuction(event)" id="auctionForm">
                 <div class="rank-form-scroll-container">
@@ -8677,6 +8716,13 @@
             const volumeOnlyBody = document.getElementById('auctionVolumeOnlyBody');
             if (volumeOnlyToggle) volumeOnlyToggle.checked = false;
             if (volumeOnlyBody) volumeOnlyBody.style.display = 'none';
+            // 每次打开弹窗时，"历史数据补录"开关同样重置为默认关闭状态，日期清空（下次开启时自动填当前日历日期）
+            const historyFillToggle = document.getElementById('auctionHistoryFillToggle');
+            const historyFillBody = document.getElementById('auctionHistoryFillBody');
+            const historyFillDate = document.getElementById('auctionHistoryFillDate');
+            if (historyFillToggle) historyFillToggle.checked = false;
+            if (historyFillBody) historyFillBody.style.display = 'none';
+            if (historyFillDate) historyFillDate.value = '';
             // 延迟显示模态框，确保 DOM 完全渲染
             setTimeout(() => {
                 document.getElementById('auctionModal').classList.add('active');
@@ -9118,6 +9164,185 @@
             }
             const match = trimmed.match(/^-?\d+\.?\d*$/);
             return match ? trimmed : null;
+        }
+
+        // "历史数据补录"开关变化时的处理：控制专用输入区域的显示/隐藏，并默认把日期选择器设为当前日历日期
+        function onAuctionHistoryFillToggleChange() {
+            const checked = document.getElementById('auctionHistoryFillToggle').checked;
+            const body = document.getElementById('auctionHistoryFillBody');
+            if (body) {
+                body.style.display = checked ? 'block' : 'none';
+            }
+            if (checked) {
+                const dateInput = document.getElementById('auctionHistoryFillDate');
+                if (dateInput && !dateInput.value) {
+                    dateInput.value = currentDate;
+                }
+            }
+        }
+
+        // 历史数据补录：只补数值，绝不新增/删除股票，不改变任何日期的股票列表结构。
+        // 支持两种格式：
+        //   三列（Tab分隔）：股票名称[TAB]竞价量[TAB]昨日成交量 —— 两个字段一起补
+        //   两列（Tab分隔）：股票名称[TAB]数字 —— 按用户选择的单选（竞价量/昨日成交量）补对应字段
+        // 规则：目标日期当天列表里必须已存在该股票才会补值；已有值不覆盖；不存在的股票直接跳过。
+        function importAuctionHistoryFill() {
+            const textarea = document.getElementById('auctionHistoryFillInput');
+            const rawText = textarea ? textarea.value : '';
+            const pasteText = rawText.trim();
+            const statusEl = document.getElementById('auctionHistoryFillStatus');
+            const dateInput = document.getElementById('auctionHistoryFillDate');
+            const targetDate = dateInput ? dateInput.value : '';
+
+            if (!targetDate) {
+                if (statusEl) {
+                    statusEl.textContent = '请先选择目标日期！';
+                    statusEl.style.color = '#dc2626';
+                }
+                return;
+            }
+
+            if (!pasteText) {
+                if (statusEl) {
+                    statusEl.textContent = '请先粘贴数据！';
+                    statusEl.style.color = '#dc2626';
+                }
+                textarea && textarea.focus();
+                return;
+            }
+
+            const colTypeRadio = document.querySelector('input[name="auctionHistoryFillColType"]:checked');
+            const twoColField = colTypeRadio ? colTypeRadio.value : 'volume'; // 两列格式时，数字要填入的字段名
+
+            // 备份早盘竞价数据（用于撤回），与现有导入功能共用同一套备份/撤回机制
+            backupAuctionData('import');
+
+            const lines = pasteText.split(/\r?\n/);
+            const auctionData = getAuctionData();
+            const targetList = [...(auctionData[targetDate] || [])];
+
+            let filledCount = 0;     // 成功补齐的字段数（三列格式里补两个字段算两次）
+            let skippedNotFound = 0; // 目标日期列表里找不到该股票，跳过
+            let skippedHasValue = 0; // 股票存在但字段已有值，跳过
+            let invalidCount = 0;    // 无法解析的行数
+
+            lines.forEach((line, index) => {
+                if (!line.trim()) return;
+                if (index === 0 && (line.includes('股票名称') || line.includes('竞价量') || line.includes('昨日成交量'))) return;
+
+                const cells = line.split('\t').map(c => c.trim()).filter((c, i) => i === 0 || c !== '');
+                const rawCells = line.split('\t');
+                const stock = rawCells[0] ? rawCells[0].trim() : '';
+
+                if (!stock) {
+                    invalidCount++;
+                    return;
+                }
+
+                // 找到目标日期列表里对应的股票（只匹配已存在的，不新增）
+                const existingIndex = targetList.findIndex(item => item.stock && item.stock.trim() === stock);
+                if (existingIndex < 0) {
+                    skippedNotFound++;
+                    return;
+                }
+
+                const nonEmptyCells = rawCells.slice(1).map(c => c.trim()).filter(c => c !== '');
+
+                if (nonEmptyCells.length >= 2) {
+                    // 三列格式：股票名称[TAB]竞价量[TAB]昨日成交量，两个字段一起补
+                    const volumeText = rawCells[1] ? rawCells[1].trim() : '';
+                    const yestText = rawCells[2] ? rawCells[2].trim() : '';
+                    const parsedVolume = parseVolumeOnlyText(volumeText);
+                    const parsedYest = parseVolumeOnlyText(yestText);
+
+                    if (parsedVolume === null && parsedYest === null) {
+                        invalidCount++;
+                        return;
+                    }
+
+                    const item = targetList[existingIndex];
+                    let didFill = false;
+
+                    if (parsedVolume !== null) {
+                        const isEmpty = item.volume === '' || item.volume === null || item.volume === undefined;
+                        if (isEmpty) {
+                            item.volume = parsedVolume;
+                            filledCount++;
+                            didFill = true;
+                        } else {
+                            skippedHasValue++;
+                        }
+                    }
+                    if (parsedYest !== null) {
+                        const isEmpty = item.yestVolume === '' || item.yestVolume === null || item.yestVolume === undefined;
+                        if (isEmpty) {
+                            item.yestVolume = parsedYest;
+                            filledCount++;
+                            didFill = true;
+                        } else {
+                            skippedHasValue++;
+                        }
+                    }
+                    if (didFill) {
+                        targetList[existingIndex] = { ...item };
+                    }
+                } else if (nonEmptyCells.length === 1) {
+                    // 两列格式：股票名称[TAB]数字，按用户选择的字段类型补录
+                    const valueText = nonEmptyCells[0];
+                    const parsedValue = parseVolumeOnlyText(valueText);
+                    if (parsedValue === null) {
+                        invalidCount++;
+                        return;
+                    }
+
+                    const item = targetList[existingIndex];
+                    const existingFieldValue = item[twoColField];
+                    const isEmpty = existingFieldValue === '' || existingFieldValue === null || existingFieldValue === undefined;
+                    if (isEmpty) {
+                        targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
+                        filledCount++;
+                    } else {
+                        skippedHasValue++;
+                    }
+                } else {
+                    invalidCount++;
+                }
+            });
+
+            if (filledCount === 0) {
+                if (statusEl) {
+                    let msg = '未补录任何数据';
+                    const parts = [];
+                    if (skippedNotFound > 0) parts.push(`${skippedNotFound}条该日期列表中不存在`);
+                    if (skippedHasValue > 0) parts.push(`${skippedHasValue}个字段已有值`);
+                    if (invalidCount > 0) parts.push(`${invalidCount}行无法识别`);
+                    if (parts.length) msg += `（${parts.join('，')}）`;
+                    statusEl.textContent = msg;
+                    statusEl.style.color = '#dc2626';
+                }
+                return;
+            }
+
+            auctionData[targetDate] = targetList;
+            saveModule('auction');
+            invalidateTopicCache();
+
+            textarea.value = '';
+            let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
+            if (skippedNotFound > 0) statusMsg += ` 跳过${skippedNotFound}条(该日期列表中不存在)`;
+            if (skippedHasValue > 0) statusMsg += ` 跳过${skippedHasValue}个(已有值)`;
+            if (invalidCount > 0) statusMsg += ` 无法识别${invalidCount}行`;
+            if (statusEl) {
+                statusEl.textContent = statusMsg;
+                statusEl.style.color = '#059669';
+            }
+
+            // 若补录的正是当前正在查看的日期，刷新表单和看板显示
+            if (targetDate === currentDate) {
+                setTimeout(() => renderAuctionForm(), 0);
+                setTimeout(() => renderAuction(), 20);
+                setTimeout(() => renderList(), 40);
+            }
         }
 
         // 从"竞价量补录"专用输入框导入两列数据（股票名称 + 竞价量）
