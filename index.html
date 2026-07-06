@@ -9696,6 +9696,9 @@
         let _lastAuctionRenderDate = null;
 
         function renderAuction() {
+            // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
+            recalcDuibanFromAuction();
+
             // 日期发生变化时，三个开关（全部展开/按数据排序/竞价量环比排序）重置为默认关闭状态（不记忆）
             if (_lastAuctionRenderDate !== null && _lastAuctionRenderDate !== currentDate) {
                 const expandToggle = document.getElementById('auctionExpandAllToggle');
@@ -18373,6 +18376,9 @@
         let _duibanExtraRows = [];
 
         function openDuibanEdit() {
+            // 打开弹窗前先按当前早盘竞价数据重新计算一次，确保数值始终最新（不依赖之前是否做过导入操作）
+            recalcDuibanFromAuction();
+
             const duibanList = getTodayDuiban();
             const formContainer = document.getElementById('duibanEditTableBody');
 
