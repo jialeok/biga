@@ -6968,6 +6968,31 @@
         </div>
     </div>
 
+    <!-- 核心词编辑模态框（替代系统 prompt，避免切换应用后内容丢失） -->
+    <div class="modal" id="coreTopicEditModal" onclick="if(event.target===this)closeCoreTopicEditModal()">
+        <div class="modal-content" style="max-width: 420px; padding-bottom: 20px;">
+            <div class="modal-header" style="padding: 0 0 16px 0; margin-bottom: 0;">
+                <div style="font-weight:600;color:#1f2937">编辑核心词</div>
+                <button class="close-btn" onclick="closeCoreTopicEditModal()">×</button>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <div style="font-size: 12px; color: #6b7280; margin-bottom: 8px;">核心词名称</div>
+                <input type="text" id="coreTopicEditName" style="width: 100%; box-sizing: border-box; padding: 10px; font-size: 14px; border: 1px solid #e2e8f0; border-radius: 6px;">
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <div style="font-size: 12px; color: #6b7280; margin-bottom: 8px;">同义词（逗号分隔）</div>
+                <textarea id="coreTopicEditSynonyms" rows="3" style="width: 100%; box-sizing: border-box; padding: 10px; font-size: 14px; border: 1px solid #e2e8f0; border-radius: 6px; resize: vertical; font-family: inherit;"></textarea>
+            </div>
+
+            <div style="display: flex; gap: 8px;">
+                <button type="button" onclick="closeCoreTopicEditModal()" style="flex:1; padding: 10px 16px; font-size: 14px; background: #f1f5f9; color: #475569; border: none; border-radius: 6px; cursor: pointer;">取消</button>
+                <button type="button" onclick="saveCoreTopicEdit()" style="flex:1; padding: 10px 16px; font-size: 14px; background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: #fff; border: none; border-radius: 6px; cursor: pointer;">保存</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 排名编辑模态框 -->
     <div class="modal" id="rankModal" onclick="if(event.target===this)closeRankModal()">
         <div class="modal-content modal-content-rank">
@@ -12720,22 +12745,39 @@
             renderCoreTopicList();
         }
 
-        // 编辑核心词
+        // 编辑核心词（使用自定义弹窗，避免系统 prompt 在切换应用后内容丢失）
+        let _coreTopicEditIndex = null;
         function editCoreTopic(index) {
             const coreTopics = getCoreTopics();
             const core = coreTopics[index];
-            
-            const newName = prompt('修改核心词名称：', core.name);
-            if (newName === null) return;
-            
-            const newSynonymsStr = prompt('修改同义词（逗号分隔）：', core.synonyms ? core.synonyms.join(',') : '');
-            if (newSynonymsStr === null) return;
-            
-            coreTopics[index].name = newName.trim() || core.name;
-            coreTopics[index].synonyms = newSynonymsStr ? newSynonymsStr.split(/[,，]/).map(s => s.trim()).filter(s => s) : [];
-            
+            if (!core) return;
+
+            _coreTopicEditIndex = index;
+            document.getElementById('coreTopicEditName').value = core.name || '';
+            document.getElementById('coreTopicEditSynonyms').value = core.synonyms ? core.synonyms.join(',') : '';
+            document.getElementById('coreTopicEditModal').classList.add('active');
+        }
+
+        function closeCoreTopicEditModal() {
+            document.getElementById('coreTopicEditModal').classList.remove('active');
+            _coreTopicEditIndex = null;
+        }
+
+        function saveCoreTopicEdit() {
+            if (_coreTopicEditIndex === null) return;
+            const coreTopics = getCoreTopics();
+            const core = coreTopics[_coreTopicEditIndex];
+            if (!core) { closeCoreTopicEditModal(); return; }
+
+            const newName = document.getElementById('coreTopicEditName').value;
+            const newSynonymsStr = document.getElementById('coreTopicEditSynonyms').value;
+
+            coreTopics[_coreTopicEditIndex].name = newName.trim() || core.name;
+            coreTopics[_coreTopicEditIndex].synonyms = newSynonymsStr ? newSynonymsStr.split(/[,，]/).map(s => s.trim()).filter(s => s) : [];
+
             saveCoreTopics(coreTopics);
             renderCoreTopicList();
+            closeCoreTopicEditModal();
         }
 
         // 删除核心词
