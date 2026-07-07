@@ -18267,43 +18267,34 @@
         }
 
         // 根据早盘竞价看板当天所有股票的涨跌幅（note字段），自动统计"最近多板"的总数量和跌涨比。
-        // 只统计note中含有涨跌幅信息（百分比或涨停/跌停）的股票；纯题材注释或空白note不计入。
-        // 涨停按涨、跌停按跌计算；0%记入总数但不计涨也不计跌（平盘）。
-        // 结果写入duibanData当天记录的第一行（保留竞符合数、图示不动，因为这两项仍由用户手动维护）；
-        // 若旧数据本来有多行，只更新第一行，其余行原样保留，不丢数据。
+        // 总数 = 早盘竞价列表的股票总数（不管有没有涨跌幅数据，停牌的也算在内）。
+        // 涨数（红数）= note中含"涨停"或百分比>0的股票数量。
+        // 跌数 = 总数 - 涨数（即：平盘、停牌、跌停、百分比<=0 的都算跌）。
         function recalcDuibanFromAuction() {
             const auctionList = getTodayAuction();
+            const total = auctionList.length;
+            if (total === 0) return; // 没有股票时不做统计更新（避免把已有的手动数据清空）
+
             let riseCount = 0;
-            let fallCount = 0;
-            let flatCount = 0;
 
             auctionList.forEach(item => {
-                if (!item.note) return;
-                const note = item.note;
-
+                const note = item.note || '';
                 if (note.includes('涨停')) {
                     riseCount++;
                     return;
                 }
-                if (note.includes('跌停')) {
-                    fallCount++;
-                    return;
-                }
+                if (note.includes('跌停')) return;
                 const percentMatch = note.match(/-?\d+\.?\d*%/);
                 if (percentMatch) {
                     const value = parseFloat(percentMatch[0]);
                     if (value > 0) riseCount++;
-                    else if (value < 0) fallCount++;
-                    else flatCount++;
                 }
             });
 
-            const total = riseCount + fallCount + flatCount;
+            const fallCount = total - riseCount;
             console.log('[最近多板调试] currentDate=', currentDate, '早盘竞价股票数=', auctionList.length,
                 'notes样本=', auctionList.slice(0, 5).map(i => i.note),
-                'rise=', riseCount, 'fall=', fallCount, 'flat=', flatCount, 'total=', total);
-            // 没有任何一只股票带涨跌幅数据时，不做统计更新（避免把已有的手动数据清空）
-            if (total === 0) return;
+                'rise=', riseCount, 'fall=', fallCount, 'total=', total);
 
             const duibanData = JSON.parse(localStorage.getItem('duibanData') || '{}');
             const existingList = duibanData[currentDate] || [];
