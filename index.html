@@ -9834,6 +9834,14 @@
                 const strengthArrowEl = document.getElementById('auctionStrengthArrow');
                 if (strengthValueEl) strengthValueEl.textContent = '-';
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
+                // 没有数据时，"竞放量数"也要重置为 -，避免残留上一个有数据日期的数值
+                const highRatioCountElEmpty = document.getElementById('auctionHighRatioCount');
+                const highRatioArrowElEmpty = document.getElementById('auctionHighRatioArrow');
+                if (highRatioCountElEmpty) highRatioCountElEmpty.textContent = '-';
+                if (highRatioArrowElEmpty) {
+                    highRatioArrowElEmpty.textContent = '';
+                    highRatioArrowElEmpty.style.color = '';
+                }
                 renderAuctionPage2();
                 renderAuctionPage3();
                 renderAuctionStatsBoard();
