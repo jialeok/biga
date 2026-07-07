@@ -8948,17 +8948,15 @@
                     const isNewChangeInfo = isNewPercent || isNewStatusWord;
                     
                     if (isNewChangeInfo && existingNote) {
-                        // 新导入的是涨幅/停牌等状态，替换原有涨幅，保留其他内容（题材括号、占比等）
+                        // 新导入的是涨幅/停牌等状态，完全替换旧涨幅，只保留题材括号内容
+                        // 注：不再尝试保留旧note里的"裸露百分比"，因为该字段本质上和真正的"占比"
+                        // （由竞价量/昨日成交量计算得出，显示在独立的占比列）无关，只是历史遗留逻辑，
+                        // 且无法用正则可靠区分"合法占比"与"脏数据里残留的另一个涨幅"，
+                        // 保留它反而是之前"数字重复拼接"问题的根源，因此直接去掉更安全。
                         const bracketMatches = existingNote.match(/\([^)]+\)/g) || [];
-                        // 旧注释里的涨停/跌停不再保留，因为新导入的状态（含"停牌"）应完全取代它
-                        // 保留原有裸露占比（不带+/-前缀的纯数字%，如7%、29%；前面也不能紧跟数字/%，避免把脏数据里
-                        // 拼接残留的另一个百分比误判成占比，如 "-6.75%2.92%" 中的 "2.92%" 不应被当作占比保留）
-                        const bareOccupancy = existingNote.replace(/\([^)]+\)/g, '').match(/(?<![+-\d.%])\d+\.?\d*%/g) || [];
 
-                        // 构建新注释：新涨幅/状态词 + 占比 + 题材
-                        let newNoteBuilt = trimmedNewNote;
-                        if (bareOccupancy.length > 0) newNoteBuilt += bareOccupancy.join('');
-                        newNoteBuilt += bracketMatches.join('');
+                        // 构建新注释：新涨幅/状态词 + 题材
+                        let newNoteBuilt = trimmedNewNote + bracketMatches.join('');
                         const normalizedNote = newNoteBuilt.replace(/[，、;；]/g, ',');
                         auctionList[existingIndex].note = normalizedNote;
                     } else if (existingNote && !existingNote.includes(newNote)) {
