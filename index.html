@@ -6445,6 +6445,14 @@
             </div>
             <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="handleFileImport(event)">
             <button class="submit-btn" onclick="document.getElementById('importFileInput').click()" style="margin-top:15px;background:linear-gradient(135deg, #8b5cf6, #7c3aed)">📁 导入备份文件</button>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:15px">
+                <div style="flex:1;height:1px;background:#e2e8f0"></div>
+                <span style="font-size:12px;color:#64748b">特殊修复</span>
+                <div style="flex:1;height:1px;background:#e2e8f0"></div>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin:8px 0">仅补全早盘竞价历史数据：从旧备份中找出当前缺失的日期补上，已有数据的日期不受影响，其他模块不受影响</div>
+            <input type="file" id="auctionOnlyImportFileInput" accept=".json" style="display:none" onchange="handleAuctionOnlyImport(event)">
+            <button class="submit-btn" onclick="document.getElementById('auctionOnlyImportFileInput').click()" style="background:linear-gradient(135deg, #059669, #047857)">🩹 导入旧数据（仅补早盘竞价）</button>
         </div>
     </div>
 
@@ -8291,8 +8299,14 @@
             }
 
             // 恢复备份数据
+            // 注意：备份本身只包含最近30天数据（backupAuctionData 为了控制体积做了裁剪），
+            // 之前这里是直接整体覆盖 allData.auction，会把30天之外的历史早盘竞价数据全部清空丢失。
+            // 现在改为：只把备份里的日期合并写回，30天之外未被备份覆盖的历史日期原样保留。
             const backupAuction = JSON.parse(backupDataStr);
-            allData.auction = backupAuction;
+            allData.auction = allData.auction || {};
+            Object.keys(backupAuction).forEach(date => {
+                allData.auction[date] = backupAuction[date];
+            });
             saveData();
 
             // 撤回后清除全部备份，避免下次撤回到错误状态
@@ -24592,6 +24606,67 @@
                     }
                 } catch (err) {
                     console.error('导入错误:', err);
+                    showToast('❌ 文件格式错误: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = '';
+        }
+
+        // 【特殊修复功能】仅补全早盘竞价（auction）历史数据，不动其他任何模块
+        // 用途：早盘竞价历史曾因"撤回"功能的bug被误清空，此功能用于从旧备份里
+        // 把缺失的日期找回来，已存在的日期不受影响（不覆盖、不合并当天内容，直接跳过）
+        function handleAuctionOnlyImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                let text = e.target.result;
+                if (text.charCodeAt(0) === 0xFEFF) {
+                    text = text.slice(1);
+                }
+                try {
+                    const imported = JSON.parse(text);
+                    const importedAuction = imported.auction || {};
+                    const importedDates = Object.keys(importedAuction);
+
+                    if (importedDates.length === 0) {
+                        showToast('❌ 该文件中没有找到早盘竞价数据');
+                        return;
+                    }
+
+                    loadAllData();
+                    const currentAuction = allData.auction || {};
+
+                    // 找出：旧备份里有、当前完全缺失（当天没有任何早盘竞价数据）的日期
+                    const missingDates = importedDates.filter(date => {
+                        const existing = currentAuction[date];
+                        return !existing || !Array.isArray(existing) || existing.length === 0;
+                    });
+
+                    if (missingDates.length === 0) {
+                        showToast('✅ 当前早盘竞价数据已完整，没有需要补全的日期');
+                        return;
+                    }
+
+                    if (!confirm(`将从旧备份补全 ${missingDates.length} 天缺失的早盘竞价数据（已有数据的日期不受影响，其他模块不受影响），是否继续？`)) {
+                        return;
+                    }
+
+                    // 备份当前auction，便于误操作后可撤回
+                    backupAuctionData('save');
+
+                    missingDates.forEach(date => {
+                        allData.auction[date] = importedAuction[date];
+                    });
+
+                    saveModule('auction');
+                    invalidateTopicCache();
+                    renderAuction();
+                    showToast(`✅ 已补全 ${missingDates.length} 天早盘竞价数据！`);
+                } catch (err) {
+                    console.error('补全早盘竞价数据出错:', err);
                     showToast('❌ 文件格式错误: ' + err.message);
                 }
             };
