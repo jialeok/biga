@@ -1890,6 +1890,77 @@
             overscroll-behavior: contain;
         }
 
+        .auction-toolbar {
+            display: flex;
+            flex-wrap: nowrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 4px;
+            padding: 8px 8px;
+            background: #f8f7ff;
+            border-bottom: 1px solid #ede9fe;
+        }
+
+        .auction-toggle-item {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+        }
+
+        .auction-toggle-label {
+            font-size: 10.5px;
+            color: #6d28d9;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .auction-toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 28px;
+            height: 16px;
+            flex-shrink: 0;
+        }
+
+        .auction-toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .auction-toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #cbd5e1;
+            transition: 0.2s;
+            border-radius: 16px;
+        }
+
+        .auction-toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 12px;
+            width: 12px;
+            left: 2px;
+            bottom: 2px;
+            background-color: #ffffff;
+            transition: 0.2s;
+            border-radius: 50%;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+        }
+
+        .auction-toggle-switch input:checked + .auction-toggle-slider {
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+        }
+
+        .auction-toggle-switch input:checked + .auction-toggle-slider:before {
+            transform: translateX(12px);
+        }
+
         #auctionContent3 {
             max-height: none;
             overflow-y: visible;
@@ -2177,6 +2248,19 @@
             color: #9ca3af;
         }
 
+        .auction-trend-trigger {
+            cursor: pointer;
+        }
+
+        .auction-trend-panel {
+            border-bottom: 1px solid #f1f5f9;
+            box-sizing: border-box;
+        }
+
+        .auction-trend-panel:empty {
+            border-bottom: none;
+        }
+
         .auction-stock-name, .auction-yest-note {
             -webkit-user-select: none;
             -moz-user-select: none;
@@ -2262,6 +2346,33 @@
 
         .auction-item.sold:hover {
             background: #e5e7eb;
+        }
+
+        /* 竞放量达标行（今日竞价量/昨日竞价量 >= 1.5）：极浅护眼色背景，仅在"环比"开关打开时显示 */
+        .auction-item.high-ratio {
+            background: #fffbeb;
+        }
+
+        .auction-item.high-ratio:hover {
+            background: #fef3c7;
+        }
+
+        /* 平行达标行（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：独立护眼色，仅在"平行"开关打开时显示，优先于竞放量高光 */
+        .auction-item.parallel-match {
+            background: #ecfdf5;
+        }
+
+        .auction-item.parallel-match:hover {
+            background: #d1fae5;
+        }
+
+        .auction-highratio-stat {
+            text-align: center;
+            font-size: 11.5px;
+            color: #92400e;
+            background: #fffbeb;
+            padding: 5px 10px;
+            border-bottom: 1px solid #ede9fe;
         }
 
         .auction-ratio-clickable {
@@ -2464,6 +2575,31 @@
             padding: 2px 8px;
             border-radius: 10px;
             margin-left: auto;
+        }
+
+        .auction-topic-expand-row {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 9px 0;
+            cursor: pointer;
+        }
+
+        .auction-topic-expand-arrow {
+            font-size: 12px;
+            color: #9333ea;
+            background: rgba(147, 51, 234, 0.12);
+            transition: transform 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+        }
+
+        .auction-topic-expand-arrow.expanded {
+            transform: rotate(180deg);
         }
 
         .auction-topic-history-group {
@@ -2724,6 +2860,16 @@
 
         .auction-topic-row.selected {
             background: #f3e8ff;
+        }
+
+        /* 竞放量达标行（今日竞价量/昨日竞价量四舍五入后 >= 1.5）：极浅护眼色背景，仅在"环比"开关打开时显示 */
+        .auction-topic-row.high-ratio {
+            background: #fffbeb;
+        }
+
+        /* 平行达标行：独立护眼色，仅在"平行"开关打开时显示，优先于竞放量高光 */
+        .auction-topic-row.parallel-match {
+            background: #ecfdf5;
         }
 
         .auction-topic-stock {
@@ -5547,10 +5693,69 @@
             <div class="auction-swipe-container" id="auctionSwipeContainer">
                 <div class="auction-swipe-wrapper" id="auctionSwipeWrapper">
                     <div class="auction-page auction-page-1 active" id="auctionPage1">
+                        <div class="auction-toolbar" id="auctionToolbar">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionExpandAllToggle" onchange="onAuctionExpandAllToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">数据</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByDataToggle" onchange="onAuctionSortByDataToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">环比</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByRatioToggle" onchange="onAuctionSortByRatioToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByParallelToggle" onchange="onAuctionSortByParallelToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="auctionHighRatioStat">
+                            竞放量数：<span id="auctionHighRatioCount" style="font-weight:700;">-</span><span id="auctionHighRatioArrow" style="font-weight:700;"></span>
+                        </div>
                         <div class="auction-content" id="auctionContent" ondblclick="event.stopPropagation();openAuctionEdit()">
                         </div>
                     </div>
                     <div class="auction-page auction-page-2" id="auctionPage2">
+                        <div class="auction-toolbar" id="auctionToolbar2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionExpandAllToggle2" onchange="onAuctionExpandAllToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">环比</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByRatioToggle2" onchange="onAuctionSortByRatioToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByParallelToggle2" onchange="onAuctionSortByParallelToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="auctionHighRatioStat2">
+                            竞放量数：<span id="auctionHighRatioCount2" style="font-weight:700;">-</span><span id="auctionHighRatioArrow2" style="font-weight:700;"></span>
+                        </div>
                         <div class="auction-content" id="auctionContent2" ondblclick="event.stopPropagation();openCoreTopicModal()">
                         </div>
                     </div>
@@ -6240,6 +6445,14 @@
             </div>
             <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="handleFileImport(event)">
             <button class="submit-btn" onclick="document.getElementById('importFileInput').click()" style="margin-top:15px;background:linear-gradient(135deg, #8b5cf6, #7c3aed)">📁 导入备份文件</button>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:15px">
+                <div style="flex:1;height:1px;background:#e2e8f0"></div>
+                <span style="font-size:12px;color:#64748b">特殊修复</span>
+                <div style="flex:1;height:1px;background:#e2e8f0"></div>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin:8px 0">仅补全早盘竞价历史数据：从旧备份中找出当前缺失的日期补上，已有数据的日期不受影响，其他模块不受影响</div>
+            <input type="file" id="auctionOnlyImportFileInput" accept=".json" style="display:none" onchange="handleAuctionOnlyImport(event)">
+            <button class="submit-btn" onclick="document.getElementById('auctionOnlyImportFileInput').click()" style="background:linear-gradient(135deg, #059669, #047857)">🩹 导入旧数据（仅补早盘竞价）</button>
         </div>
     </div>
 
@@ -6499,7 +6712,6 @@
                 </div>
                 <div id="duibanEditTableBody"></div>
             </div>
-            <button type="button" class="add-etf-row-btn" onclick="addDuibanRow()">+ 添加新行</button>
             <button type="button" class="submit-btn" onclick="saveDuiban()" style="margin-top:15px;padding:14px 20px;font-size:15px">保存</button>
             <button type="button" class="clear-btn" onclick="event.stopPropagation();clearDuiban()" style="margin-top:30px;padding:12px 20px;font-size:14px">清除数据</button>
         </div>
@@ -6681,6 +6893,36 @@
                 <button type="button" onclick="replaceConceptFromPaste()" style="margin-top: 8px; margin-left: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: #fff; border: none; border-radius: 4px; cursor: pointer;">替换概念</button>
                 <button type="button" onclick="openAiVisionModal()" style="margin-top: 8px; margin-left: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer;">📷 AI识图</button>
                 <span id="auctionImportStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
+            </div>
+
+            <!-- 历史数据补录模式：默认关闭，专门用于补录任意历史日期缺失的竞价量/昨日成交量。
+                 只匹配"目标日期当天早盘竞价列表里已存在的股票"，只补空缺字段，不覆盖已有值；
+                 目标日期列表里不存在的股票一律跳过，绝不新增/删除股票，不改变股票列表结构。 -->
+            <div id="auctionHistoryFillArea" style="margin-bottom: 16px; padding: 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 13px; color: #1d4ed8; font-weight: 600;">历史数据补录模式</span>
+                    <label class="auction-toggle-switch">
+                        <input type="checkbox" id="auctionHistoryFillToggle" onchange="onAuctionHistoryFillToggleChange()">
+                        <span class="auction-toggle-slider"></span>
+                    </label>
+                </div>
+                <div id="auctionHistoryFillBody" style="display: none; margin-top: 8px;">
+                    <div style="font-size: 11px; color: #1e40af; margin-bottom: 8px;">
+                        只补空值，不新增/删除股票；三列自动补两项，两列按右侧类型补一项
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
+                        <input type="date" id="auctionHistoryFillDate" style="padding: 4px 6px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px;">
+                        <label style="font-size: 12px; color: #374151; display:flex; align-items:center; gap:4px;">
+                            <input type="radio" name="auctionHistoryFillColType" value="volume" checked> 竞价量
+                        </label>
+                        <label style="font-size: 12px; color: #374151; display:flex; align-items:center; gap:4px;">
+                            <input type="radio" name="auctionHistoryFillColType" value="yestVolume"> 昨日成交量
+                        </label>
+                    </div>
+                    <textarea id="auctionHistoryFillInput" placeholder="三列：股票名称[TAB]竞价量[TAB]昨日成交量&#10;两列：股票名称[TAB]数字（按上方选择类型补录）" style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <button type="button" onclick="importAuctionHistoryFill()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; border: none; border-radius: 4px; cursor: pointer;">补录历史数据</button>
+                    <span id="auctionHistoryFillStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
+                </div>
             </div>
             
             <form onsubmit="saveAuction(event)" id="auctionForm">
@@ -7989,16 +8231,21 @@
 
         // 备份早盘竞价数据（用于撤回）
         // type: 'import' 导入时备份, 'save' 保存时备份
-        function backupAuctionData(type) {
+        // 备份早盘竞价数据（用于撤回）
+        // 只备份"这次操作实际改动的那一天"，不再备份最近30天范围。
+        // 这样撤回时只会精准恢复这一天，彻底不会影响其它任何日期的历史数据。
+        // date 参数：这次操作影响的具体日期，不传则默认当天（currentDate）
+        function backupAuctionData(type, date) {
             try {
+                const targetDate = date || currentDate;
                 const auctionData = getAuctionData();
                 const backupKey = type === 'import' ? 'auctionData_import_backup' : 'auctionData_save_backup';
-                // 只备份最近30天，避免数据过大写满 localStorage
-                const allDates = Object.keys(auctionData).sort();
-                const recentDates = allDates.slice(-30);
-                const recentBackup = {};
-                recentDates.forEach(d => { recentBackup[d] = auctionData[d]; });
-                localStorage.setItem(backupKey, JSON.stringify(recentBackup));
+                // 只备份这一天的数据（若这一天当前没有数据，存空数组，表示"备份时这天是空的"）
+                const dayBackup = {
+                    date: targetDate,
+                    data: auctionData[targetDate] || null
+                };
+                localStorage.setItem(backupKey, JSON.stringify(dayBackup));
                 localStorage.setItem(backupKey + '_time', new Date().toISOString());
             } catch (e) {
                 // 备份失败不影响主流程
@@ -8008,6 +8255,7 @@
         }
 
         // 撤回早盘竞价数据
+        // 只精准恢复被备份的那一天，不碰其它任何日期
         function rollbackAuctionData() {
             const importDataStr = localStorage.getItem('auctionData_import_backup');
             const importTime = localStorage.getItem('auctionData_import_backup_time');
@@ -8045,20 +8293,47 @@
                 return false;
             }
 
-            // 显示备份时间
+            let backupPayload;
+            try {
+                backupPayload = JSON.parse(backupDataStr);
+            } catch (e) {
+                alert('备份数据已损坏，无法撤回');
+                return false;
+            }
+
+            // 兼容旧版本备份格式（曾经是"最近30天"的整体对象，没有 date/data 结构）。
+            // 旧格式一旦被恢复会牵连其它日期，为安全起见直接拒绝撤回并清除，而不是尝试恢复。
+            if (!backupPayload || typeof backupPayload !== 'object' || !('date' in backupPayload)) {
+                alert('检测到旧版本的撤回备份（可能影响多天数据），为避免误覆盖历史数据，已自动清除，无法撤回。请重新操作后再试。');
+                localStorage.removeItem('auctionData_import_backup');
+                localStorage.removeItem('auctionData_import_backup_time');
+                localStorage.removeItem('auctionData_save_backup');
+                localStorage.removeItem('auctionData_save_backup_time');
+                return false;
+            }
+
+            const backupDate = backupPayload.date;
+            const backupDayData = backupPayload.data;
+
+            // 显示备份时间和具体日期
             let timeInfo = '';
             if (backupTime) {
                 const date = new Date(backupTime);
-                timeInfo = `（${backupType}备份时间：${date.toLocaleString()}）`;
+                timeInfo = `（${backupType}备份时间：${date.toLocaleString()}，仅恢复 ${backupDate} 这一天）`;
             }
 
             if (!confirm(`确定要撤回早盘竞价数据吗？${timeInfo}`)) {
                 return false;
             }
 
-            // 恢复备份数据
-            const backupAuction = JSON.parse(backupDataStr);
-            allData.auction = backupAuction;
+            // 恢复备份数据：只精准覆盖被备份的那一天，其它日期完全不动
+            allData.auction = allData.auction || {};
+            if (backupDayData === null) {
+                // 备份时这一天本来就没有数据，撤回即恢复为"没有"
+                delete allData.auction[backupDate];
+            } else {
+                allData.auction[backupDate] = backupDayData;
+            }
             saveData();
 
             // 撤回后清除全部备份，避免下次撤回到错误状态
@@ -8448,6 +8723,13 @@
             }
             
             formContainer.innerHTML = html;
+            // 每次打开弹窗时，"历史数据补录"开关重置为默认关闭状态，日期清空（下次开启时自动填当前日历日期）
+            const historyFillToggle = document.getElementById('auctionHistoryFillToggle');
+            const historyFillBody = document.getElementById('auctionHistoryFillBody');
+            const historyFillDate = document.getElementById('auctionHistoryFillDate');
+            if (historyFillToggle) historyFillToggle.checked = false;
+            if (historyFillBody) historyFillBody.style.display = 'none';
+            if (historyFillDate) historyFillDate.value = '';
             // 延迟显示模态框，确保 DOM 完全渲染
             setTimeout(() => {
                 document.getElementById('auctionModal').classList.add('active');
@@ -8699,22 +8981,23 @@
                     const existingNote = auctionList[existingIndex].note || '';
                     const newNote = noteItem.note || '';
                     
-                    // 检查新导入的是否是纯涨幅（如 +2.3% 或 -1.5% 或 2.3%）
-                    const isNewPercent = /^[+-]?\d+\.?\d*%$/.test(newNote.trim());
+                    // 检查新导入的是否是纯涨幅类信息（如 +2.3% 、 -1.5% 、 2.3%、停牌、涨停、跌停）
+                    // 停牌/涨停/跌停这类状态词和百分比一样，都代表"当天涨跌状态"，导入时应替换旧涨幅而不是追加合并
+                    const trimmedNewNote = newNote.trim();
+                    const isNewPercent = /^[+-]?\d+\.?\d*%$/.test(trimmedNewNote);
+                    const isNewStatusWord = /^(停牌|涨停|跌停)$/.test(trimmedNewNote);
+                    const isNewChangeInfo = isNewPercent || isNewStatusWord;
                     
-                    if (isNewPercent && existingNote) {
-                        // 新导入的是涨幅，替换原有涨幅，保留其他内容
+                    if (isNewChangeInfo && existingNote) {
+                        // 新导入的是涨幅/停牌等状态，完全替换旧涨幅，只保留题材括号内容
+                        // 注：不再尝试保留旧note里的"裸露百分比"，因为该字段本质上和真正的"占比"
+                        // （由竞价量/昨日成交量计算得出，显示在独立的占比列）无关，只是历史遗留逻辑，
+                        // 且无法用正则可靠区分"合法占比"与"脏数据里残留的另一个涨幅"，
+                        // 保留它反而是之前"数字重复拼接"问题的根源，因此直接去掉更安全。
                         const bracketMatches = existingNote.match(/\([^)]+\)/g) || [];
-                        const ztDtMatches = existingNote.match(/涨停|跌停/g) || [];
-                        const uniqueZtDt = [...new Set(ztDtMatches)];
-                        // 保留原有裸露占比（不带+/-前缀的纯数字%，如7%、29%）
-                        const bareOccupancy = existingNote.replace(/\([^)]+\)/g, '').match(/(?<![+-])\b\d+\.?\d*%/g) || [];
 
-                        // 构建新注释：新涨幅 + 涨停/跌停 + 占比 + 题材
-                        let newNoteBuilt = newNote.trim();
-                        if (uniqueZtDt.length > 0) newNoteBuilt += uniqueZtDt.join('');
-                        if (bareOccupancy.length > 0) newNoteBuilt += bareOccupancy.join('');
-                        newNoteBuilt += bracketMatches.join('');
+                        // 构建新注释：新涨幅/状态词 + 题材
+                        let newNoteBuilt = trimmedNewNote + bracketMatches.join('');
                         const normalizedNote = newNoteBuilt.replace(/[，、;；]/g, ',');
                         auctionList[existingIndex].note = normalizedNote;
                     } else if (existingNote && !existingNote.includes(newNote)) {
@@ -8855,6 +9138,8 @@
                     // 所有收盘涨幅同步完成，再同步题材，最后统一保存一次
                     syncStockTopicsFromAuction();
                     saveModule('stocks');
+                    // 涨跌幅可能已批量新增/覆盖，重新统计"最近多板"的总数量和跌涨比
+                    recalcDuibanFromAuction();
                 }
             }
 
@@ -8868,6 +9153,201 @@
                 submitBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
         }
+
+        // 解析"258.5万"或"3528"这类竞价量文本，统一返回数字字符串（不做单位换算）
+        // 带"万"字：提取"万"字前面的数字；不带"万"字：直接使用这个数字
+        function parseVolumeOnlyText(text) {
+            if (!text) return null;
+            const trimmed = text.trim();
+            if (trimmed.includes('万')) {
+                const match = trimmed.match(/(-?\d+\.?\d*)\s*万/);
+                return match ? match[1] : null;
+            }
+            const match = trimmed.match(/^-?\d+\.?\d*$/);
+            return match ? trimmed : null;
+        }
+
+        // "历史数据补录"开关变化时的处理：控制专用输入区域的显示/隐藏，并默认把日期选择器设为当前日历日期
+        function onAuctionHistoryFillToggleChange() {
+            const checked = document.getElementById('auctionHistoryFillToggle').checked;
+            const body = document.getElementById('auctionHistoryFillBody');
+            if (body) {
+                body.style.display = checked ? 'block' : 'none';
+            }
+            if (checked) {
+                const dateInput = document.getElementById('auctionHistoryFillDate');
+                if (dateInput && !dateInput.value) {
+                    dateInput.value = currentDate;
+                }
+            }
+        }
+
+        // 历史数据补录：只补数值，绝不新增/删除股票，不改变任何日期的股票列表结构。
+        // 支持两种格式：
+        //   三列（Tab分隔）：股票名称[TAB]竞价量[TAB]昨日成交量 —— 两个字段一起补
+        //   两列（Tab分隔）：股票名称[TAB]数字 —— 按用户选择的单选（竞价量/昨日成交量）补对应字段
+        // 规则：目标日期当天列表里必须已存在该股票才会补值；已有值不覆盖；不存在的股票直接跳过。
+        function importAuctionHistoryFill() {
+            const textarea = document.getElementById('auctionHistoryFillInput');
+            const rawText = textarea ? textarea.value : '';
+            const pasteText = rawText.trim();
+            const statusEl = document.getElementById('auctionHistoryFillStatus');
+            const dateInput = document.getElementById('auctionHistoryFillDate');
+            const targetDate = dateInput ? dateInput.value : '';
+
+            if (!targetDate) {
+                if (statusEl) {
+                    statusEl.textContent = '请先选择目标日期！';
+                    statusEl.style.color = '#dc2626';
+                }
+                return;
+            }
+
+            if (!pasteText) {
+                if (statusEl) {
+                    statusEl.textContent = '请先粘贴数据！';
+                    statusEl.style.color = '#dc2626';
+                }
+                textarea && textarea.focus();
+                return;
+            }
+
+            const colTypeRadio = document.querySelector('input[name="auctionHistoryFillColType"]:checked');
+            const twoColField = colTypeRadio ? colTypeRadio.value : 'volume'; // 两列格式时，数字要填入的字段名
+
+            // 备份早盘竞价数据（用于撤回），与现有导入功能共用同一套备份/撤回机制
+            // 注意：这里备份的是 targetDate（用户选择要补录的历史日期），而不是当天，
+            // 因为这次操作实际改动的就是 targetDate 这一天
+            backupAuctionData('import', targetDate);
+
+            const lines = pasteText.split(/\r?\n/);
+            const auctionData = getAuctionData();
+            const targetList = [...(auctionData[targetDate] || [])];
+
+            let filledCount = 0;     // 成功补齐的字段数（三列格式里补两个字段算两次）
+            let skippedNotFound = 0; // 目标日期列表里找不到该股票，跳过
+            let skippedHasValue = 0; // 股票存在但字段已有值，跳过
+            let invalidCount = 0;    // 无法解析的行数
+
+            lines.forEach((line, index) => {
+                if (!line.trim()) return;
+                if (index === 0 && (line.includes('股票名称') || line.includes('竞价量') || line.includes('昨日成交量'))) return;
+
+                const cells = line.split('\t').map(c => c.trim()).filter((c, i) => i === 0 || c !== '');
+                const rawCells = line.split('\t');
+                const stock = rawCells[0] ? rawCells[0].trim() : '';
+
+                if (!stock) {
+                    invalidCount++;
+                    return;
+                }
+
+                // 找到目标日期列表里对应的股票（只匹配已存在的，不新增）
+                const existingIndex = targetList.findIndex(item => item.stock && item.stock.trim() === stock);
+                if (existingIndex < 0) {
+                    skippedNotFound++;
+                    return;
+                }
+
+                const nonEmptyCells = rawCells.slice(1).map(c => c.trim()).filter(c => c !== '');
+
+                if (nonEmptyCells.length >= 2) {
+                    // 三列格式：股票名称[TAB]竞价量[TAB]昨日成交量，两个字段一起补
+                    const volumeText = rawCells[1] ? rawCells[1].trim() : '';
+                    const yestText = rawCells[2] ? rawCells[2].trim() : '';
+                    const parsedVolume = parseVolumeOnlyText(volumeText);
+                    const parsedYest = parseVolumeOnlyText(yestText);
+
+                    if (parsedVolume === null && parsedYest === null) {
+                        invalidCount++;
+                        return;
+                    }
+
+                    const item = targetList[existingIndex];
+                    let didFill = false;
+
+                    if (parsedVolume !== null) {
+                        const isEmpty = item.volume === '' || item.volume === null || item.volume === undefined;
+                        if (isEmpty) {
+                            item.volume = parsedVolume;
+                            filledCount++;
+                            didFill = true;
+                        } else {
+                            skippedHasValue++;
+                        }
+                    }
+                    if (parsedYest !== null) {
+                        const isEmpty = item.yestVolume === '' || item.yestVolume === null || item.yestVolume === undefined;
+                        if (isEmpty) {
+                            item.yestVolume = parsedYest;
+                            filledCount++;
+                            didFill = true;
+                        } else {
+                            skippedHasValue++;
+                        }
+                    }
+                    if (didFill) {
+                        targetList[existingIndex] = { ...item };
+                    }
+                } else if (nonEmptyCells.length === 1) {
+                    // 两列格式：股票名称[TAB]数字，按用户选择的字段类型补录
+                    const valueText = nonEmptyCells[0];
+                    const parsedValue = parseVolumeOnlyText(valueText);
+                    if (parsedValue === null) {
+                        invalidCount++;
+                        return;
+                    }
+
+                    const item = targetList[existingIndex];
+                    const existingFieldValue = item[twoColField];
+                    const isEmpty = existingFieldValue === '' || existingFieldValue === null || existingFieldValue === undefined;
+                    if (isEmpty) {
+                        targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
+                        filledCount++;
+                    } else {
+                        skippedHasValue++;
+                    }
+                } else {
+                    invalidCount++;
+                }
+            });
+
+            if (filledCount === 0) {
+                if (statusEl) {
+                    let msg = '未补录任何数据';
+                    const parts = [];
+                    if (skippedNotFound > 0) parts.push(`${skippedNotFound}条该日期列表中不存在`);
+                    if (skippedHasValue > 0) parts.push(`${skippedHasValue}个字段已有值`);
+                    if (invalidCount > 0) parts.push(`${invalidCount}行无法识别`);
+                    if (parts.length) msg += `（${parts.join('，')}）`;
+                    statusEl.textContent = msg;
+                    statusEl.style.color = '#dc2626';
+                }
+                return;
+            }
+
+            auctionData[targetDate] = targetList;
+            saveModule('auction');
+            invalidateTopicCache();
+
+            textarea.value = '';
+            let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
+            if (skippedNotFound > 0) statusMsg += ` 跳过${skippedNotFound}条(该日期列表中不存在)`;
+            if (skippedHasValue > 0) statusMsg += ` 跳过${skippedHasValue}个(已有值)`;
+            if (invalidCount > 0) statusMsg += ` 无法识别${invalidCount}行`;
+            if (statusEl) {
+                statusEl.textContent = statusMsg;
+                statusEl.style.color = '#059669';
+            }
+
+            // 若补录的正是当前正在查看的日期，刷新表单和看板显示
+            if (targetDate === currentDate) {
+                setTimeout(() => renderAuctionForm(), 0);
+                setTimeout(() => renderAuction(), 20);
+                setTimeout(() => renderList(), 40);
+            }
+        }
+
 
         function replaceConceptFromPaste() {
             const textarea = document.getElementById('auctionPasteInput');
@@ -8971,6 +9451,9 @@
                 renderAuctionForm();
                 renderAuction();
                 renderList();
+
+                // 概念替换可能改变了note的格式，保险起见重新统计一次"最近多板"
+                recalcDuibanFromAuction();
             }
 
             document.getElementById('auctionPasteInput').value = '';
@@ -9165,6 +9648,9 @@
             
             // 保存前备份（用于撤回）
             backupAuctionData('save');
+
+            // 预建题材缓存：避免下面循环里对每只无注释的股票单独扫描最近66天历史数据（股票多时会明显卡顿）
+            buildTopicCache();
             
             const formContainer = document.getElementById('auctionFormContainer');
             const rows = formContainer.querySelectorAll('.auction-form-row');
@@ -9217,6 +9703,9 @@
             syncStockTopicsFromAuction();
             saveModule('stocks');
             renderList();
+
+            // 涨跌幅数据可能已变化，重新统计"最近多板"的总数量和跌涨比
+            recalcDuibanFromAuction();
             
             const board = document.getElementById('auctionBoard');
             if (board) {
@@ -9247,7 +9736,32 @@
         }
 
         // 渲染早盘竞价看板
+        // 记录上一次渲染早盘竞价看板时的日期，用于判断"是否切换了日期"从而重置展开/排序开关
+        let _lastAuctionRenderDate = null;
+
         function renderAuction() {
+            // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
+            recalcDuibanFromAuction();
+
+            // 日期发生变化时，三个开关（全部展开/按数据排序/竞价量环比排序）重置为默认关闭状态（不记忆）
+            if (_lastAuctionRenderDate !== null && _lastAuctionRenderDate !== currentDate) {
+                const expandToggle = document.getElementById('auctionExpandAllToggle');
+                const sortToggle = document.getElementById('auctionSortByDataToggle');
+                const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                const parallelToggle = document.getElementById('auctionSortByParallelToggle');
+                const expandToggle2 = document.getElementById('auctionExpandAllToggle2');
+                const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
+                const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
+                if (expandToggle) expandToggle.checked = false;
+                if (sortToggle) sortToggle.checked = false;
+                if (ratioToggle) ratioToggle.checked = false;
+                if (parallelToggle) parallelToggle.checked = false;
+                if (expandToggle2) expandToggle2.checked = false;
+                if (ratioToggle2) ratioToggle2.checked = false;
+                if (parallelToggle2) parallelToggle2.checked = false;
+            }
+            _lastAuctionRenderDate = currentDate;
+
             const auctionList = getTodayAuction();
             
             // 实时检查股票列表中的标签，自动标记颜色并锁定
@@ -9430,8 +9944,91 @@
                 if (strengthValueEl) strengthValueEl.textContent = '-';
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
             }
+
+            // 计算"竞放量数"（今日竞价量/昨日竞价量 >= 1.5 的股票数量）及与昨天的对比箭头
+            const highRatioToday = getHighRatioStocksForDate(currentDate);
+            // 计算"平行"达标股票集合（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量），供高光判断复用
+            const parallelStocksToday = getParallelStocksForDate(currentDate);
+            const highRatioCountEl = document.getElementById('auctionHighRatioCount');
+            const highRatioArrowEl = document.getElementById('auctionHighRatioArrow');
+            if (highRatioCountEl) {
+                highRatioCountEl.textContent = highRatioToday.count;
+            }
+            if (highRatioArrowEl) {
+                const prevDateForRatio = getPreviousTradingDay(currentDate);
+                if (prevDateForRatio) {
+                    const highRatioYesterday = getHighRatioStocksForDate(prevDateForRatio);
+                    if (highRatioToday.count > highRatioYesterday.count) {
+                        highRatioArrowEl.textContent = ' ⬆';
+                        highRatioArrowEl.style.color = '#dc2626';
+                    } else if (highRatioToday.count < highRatioYesterday.count) {
+                        highRatioArrowEl.textContent = ' ⬇';
+                        highRatioArrowEl.style.color = '#16a34a';
+                    } else {
+                        highRatioArrowEl.textContent = ' -';
+                        highRatioArrowEl.style.color = '#92400e';
+                    }
+                } else {
+                    highRatioArrowEl.textContent = '';
+                }
+            }
             
-            auctionList.forEach((item, index) => {
+            // 构建渲染顺序：默认按原始顺序；
+            // 若开启"数据"，按近5日有效数据天数从多到少排列；
+            // 若开启"环比"，按 今日竞价量/昨日竞价量 从高到低排列（无昨日数据的排最后）；
+            // 若开启"平行"，今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面（不满足的排后面）
+            // 注意：无论如何排序，每行显示的"序号"始终是该股票的原始序号（不重新编号）
+            let renderOrder = auctionList.map((item, idx) => idx);
+            const sortByDataEnabled = document.getElementById('auctionSortByDataToggle')?.checked;
+            const sortByRatioEnabled = document.getElementById('auctionSortByRatioToggle')?.checked;
+            const sortByParallelEnabled = document.getElementById('auctionSortByParallelToggle')?.checked;
+
+            if (sortByDataEnabled) {
+                const dataCountCache = renderOrder.map(idx => {
+                    const it = auctionList[idx];
+                    if (!it || !it.stock) return 0;
+                    const history = getAuctionStockHistory(it.stock.trim(), currentDate, 5);
+                    return history.filter(h => h.volume !== null || h.yestVolume !== null).length;
+                });
+                renderOrder = renderOrder
+                    .map((idx, pos) => ({ idx, count: dataCountCache[pos] }))
+                    .sort((a, b) => b.count - a.count)
+                    .map(x => x.idx);
+            } else if (sortByRatioEnabled) {
+                const prevDate = getPreviousTradingDay(currentDate);
+                const prevDayList = prevDate ? (getAuctionData()[prevDate] || []) : [];
+                const ratioCache = renderOrder.map(idx => {
+                    const it = auctionList[idx];
+                    const todayVolume = it && it.volume ? parseFloat(it.volume) : 0;
+                    if (!it || !it.stock || !todayVolume) return null; // 今日竞价量本身没有，也视为无法计算
+                    const prevItem = prevDayList.find(p => p.stock && p.stock.trim() === it.stock.trim());
+                    const prevVolume = prevItem && prevItem.volume ? parseFloat(prevItem.volume) : 0;
+                    if (!prevVolume) return null; // 昨日无记录或昨日竞价量为0，视为无法计算
+                    return todayVolume / prevVolume;
+                });
+                renderOrder = renderOrder
+                    .map((idx, pos) => ({ idx, ratio: ratioCache[pos] }))
+                    .sort((a, b) => {
+                        // null（无法计算）永远排在最后；两者都有值则按比值从高到低
+                        if (a.ratio === null && b.ratio === null) return 0;
+                        if (a.ratio === null) return 1;
+                        if (b.ratio === null) return -1;
+                        return b.ratio - a.ratio;
+                    })
+                    .map(x => x.idx);
+            } else if (sortByParallelEnabled) {
+                const parallelStockNames = getParallelStocksForDate(currentDate);
+                renderOrder = renderOrder
+                    .map(idx => ({ idx, qualifies: auctionList[idx] && auctionList[idx].stock && parallelStockNames.has(auctionList[idx].stock.trim()) }))
+                    .sort((a, b) => {
+                        if (a.qualifies === b.qualifies) return 0;
+                        return a.qualifies ? -1 : 1; // 达标的排前面，其余原相对顺序不变（stable sort）
+                    })
+                    .map(x => x.idx);
+            }
+
+            renderOrder.forEach((index) => {
+                const item = auctionList[index];
                 const volume = parseFloat(item.volume) || 0;
                 const yestVolume = parseFloat(item.yestVolume) || 0;
                 let ratio = '-';
@@ -9479,6 +10076,15 @@
                 } else if (isSelected && !isFixed) {
                     itemClass = 'auction-item manual-selected'; // 手动选中显示浅橙色
                 }
+                // 竞放量高光（今日竞价量/昨日竞价量 >= 1.5）：仅在"环比"开关打开时才显示
+                // 平行高光（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：仅在"平行"开关打开时才显示，优先于竞放量高光
+                const isParallelMatch = sortByParallelEnabled && item.stock && parallelStocksToday.has(item.stock.trim());
+                const isHighRatioMatch = sortByRatioEnabled && item.stock && highRatioToday.stockNames.has(item.stock.trim());
+                if (isParallelMatch) {
+                    itemClass += ' parallel-match';
+                } else if (isHighRatioMatch) {
+                    itemClass += ' high-ratio';
+                }
                 let ratioClass = 'auction-ratio auction-ratio-clickable';
                 if (isHighlight) {
                     ratioClass = 'auction-ratio highlight auction-ratio-clickable';
@@ -9510,7 +10116,7 @@
                     }
                 }
                 
-                const numberClass = isGray ? 'auction-number gray-text' : 'auction-number';
+                const numberClass = isGray ? 'auction-number gray-text auction-trend-trigger' : 'auction-number auction-trend-trigger';
                 const stockClass = isGray ? 'auction-stock-name gray-text' : 'auction-stock-name';
                 
                 let volumeHtml = volumeDisplay;
@@ -9520,12 +10126,13 @@
                 
                 html += `
                     <div class="${itemClass}" data-index="${index}">
-                        <div class="${numberClass} auction-note-trigger"${noteAttr}>${index + 1}</div>
+                        <div class="${numberClass}" data-index="${index}">${index + 1}</div>
                         <div class="${stockClass} auction-note-trigger"${noteAttr}>${item.stock || '-'}</div>
                         <div class="auction-volume">${volumeHtml}</div>
                         <div class="auction-yest auction-yest-note${yestColorClass}" data-index="${index}"${noteAttr}>${yestVolumeDisplay}</div>
                         <div class="${ratioClass}" data-index="${index}">${ratio}${ratioArrow}</div>
                     </div>
+                    <div class="auction-trend-panel" id="auctionTrendPanel-${index}" data-index="${index}" style="display:none;"></div>
                 `;
             });
             
@@ -9549,6 +10156,11 @@
                     let lastTapTime = 0;
                     
                     const startHandler = function(e) {
+                        // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
+                        if (e.touches && e.touches.length > 1) {
+                            clearTimeout(pressTimer);
+                            return;
+                        }
                         isLongPress = false;
                         isMoved = false;
                         pressTimer = setTimeout(() => {
@@ -9596,23 +10208,20 @@
                 })(el);
             });
             
-            // 绑定点击序号弹出注释事件
-            document.querySelectorAll('.auction-number.auction-note-trigger').forEach(el => {
+            // 绑定点击序号展开/收起趋势图
+            document.querySelectorAll('.auction-trend-trigger').forEach(el => {
                 el.style.cursor = 'pointer';
                 el.addEventListener('click', function(e) {
                     e.stopPropagation();
-                    const note = this.dataset.note;
-                    if (note) {
-                        const row = this.closest('.auction-item');
-                        const yestEl = row ? row.querySelector('.auction-yest-note') : null;
-                        if (yestEl) {
-                            showAuctionNotePopup(yestEl, note);
-                        }
-                    }
-                    // 取消所有行的选中状态
-                    clearAllAuctionSelections();
+                    const idx = parseInt(this.dataset.index);
+                    toggleAuctionTrendPanel(idx);
                 });
             });
+            
+            // 若"全部展开"开关已打开，渲染完成后自动展开所有趋势面板
+            if (document.getElementById('auctionExpandAllToggle')?.checked) {
+                expandAllAuctionTrendPanels();
+            }
             
             // 绑定股票名称点击弹出注释 + 长按显示买入提示 + 单击跳转到第二页
             document.querySelectorAll('.auction-stock-name').forEach(el => {
@@ -9648,6 +10257,11 @@
                     });
                     
                     const startHandler = function(e) {
+                        // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
+                        if (e.touches && e.touches.length > 1) {
+                            clearTimeout(pressTimer);
+                            return;
+                        }
                         isMoved = false;
                         isLongPress = false;
                         pressTimer = setTimeout(() => {
@@ -10117,6 +10731,14 @@
             const auctionData = getAuctionData();
             const prevAuctionList = prevDate ? (auctionData[prevDate] || []) : [];
 
+            // 计算竞放量达标股票集合（今日竞价量/昨日竞价量四舍五入后 >= 1.5），复用第一页逻辑
+            const highRatioInfo2 = getHighRatioStocksForDate(currentDate);
+            // 是否开启"环比"（分组内部按 今日竞价量/昨日竞价量 从高到低排列）
+            const sortByRatioEnabled2 = document.getElementById('auctionSortByRatioToggle2')?.checked;
+            // 是否开启"平行"（分组内部把 今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面）
+            const sortByParallelEnabled2 = document.getElementById('auctionSortByParallelToggle2')?.checked;
+            const parallelStockNames2 = sortByParallelEnabled2 ? getParallelStocksForDate(currentDate) : null;
+
             // 统计每只股票出现在多少个题材中（排除"其它"）
             const stockTopicCount = {};
             groups.forEach(group => {
@@ -10212,6 +10834,7 @@
                     </div>
             `;
 
+            let page2RowSeq = 0;
             sortedGroups.forEach(group => {
                 // 统计本周该题材在昨日最大成交额看板中出现的次数
                 let rankAppearCount = 0;
@@ -10234,8 +10857,15 @@
                     strengthText = ` 强度<span style="color:#ef4444;">${group.strength}%</span>`;
                 }
                 
+                // 判断该题材是否允许展开（排除"其它"和"并购重组"）
+                const topicAllowsGroupExpand = group.topic !== '其它' && group.topic !== '并购重组';
+                const groupExpandRow = topicAllowsGroupExpand
+                    ? `<div class="auction-topic-expand-row" data-topic="${group.topic}"><span class="auction-topic-expand-arrow">▼</span></div>`
+                    : '';
+                
                 html += `
-                    <div class="auction-topic-group">
+                    <div class="auction-topic-group" data-topic-group="${group.topic}">
+                        ${groupExpandRow}
                         <div class="auction-topic-header" data-topic="${group.topic}">
                             <span class="auction-topic-left">【${group.topic}】${rankAppearText}</span>
                             <span class="auction-topic-stars">${starText}</span>
@@ -10244,7 +10874,40 @@
                         </div>
                 `;
                 
-                group.stocks.forEach(stock => {
+                // 若开启"环比"，题材分组顺序不变，仅对分组内部个股按 今日竞价量/昨日竞价量 从高到低排列
+                // 昨日无记录/竞价量为0/断点的股票排在本分组最后（沿用与第一页一致的判定口径）
+                let stocksToRender = group.stocks;
+                if (sortByRatioEnabled2) {
+                    const prevAuctionListForSort = prevAuctionList;
+                    stocksToRender = group.stocks.slice().sort((a, b) => {
+                        const getRatio = (s) => {
+                            if (!s.stock) return null;
+                            const todayItem = auctionList.find(item => item.stock && item.stock.trim() === s.stock.trim());
+                            const todayVolume = todayItem && todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
+                            if (todayVolume === null || todayVolume === 0) return null;
+                            const prevItem = prevAuctionListForSort.find(p => p.stock && p.stock.trim() === s.stock.trim());
+                            const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                            if (prevVolume === null || prevVolume === 0) return null;
+                            return todayVolume / prevVolume;
+                        };
+                        const ratioA = getRatio(a);
+                        const ratioB = getRatio(b);
+                        if (ratioA === null && ratioB === null) return 0;
+                        if (ratioA === null) return 1;
+                        if (ratioB === null) return -1;
+                        return ratioB - ratioA;
+                    });
+                } else if (sortByParallelEnabled2 && parallelStockNames2) {
+                    // 若开启"平行"，题材分组顺序不变，仅将分组内 今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的个股排到本分组最前面
+                    stocksToRender = group.stocks.slice().sort((a, b) => {
+                        const qualifiesA = a.stock && parallelStockNames2.has(a.stock.trim());
+                        const qualifiesB = b.stock && parallelStockNames2.has(b.stock.trim());
+                        if (qualifiesA === qualifiesB) return 0;
+                        return qualifiesA ? -1 : 1;
+                    });
+                }
+                
+                stocksToRender.forEach(stock => {
                     let ratioClass = 'auction-topic-ratio';
                     if (stock.ratioValue >= 10) {
                         ratioClass = 'auction-topic-ratio highlight';
@@ -10313,15 +10976,31 @@
                             rowClass = 'auction-topic-row selected';
                         }
                     }
+                    // 竞放量高光：仅在"环比"开关打开时才显示；平行高光：仅在"平行"开关打开时才显示，优先于竞放量高光
+                    const isParallelMatch2 = sortByParallelEnabled2 && parallelStockNames2 && stock.stock && parallelStockNames2.has(stock.stock.trim());
+                    const isHighRatioMatch2 = sortByRatioEnabled2 && stock.stock && highRatioInfo2.stockNames.has(stock.stock.trim());
+                    if (isParallelMatch2) {
+                        rowClass += ' parallel-match';
+                    } else if (isHighRatioMatch2) {
+                        rowClass += ' high-ratio';
+                    }
+
+                    // 是否允许展开趋势图：排除"其它"和"并购重组"这两个分组
+                    const topicAllowsExpand = group.topic !== '其它' && group.topic !== '并购重组';
+                    const rowKey = 'p2-' + group.topic + '-' + page2RowSeq++;
+                    const trendTriggerClass = topicAllowsExpand ? 'auction-trend-trigger-p2' : '';
                     
                     html += `
-                        <div class="${rowClass}">
+                        <div class="${rowClass} ${trendTriggerClass}" data-stock="${stock.stock || ''}" data-rowkey="${rowKey}">
                             <div class="auction-topic-stock auction-topic-no-select" style="${stockStyle}">${stock.stock || '-'}</div>
                             <div class="${changeClass} auction-topic-no-select">${changeValue}</div>
                             <div class="auction-topic-name auction-topic-editable auction-topic-no-select" data-stock="${stock.stock}" style="${topicNameStyle}">${topicsDisplay}</div>
                             <div class="${ratioClass} auction-topic-no-select">${stock.ratio}${ratioArrow}</div>
                         </div>
                     `;
+                    if (topicAllowsExpand) {
+                        html += `<div class="auction-trend-panel" id="auctionTrendPanelP2-${rowKey}" data-stock="${stock.stock || ''}" style="display:none;"></div>`;
+                    }
                 });
                 
                 html += `</div>`;
@@ -10332,6 +11011,49 @@
             auctionContent2.innerHTML = html;
             
             bindAuctionTopicEdit();
+
+            // 绑定第二页"点击行展开/收起趋势图"事件
+            document.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
+                rowEl.style.cursor = 'pointer';
+                rowEl.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const stockName = this.dataset.stock;
+                    const rowKey = this.dataset.rowkey;
+                    if (stockName && rowKey) {
+                        toggleAuctionTrendPanelP2(rowKey, stockName);
+                    }
+                });
+            });
+
+            // 若"全部展开"开关已打开，渲染完成后自动展开（切换排序/搜索/重新渲染后维持状态）
+            if (document.getElementById('auctionExpandAllToggle2')?.checked) {
+                expandAllAuctionTrendPanelsP2();
+            }
+
+            // 更新"竞放量数"统计及与昨天的对比箭头（第二页复用第一页同一套计算函数）
+            const highRatioCountEl2 = document.getElementById('auctionHighRatioCount2');
+            const highRatioArrowEl2 = document.getElementById('auctionHighRatioArrow2');
+            if (highRatioCountEl2) {
+                highRatioCountEl2.textContent = highRatioInfo2.count;
+            }
+            if (highRatioArrowEl2) {
+                const prevDateForRatio2 = getPreviousTradingDay(currentDate);
+                if (prevDateForRatio2) {
+                    const highRatioYesterday2 = getHighRatioStocksForDate(prevDateForRatio2);
+                    if (highRatioInfo2.count > highRatioYesterday2.count) {
+                        highRatioArrowEl2.textContent = ' ⬆';
+                        highRatioArrowEl2.style.color = '#dc2626';
+                    } else if (highRatioInfo2.count < highRatioYesterday2.count) {
+                        highRatioArrowEl2.textContent = ' ⬇';
+                        highRatioArrowEl2.style.color = '#16a34a';
+                    } else {
+                        highRatioArrowEl2.textContent = ' -';
+                        highRatioArrowEl2.style.color = '#92400e';
+                    }
+                } else {
+                    highRatioArrowEl2.textContent = '';
+                }
+            }
         }
 
         // 获取第三页题材排序顺序
@@ -11834,6 +12556,11 @@
                 el.style.webkitTouchCallout = 'none';
                 
                 const startHandler = function(e) {
+                    // 多指触摸（如三指下滑截图手势）不触发长按编辑，直接跳过
+                    if (e.touches && e.touches.length > 1) {
+                        clearTimeout(pressTimer);
+                        return;
+                    }
                     isMoved = false;
                     pressTimer = setTimeout(() => {
                         const stockName = el.dataset.stock;
@@ -11851,6 +12578,12 @@
                 const endHandler = function(e) {
                     clearTimeout(pressTimer);
                 };
+
+                // 触摸被系统手势（如截图、来电）中断时，浏览器会触发 touchcancel 而非 touchend，
+                // 必须监听并清除计时器，否则会在手势结束后误判为"长按"从而弹出编辑框
+                const cancelHandler = function(e) {
+                    clearTimeout(pressTimer);
+                };
                 
                 el.addEventListener('mousedown', startHandler);
                 el.addEventListener('mouseup', endHandler);
@@ -11858,6 +12591,7 @@
                 el.addEventListener('touchstart', startHandler, { passive: true });
                 el.addEventListener('touchmove', moveHandler, { passive: true });
                 el.addEventListener('touchend', endHandler);
+                el.addEventListener('touchcancel', cancelHandler);
                 el.addEventListener('contextmenu', function(e) {
                     e.preventDefault();
                 });
@@ -12188,7 +12922,16 @@
                     }
                 }
                 
-                // 第二页题材标题点击事件委托
+                // 第二页"展开/收起本题材趋势图"独立行的点击事件委托（与标题栏跳转逻辑完全分离，不受第三页跳转场景影响）
+                const expandRow = e.target.closest('.auction-topic-expand-row');
+                if (expandRow) {
+                    const expandTopic = expandRow.dataset.topic;
+                    if (expandTopic) {
+                        toggleTopicGroupTrendPanels(expandTopic);
+                    }
+                }
+                
+                // 第二页题材标题点击事件委托（仅在"从第三页跳转过来"场景下用于跳回第三页）
                 const header = e.target.closest('.auction-topic-header');
                 if (header) {
                     const topic = header.dataset.topic;
@@ -12332,6 +13075,431 @@
         }
         
         // 切换行选中状态
+        // 展开某一行的趋势面板（供"全部展开"复用，不做toggle判断，直接展开）
+        function expandAuctionTrendPanel(index) {
+            const panel = document.getElementById('auctionTrendPanel-' + index);
+            if (!panel) return;
+            const auctionList = getTodayAuction();
+            const item = auctionList[index];
+            if (!item || !item.stock) return;
+            const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5);
+            panel.innerHTML = renderAuctionTrendHtml(history);
+            panel.style.display = 'block';
+        }
+
+        // 展开当前列表所有行的趋势面板
+        function expandAllAuctionTrendPanels() {
+            const auctionList = getTodayAuction();
+            auctionList.forEach((item, idx) => {
+                expandAuctionTrendPanel(idx);
+            });
+        }
+
+        // 收起当前列表所有行的趋势面板
+        function collapseAllAuctionTrendPanels() {
+            document.querySelectorAll('.auction-trend-panel').forEach(panel => {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+            });
+        }
+
+        // ===== 第二页（按题材分组）专用的趋势图展开逻辑 =====
+
+        // 展开/收起第二页某一行的趋势面板（rowKey 用于定位具体行，因为同一股票可能在多个题材下重复出现）
+        function toggleAuctionTrendPanelP2(rowKey, stockName) {
+            const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+            if (!panel) return;
+
+            const isOpen = panel.style.display !== 'none';
+            if (isOpen) {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+                return;
+            }
+
+            const history = getAuctionStockHistory(stockName.trim(), currentDate, 5);
+            panel.innerHTML = renderAuctionTrendHtml(history);
+            panel.style.display = 'block';
+        }
+
+        // 展开第二页所有允许展开的行（排除"其它"和"并购重组"分组），同一股票只在第一次出现时真正渲染，避免重复占用空间
+        // 展开第二页所有允许展开的行（排除"其它"和"并购重组"分组）
+        // 每个题材分组内部的所有个股都独立展开，即使同一只股票在多个分组下会重复展开好几次（用户明确需要按题材分组做完整对比）
+        function expandAllAuctionTrendPanelsP2() {
+            document.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
+                const stockName = (rowEl.dataset.stock || '').trim();
+                const rowKey = rowEl.dataset.rowkey;
+                if (!stockName || !rowKey) return;
+
+                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                if (!panel) return;
+
+                const history = getAuctionStockHistory(stockName, currentDate, 5);
+                panel.innerHTML = renderAuctionTrendHtml(history);
+                panel.style.display = 'block';
+            });
+            // 同步所有题材标题栏的箭头方向为"展开"
+            document.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
+                arrowEl.classList.add('expanded');
+            });
+        }
+
+        // 收起第二页所有趋势面板
+        function collapseAllAuctionTrendPanelsP2() {
+            document.querySelectorAll('[id^="auctionTrendPanelP2-"]').forEach(panel => {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+            });
+            // 同步所有题材标题栏的箭头方向为"收起"
+            document.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
+                arrowEl.classList.remove('expanded');
+            });
+        }
+
+        // 单独展开/收起某一个题材分组下所有个股的趋势图，与"全部展开"总开关互不影响
+        function toggleTopicGroupTrendPanels(topic) {
+            const groupEl = document.querySelector(`.auction-topic-group[data-topic-group="${CSS.escape(topic)}"]`);
+            if (!groupEl) return;
+
+            const rows = groupEl.querySelectorAll('.auction-trend-trigger-p2');
+            if (rows.length === 0) return;
+
+            // 判断当前分组状态：只要组内有任意一行已展开，就视为"已展开"，这次操作统一收起；否则统一展开
+            let anyExpanded = false;
+            rows.forEach(rowEl => {
+                const rowKey = rowEl.dataset.rowkey;
+                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                if (panel && panel.style.display !== 'none' && panel.innerHTML.trim() !== '') {
+                    anyExpanded = true;
+                }
+            });
+
+            rows.forEach(rowEl => {
+                const stockName = (rowEl.dataset.stock || '').trim();
+                const rowKey = rowEl.dataset.rowkey;
+                if (!stockName || !rowKey) return;
+                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                if (!panel) return;
+
+                if (anyExpanded) {
+                    panel.style.display = 'none';
+                    panel.innerHTML = '';
+                } else {
+                    const history = getAuctionStockHistory(stockName, currentDate, 5);
+                    panel.innerHTML = renderAuctionTrendHtml(history);
+                    panel.style.display = 'block';
+                }
+            });
+
+            // 更新箭头方向：展开状态朝上（180度），收起状态朝下（默认）
+            const arrowEl = groupEl.querySelector('.auction-topic-expand-arrow');
+            if (arrowEl) {
+                if (anyExpanded) {
+                    arrowEl.classList.remove('expanded');
+                } else {
+                    arrowEl.classList.add('expanded');
+                }
+            }
+        }
+
+        // 第二页"全部展开"开关变化时的处理
+        function onAuctionExpandAllToggle2Change() {
+            const checked = document.getElementById('auctionExpandAllToggle2').checked;
+            if (checked) {
+                expandAllAuctionTrendPanelsP2();
+            } else {
+                collapseAllAuctionTrendPanelsP2();
+            }
+        }
+
+        // 第二页"环比排序"开关变化时的处理（分组顺序不变，仅重排分组内部个股）
+        // 第二页"环比"开关变化时的处理（分组顺序不变，仅重排分组内部个股）
+        function onAuctionSortByRatioToggle2Change() {
+            const ratioChecked = document.getElementById('auctionSortByRatioToggle2').checked;
+            if (ratioChecked) {
+                // 与"平行"互斥，打开这个就关闭另一个
+                const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
+                if (parallelToggle2) parallelToggle2.checked = false;
+            }
+            renderAuctionPage2();
+        }
+
+        // 第二页"平行"开关变化时的处理：今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排到分组最前面
+        function onAuctionSortByParallelToggle2Change() {
+            const parallelChecked = document.getElementById('auctionSortByParallelToggle2').checked;
+            if (parallelChecked) {
+                // 与"环比"互斥，打开这个就关闭另一个
+                const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
+                if (ratioToggle2) ratioToggle2.checked = false;
+            }
+            renderAuctionPage2();
+        }
+
+        // "全部展开"开关变化时的处理
+        function onAuctionExpandAllToggleChange() {
+            const checked = document.getElementById('auctionExpandAllToggle').checked;
+            if (checked) {
+                expandAllAuctionTrendPanels();
+            } else {
+                collapseAllAuctionTrendPanels();
+                // 关闭"全部展开"时，若"按数据排序"仍开启，保持排序但不强制展开
+            }
+        }
+
+        // "按数据排序"开关变化时的处理
+        function onAuctionSortByDataToggleChange() {
+            const sortChecked = document.getElementById('auctionSortByDataToggle').checked;
+            if (sortChecked) {
+                // 与"环比"、"平行"互斥，打开这个就关闭另外两个
+                const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                const parallelToggle = document.getElementById('auctionSortByParallelToggle');
+                if (ratioToggle) ratioToggle.checked = false;
+                if (parallelToggle) parallelToggle.checked = false;
+                // 联动打开"全部展开"，方便核对排序结果
+                const expandToggle = document.getElementById('auctionExpandAllToggle');
+                if (expandToggle) expandToggle.checked = true;
+            }
+            // 重新渲染以应用新的排序顺序（renderAuction 内部会读取开关的最新状态）
+            renderAuction();
+        }
+
+        // "环比"开关变化时的处理（今日竞价量 / 昨日竞价量，从高到低）
+        function onAuctionSortByRatioToggleChange() {
+            const ratioChecked = document.getElementById('auctionSortByRatioToggle').checked;
+            if (ratioChecked) {
+                // 与"数据"、"平行"互斥，打开这个就关闭另外两个
+                const sortToggle = document.getElementById('auctionSortByDataToggle');
+                const parallelToggle = document.getElementById('auctionSortByParallelToggle');
+                if (sortToggle) sortToggle.checked = false;
+                if (parallelToggle) parallelToggle.checked = false;
+                // 注意：不联动打开"全部展开"，需用户手动开启
+            }
+            renderAuction();
+        }
+
+        // "平行"开关变化时的处理：今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面
+        function onAuctionSortByParallelToggleChange() {
+            const parallelChecked = document.getElementById('auctionSortByParallelToggle').checked;
+            if (parallelChecked) {
+                // 与"数据"、"环比"互斥，打开这个就关闭另外两个
+                const sortToggle = document.getElementById('auctionSortByDataToggle');
+                const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                if (sortToggle) sortToggle.checked = false;
+                if (ratioToggle) ratioToggle.checked = false;
+                // 注意：不再联动打开"全部展开"，需用户手动开启（与第二页保持一致）
+            }
+            renderAuction();
+        }
+
+        // 展开/收起某只股票的5日竞价量+昨日成交量趋势图
+        function toggleAuctionTrendPanel(index) {
+            const panel = document.getElementById('auctionTrendPanel-' + index);
+            if (!panel) return;
+
+            const isOpen = panel.style.display !== 'none';
+            if (isOpen) {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+                return;
+            }
+
+            expandAuctionTrendPanel(index);
+        }
+
+        // 获取某只股票最近N个交易日（含当天）的竞价量/昨日成交量历史
+        // 返回按时间正序排列的数组：[{date, volume, yestVolume}, ...]，没有记录的天 volume/yestVolume 为 null
+        // 计算指定日期的"竞放量"股票（今日竞价量/昨日竞价量 >= 1.5）
+        // 返回 { count, stockNames: Set }：数量，以及达标股票名称集合（用于行高亮）
+        // 昨天断点/无记录/竞价量为0的股票不计入分子分母，也不算达标
+        function getHighRatioStocksForDate(dateStr) {
+            const auctionData = getAuctionData();
+            const todayList = auctionData[dateStr] || [];
+            const prevDate = getPreviousTradingDay(dateStr);
+            const prevList = prevDate ? (auctionData[prevDate] || []) : [];
+
+            const stockNames = new Set();
+            todayList.forEach(item => {
+                if (!item || !item.stock) return;
+                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
+                if (todayVolume === null || todayVolume === 0) return;
+                const prevItem = prevList.find(p => p.stock && p.stock.trim() === item.stock.trim());
+                const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                if (prevVolume === null || prevVolume === 0) return;
+                const ratio = todayVolume / prevVolume;
+                const roundedRatio = Math.round(ratio * 10) / 10; // 四舍五入到一位小数，与表格显示的"今/昨比"保持一致
+                if (roundedRatio >= 1.5) {
+                    stockNames.add(item.stock.trim());
+                }
+            });
+            return { count: stockNames.size, stockNames };
+        }
+
+        // 判断"平行"条件：T日竞价量 > T-1交易日竞价量，且 T-1交易日成交量 > T-2交易日成交量
+        // 两个条件都满足才算达标；任一环节断点/无数据都判定为不满足
+        // 字段说明：某天记录里的"yestVolume"字段，代表的是"该天的前一交易日的总成交量"
+        //   因此"T-1交易日自身的总成交量" = 今日(T)记录里的 yestVolume 字段
+        //        "T-2交易日自身的总成交量" = T-1记录里的 yestVolume 字段
+        // 返回 Set<股票名称>，包含指定日期下所有满足条件的股票
+        function getParallelStocksForDate(dateStr) {
+            const auctionData = getAuctionData();
+            const todayList = auctionData[dateStr] || [];
+            const t1Date = getPreviousTradingDay(dateStr);
+            const t1List = t1Date ? (auctionData[t1Date] || []) : [];
+
+            const stockNames = new Set();
+            todayList.forEach(item => {
+                if (!item || !item.stock) return;
+                const name = item.stock.trim();
+
+                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
+                // T的yestVolume字段 = T-1交易日自身的总成交量
+                const t1OwnVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
+
+                const t1Item = t1List.find(p => p.stock && p.stock.trim() === name);
+                const t1Volume = t1Item && t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
+                // T-1的yestVolume字段 = T-2交易日自身的总成交量
+                const t2OwnVolume = t1Item && t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
+
+                // 条件1：今日竞价量 > T-1交易日竞价量
+                if (todayVolume === null || t1Volume === null) return;
+                if (!(todayVolume > t1Volume)) return;
+
+                // 条件2：T-1交易日成交量 > T-2交易日成交量
+                if (t1OwnVolume === null || t2OwnVolume === null) return;
+                if (!(t1OwnVolume > t2OwnVolume)) return;
+
+                stockNames.add(name);
+            });
+            return stockNames;
+        }
+
+        function getAuctionStockHistory(stockName, endDate, count) {
+            const auctionData = getAuctionData();
+            const days = [];
+            let d = endDate;
+            for (let i = 0; i < count; i++) {
+                if (!d) break;
+                const dayList = auctionData[d] || [];
+                const found = dayList.find(p => p.stock && p.stock.trim() === stockName);
+                days.push({
+                    date: d,
+                    volume: found && found.volume !== '' && found.volume != null ? parseFloat(found.volume) : null,
+                    yestVolume: found && found.yestVolume !== '' && found.yestVolume != null ? parseFloat(found.yestVolume) : null
+                });
+                d = getPreviousTradingDay(d);
+            }
+            return days.reverse(); // 正序：从早到晚
+        }
+
+        // 将 'YYYY-MM-DD' 格式化为 'MM-DD' 用于图表横轴标签
+        function formatTrendDateLabel(dateStr) {
+            const parts = dateStr.split('-');
+            return parts[1] + '-' + parts[2];
+        }
+
+        // 生成单张迷你SVG折线图的HTML（含数值和日期标注）
+        // points: [{date, value}, ...]  value 为 null 表示当天无记录，断开连线
+        // color: 线条/数字颜色
+        function renderMiniTrendSvg(points, color, unit) {
+            const width = 320;   // viewBox 宽度，配合 svg 的 width:100% 自适应容器实际宽度
+            const height = 56;   // 折线绘制区域高度
+            const paddingX = 28; // 左右留白，防止数值文字被裁切
+            const paddingTop = 16;
+            const paddingBottom = 8;
+
+            const validValues = points.filter(p => p.value !== null).map(p => p.value);
+            const maxV = validValues.length ? Math.max(...validValues) : 1;
+            const minV = validValues.length ? Math.min(...validValues) : 0;
+            const range = (maxV - minV) || 1;
+
+            const n = points.length;
+            const stepX = (width - paddingX * 2) / (n - 1 || 1);
+
+            const coords = points.map((p, i) => {
+                const x = paddingX + stepX * i;
+                if (p.value === null) return { x, y: null };
+                const y = paddingTop + (height - paddingTop - paddingBottom) * (1 - (p.value - minV) / range);
+                return { x, y };
+            });
+
+            // 生成折线路径：遇到 null 就断开，分段绘制
+            let pathSegments = [];
+            let currentSeg = [];
+            coords.forEach(c => {
+                if (c.y === null) {
+                    if (currentSeg.length > 1) pathSegments.push(currentSeg);
+                    currentSeg = [];
+                } else {
+                    currentSeg.push(c);
+                }
+            });
+            if (currentSeg.length > 1) pathSegments.push(currentSeg);
+
+            const pathsHtml = pathSegments.map(seg => {
+                const d = seg.map((c, i) => (i === 0 ? 'M' : 'L') + c.x.toFixed(1) + ',' + c.y.toFixed(1)).join(' ');
+                return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+            }).join('');
+
+            const dotsHtml = coords.map((c, i) => {
+                if (c.y === null) return '';
+                return `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="2.6" fill="${color}"/>`;
+            }).join('');
+
+            const valueLabelsHtml = coords.map((c, i) => {
+                const p = points[i];
+                if (p.value === null) {
+                    return `<text x="${c.x.toFixed(1)}" y="${paddingTop - 4}" font-size="9" fill="#cbd5e1" text-anchor="middle">--</text>`;
+                }
+                const displayVal = Math.round(p.value);
+                return `<text x="${c.x.toFixed(1)}" y="${(c.y - 6).toFixed(1)}" font-size="9" fill="${color}" text-anchor="middle" font-weight="600">${displayVal}</text>`;
+            }).join('');
+
+            const dateLabelsHtml = coords.map((c, i) => {
+                return `<text x="${c.x.toFixed(1)}" y="${height + 2}" font-size="8.5" fill="#94a3b8" text-anchor="middle">${formatTrendDateLabel(points[i].date)}</text>`;
+            }).join('');
+
+            return `
+                <svg viewBox="0 0 ${width} ${height + 12}" style="width:100%; height:auto; display:block;">
+                    ${pathsHtml}
+                    ${dotsHtml}
+                    ${valueLabelsHtml}
+                    ${dateLabelsHtml}
+                </svg>
+            `;
+        }
+
+        // 生成整个趋势面板的HTML：竞价量图在上，昨日成交量图在下
+        function renderAuctionTrendHtml(history) {
+            const volumePoints = history.map(h => ({ date: h.date, value: h.volume }));
+            const yestPoints = history.map(h => ({ date: h.date, value: h.yestVolume }));
+
+            const volumeSvg = renderMiniTrendSvg(volumePoints, '#6366f1'); // 靛蓝色：竞价量
+            const yestSvg = renderMiniTrendSvg(yestPoints, '#10b981');    // 绿色：昨日成交量
+
+            // 计算"今日竞价量 / 昨日竞价量"比值：history最后一项是今天，倒数第二项是昨天
+            // 若昨天是断点（无数据）或昨日竞价量为0，则不显示比值
+            let ratioHtml = '';
+            if (history.length >= 2) {
+                const todayVal = history[history.length - 1].volume;
+                const yestVal = history[history.length - 2].volume;
+                if (todayVal !== null && yestVal !== null && yestVal !== 0) {
+                    const ratio = (todayVal / yestVal).toFixed(1);
+                    ratioHtml = `<span style="color:#6366f1; font-weight:600;">今/昨比 ${ratio}</span>`;
+                }
+            }
+
+            return `
+                <div style="padding: 6px 8px 8px; background: #f8fafc;">
+                    <div style="font-size:10px; color:#94a3b8; margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;">
+                        <span>竞价量(万) 近5日</span>${ratioHtml}
+                    </div>
+                    ${volumeSvg}
+                    <div style="font-size:10px; color:#94a3b8; margin: 4px 0 2px;">昨日成交量(万) 近5日</div>
+                    ${yestSvg}
+                </div>
+            `;
+        }
+
         function toggleAuctionRowSelect(index) {
             const auctionList = getTodayAuction();
             if (auctionList[index]) {
@@ -17048,6 +18216,63 @@
             localStorage.setItem('duibanData', JSON.stringify(data));
         }
 
+        // 根据早盘竞价看板当天所有股票的涨跌幅（note字段），自动统计"最近多板"的总数量和跌涨比。
+        // 只统计note中含有涨跌幅信息（百分比或涨停/跌停）的股票；纯题材注释或空白note不计入。
+        // 涨停按涨、跌停按跌计算；0%记入总数但不计涨也不计跌（平盘）。
+        // 结果写入duibanData当天记录的第一行（保留竞符合数、图示不动，因为这两项仍由用户手动维护）；
+        // 若旧数据本来有多行，只更新第一行，其余行原样保留，不丢数据。
+        function recalcDuibanFromAuction() {
+            const auctionList = getTodayAuction();
+            let riseCount = 0;
+            let fallCount = 0;
+            let flatCount = 0;
+
+            auctionList.forEach(item => {
+                if (!item.note) return;
+                const note = item.note;
+
+                if (note.includes('涨停')) {
+                    riseCount++;
+                    return;
+                }
+                if (note.includes('跌停')) {
+                    fallCount++;
+                    return;
+                }
+                const percentMatch = note.match(/-?\d+\.?\d*%/);
+                if (percentMatch) {
+                    const value = parseFloat(percentMatch[0]);
+                    if (value > 0) riseCount++;
+                    else if (value < 0) fallCount++;
+                    else flatCount++;
+                }
+            });
+
+            const total = riseCount + fallCount + flatCount;
+            console.log('[最近多板调试] currentDate=', currentDate, '早盘竞价股票数=', auctionList.length,
+                'notes样本=', auctionList.slice(0, 5).map(i => i.note),
+                'rise=', riseCount, 'fall=', fallCount, 'flat=', flatCount, 'total=', total);
+            // 没有任何一只股票带涨跌幅数据时，不做统计更新（避免把已有的手动数据清空）
+            if (total === 0) return;
+
+            const duibanData = JSON.parse(localStorage.getItem('duibanData') || '{}');
+            const existingList = duibanData[currentDate] || [];
+            const firstRow = existingList[0] || {};
+
+            const updatedFirstRow = {
+                ...firstRow,
+                shuliang: String(total),
+                dieZhangbi: `${fallCount}:${riseCount}`
+            };
+
+            const newList = [updatedFirstRow, ...existingList.slice(1)];
+            duibanData[currentDate] = newList;
+            localStorage.setItem('duibanData', JSON.stringify(duibanData));
+
+            renderDuiban();
+            renderWeekendStats();
+        }
+
         // 获取今日最近多板评论
         function getTodayDuibanComment() {
             const data = JSON.parse(localStorage.getItem('duibanComment') || '{}');
@@ -17194,43 +18419,80 @@
         }
 
         // 打开最近多板评论编辑
+        // 记录当前打开编辑弹窗时，旧数据里除第一行外的其余行（用于保存时原样保留，不丢数据）
+        let _duibanExtraRows = [];
+
         function openDuibanEdit() {
+            // 打开弹窗前先按当前早盘竞价数据重新计算一次，确保数值始终最新（不依赖之前是否做过导入操作）
+            recalcDuibanFromAuction();
+
             const duibanList = getTodayDuiban();
             const formContainer = document.getElementById('duibanEditTableBody');
-            
-            let html = '';
-            if (duibanList.length === 0) {
-                html = `
-                    <div class="duiban-edit-row" id="duiban-row-0">
-                        <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-0" value="56" placeholder="总数量" oninput="onDuibanTotalChange(this, this.nextElementSibling)">
-                        <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-0" value=":" placeholder="56 (跌:涨)" onblur="autoCalculateDuibanDieZhangbi(this, this.previousElementSibling)" style="width:90px !important;">
-                        <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-0" placeholder="竞符合数">
-                        <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-0" placeholder="图示">
-                        <div class="duiban-row-actions">
-                            <button type="button" class="duiban-remove-btn" onclick="removeDuibanRow(0)">×</button>
-                        </div>
-                    </div>
-                `;
-            } else {
-                duibanList.forEach((item, index) => {
-                    const shuliangVal = item.shuliang || '56';
-                    const dieZhangbiVal = item.dieZhangbi || ':';
-                    html += `
-                        <div class="duiban-edit-row" id="duiban-row-${index}">
-                            <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-${index}" value="${shuliangVal}" placeholder="总数量" oninput="onDuibanTotalChange(this, this.nextElementSibling)">
-                            <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-${index}" value="${dieZhangbiVal}" placeholder="${shuliangVal} (跌:涨)" onblur="autoCalculateDuibanDieZhangbi(this, this.previousElementSibling)" style="width:90px !important;">
-                            <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-${index}" value="${item.jingtu || ''}" placeholder="竞符合数">
-                            <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-${index}" value="${item.tushi || ''}" placeholder="图示">
-                            <div class="duiban-row-actions">
-                                <button type="button" class="duiban-remove-btn" onclick="removeDuibanRow(${index})">×</button>
-                            </div>
-                        </div>
-                    `;
-                });
+
+            const firstRow = duibanList[0] || {};
+            _duibanExtraRows = duibanList.slice(1); // 旧数据若有多行，多余的行原样保留，不在编辑框里展示
+
+            const shuliangVal = firstRow.shuliang || '';
+            const dieZhangbiVal = firstRow.dieZhangbi || '';
+            const jingtuVal = firstRow.jingtu || '';
+            const tushiVal = firstRow.tushi || '';
+
+            // 兼容旧的"跌:涨"单字符串格式，拆成两个独立数字
+            let dieVal = '';
+            let zhangVal = '';
+            if (dieZhangbiVal.includes(':')) {
+                const parts = dieZhangbiVal.split(':');
+                dieVal = (parts[0] || '').trim();
+                zhangVal = (parts[1] || '').trim();
             }
-            
+
+            const html = `
+                <div class="duiban-edit-row" id="duiban-row-0">
+                    <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-0" value="${shuliangVal}" placeholder="总数量" oninput="onDuibanShuliangInput(this)">
+                    <div style="display:flex;align-items:center;gap:4px;width:90px !important;">
+                        <input type="text" class="form-input duiban-edit-die-input" name="die-0" value="${dieVal}" placeholder="跌" style="width:38px !important;text-align:center;padding-left:4px;padding-right:4px;" oninput="onDuibanDieZhangInput(this, 'die')">
+                        <span style="color:#94a3b8;">:</span>
+                        <input type="text" class="form-input duiban-edit-zhang-input" name="zhang-0" value="${zhangVal}" placeholder="涨" style="width:38px !important;text-align:center;padding-left:4px;padding-right:4px;" oninput="onDuibanDieZhangInput(this, 'zhang')">
+                    </div>
+                    <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-0" value="${jingtuVal}" placeholder="竞符合数">
+                    <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-0" value="${tushiVal}" placeholder="图示/石墨链接">
+                </div>
+            `;
+
             formContainer.innerHTML = html;
             document.getElementById('duibanModal').classList.add('active');
+        }
+
+        // 总数量输入时：如果跌/涨其中一个已填，自动算出另一个
+        function onDuibanShuliangInput(shuliangInput) {
+            const row = shuliangInput.closest('.duiban-edit-row');
+            const dieInput = row.querySelector('[name="die-0"]');
+            const zhangInput = row.querySelector('[name="zhang-0"]');
+            const total = parseInt(shuliangInput.value) || 0;
+            if (!total) return;
+            const dieVal = dieInput.value.trim();
+            const zhangVal = zhangInput.value.trim();
+            if (dieVal !== '' && zhangVal === '') {
+                zhangInput.value = Math.max(0, total - (parseInt(dieVal) || 0));
+            } else if (zhangVal !== '' && dieVal === '') {
+                dieInput.value = Math.max(0, total - (parseInt(zhangVal) || 0));
+            }
+        }
+
+        // 跌/涨其中一个输入时：如果总数量已填，自动算出另一个
+        function onDuibanDieZhangInput(input, type) {
+            const row = input.closest('.duiban-edit-row');
+            const shuliangInput = row.querySelector('[name="shuliang-0"]');
+            const dieInput = row.querySelector('[name="die-0"]');
+            const zhangInput = row.querySelector('[name="zhang-0"]');
+            const total = parseInt(shuliangInput.value) || 0;
+            if (!total) return;
+            const value = parseInt(input.value) || 0;
+            if (type === 'die') {
+                zhangInput.value = Math.max(0, total - value);
+            } else {
+                dieInput.value = Math.max(0, total - value);
+            }
         }
 
         // 关闭最近多板编辑
@@ -17238,84 +18500,28 @@
             document.getElementById('duibanModal').classList.remove('active');
         }
 
-        // 添加最近多板行
-        function addDuibanRow() {
-            const formContainer = document.getElementById('duibanEditTableBody');
-            const rows = formContainer.querySelectorAll('.duiban-edit-row');
-            const rowCount = rows.length;
-            
-            const newRow = document.createElement('div');
-            newRow.className = 'duiban-edit-row';
-            newRow.id = `duiban-row-${rowCount}`;
-            newRow.innerHTML = `
-                <input type="text" class="form-input duiban-edit-shuliang-input" name="shuliang-${rowCount}" value="56" placeholder="总数量" oninput="onDuibanTotalChange(this, this.nextElementSibling)">
-                <input type="text" class="form-input duiban-edit-dieZhangbi-input" name="dieZhangbi-${rowCount}" value=":" placeholder="56 (跌:涨)" onblur="autoCalculateDuibanDieZhangbi(this, this.previousElementSibling)" style="width:90px !important;">
-                <input type="text" class="form-input duiban-edit-jingtu-input" name="jingtu-${rowCount}" placeholder="竞符合数">
-                <input type="text" class="form-input duiban-edit-tushi-input" name="tushi-${rowCount}" placeholder="图示">
-                <div class="duiban-row-actions">
-                    <button type="button" class="duiban-remove-btn" onclick="removeDuibanRow(${rowCount})">×</button>
-                </div>
-            `;
-            
-            formContainer.appendChild(newRow);
-        }
-
-        // 移除最近多板行
-        function removeDuibanRow(index) {
-            const row = document.getElementById(`duiban-row-${index}`);
-            if (row) {
-                row.remove();
-                renumberDuibanRows();
-            }
-        }
-
-        // 重新编号最近多板行
-        function renumberDuibanRows() {
-            const formContainer = document.getElementById('duibanEditTableBody');
-            const rows = formContainer.querySelectorAll('.duiban-edit-row');
-            rows.forEach((row, i) => {
-                row.id = `duiban-row-${i}`;
-                
-                const dieZhangbiInput = row.querySelector('input[name^="dieZhangbi-"]');
-                const jingtuInput = row.querySelector('input[name^="jingtu-"]');
-                const shuliangInput = row.querySelector('input[name^="shuliang-"]');
-                const tushiInput = row.querySelector('input[name^="tushi-"]');
-                const removeBtn = row.querySelector('.duiban-remove-btn');
-                
-                if (dieZhangbiInput) dieZhangbiInput.name = `dieZhangbi-${i}`;
-                if (jingtuInput) jingtuInput.name = `jingtu-${i}`;
-                if (shuliangInput) shuliangInput.name = `shuliang-${i}`;
-                if (tushiInput) tushiInput.name = `tushi-${i}`;
-                if (removeBtn) removeBtn.onclick = function() { removeDuibanRow(i); };
-            });
-        }
-
-        // 保存最近多板数据
+        // 保存最近多板数据（单行布局：只读取第一行输入，旧数据里多余的行原样拼接保留，不丢数据）
         function saveDuiban() {
-            const formContainer = document.getElementById('duibanEditTableBody');
-            const rows = formContainer.querySelectorAll('.duiban-edit-row');
+            const row = document.getElementById('duiban-row-0');
+            const dieInput = row ? row.querySelector('[name="die-0"]') : null;
+            const zhangInput = row ? row.querySelector('[name="zhang-0"]') : null;
+            const jingtuInput = row ? row.querySelector('[name="jingtu-0"]') : null;
+            const shuliangInput = row ? row.querySelector('[name="shuliang-0"]') : null;
+            const tushiInput = row ? row.querySelector('[name="tushi-0"]') : null;
+
+            const dieVal = dieInput ? dieInput.value.trim() : '';
+            const zhangVal = zhangInput ? zhangInput.value.trim() : '';
+            const dieZhangbi = (dieVal || zhangVal) ? `${dieVal}:${zhangVal}` : '';
+            const jingtu = jingtuInput ? jingtuInput.value.trim() : '';
+            const shuliang = shuliangInput ? shuliangInput.value.trim() : '';
+            const tushi = tushiInput ? tushiInput.value.trim() : '';
+
             const duibanList = [];
-            
-            rows.forEach((row, index) => {
-                const dieZhangbiInput = row.querySelector(`[name="dieZhangbi-${index}"]`);
-                const jingtuInput = row.querySelector(`[name="jingtu-${index}"]`);
-                const shuliangInput = row.querySelector(`[name="shuliang-${index}"]`);
-                const tushiInput = row.querySelector(`[name="tushi-${index}"]`);
-                
-                const dieZhangbi = dieZhangbiInput ? dieZhangbiInput.value.trim() : '';
-                const jingtu = jingtuInput ? jingtuInput.value.trim() : '';
-                const shuliang = shuliangInput ? shuliangInput.value.trim() : '';
-                const tushi = tushiInput ? tushiInput.value.trim() : '';
-                
-                if (dieZhangbi || jingtu || shuliang || tushi) {
-                    duibanList.push({
-                        dieZhangbi,
-                        jingtu,
-                        shuliang,
-                        tushi
-                    });
-                }
-            });
+            if (dieZhangbi || jingtu || shuliang || tushi) {
+                duibanList.push({ dieZhangbi, jingtu, shuliang, tushi });
+            }
+            // 旧数据里第一行之后的其余行，原样拼接保留
+            duibanList.push(..._duibanExtraRows);
             
             saveTodayDuiban(duibanList);
             renderDuiban();
@@ -17326,6 +18532,7 @@
         // 清除最近多板数据
         function clearDuiban() {
             if (confirm('确定要清除所有最近多板数据吗？')) {
+                _duibanExtraRows = [];
                 saveTodayDuiban([]);
                 renderDuiban();
                 renderWeekendStats();
@@ -23428,6 +24635,67 @@
                     }
                 } catch (err) {
                     console.error('导入错误:', err);
+                    showToast('❌ 文件格式错误: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = '';
+        }
+
+        // 【特殊修复功能】仅补全早盘竞价（auction）历史数据，不动其他任何模块
+        // 用途：早盘竞价历史曾因"撤回"功能的bug被误清空，此功能用于从旧备份里
+        // 把缺失的日期找回来，已存在的日期不受影响（不覆盖、不合并当天内容，直接跳过）
+        function handleAuctionOnlyImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                let text = e.target.result;
+                if (text.charCodeAt(0) === 0xFEFF) {
+                    text = text.slice(1);
+                }
+                try {
+                    const imported = JSON.parse(text);
+                    const importedAuction = imported.auction || {};
+                    const importedDates = Object.keys(importedAuction);
+
+                    if (importedDates.length === 0) {
+                        showToast('❌ 该文件中没有找到早盘竞价数据');
+                        return;
+                    }
+
+                    loadAllData();
+                    const currentAuction = allData.auction || {};
+
+                    // 找出：旧备份里有、当前完全缺失（当天没有任何早盘竞价数据）的日期
+                    const missingDates = importedDates.filter(date => {
+                        const existing = currentAuction[date];
+                        return !existing || !Array.isArray(existing) || existing.length === 0;
+                    });
+
+                    if (missingDates.length === 0) {
+                        showToast('✅ 当前早盘竞价数据已完整，没有需要补全的日期');
+                        return;
+                    }
+
+                    if (!confirm(`将从旧备份补全 ${missingDates.length} 天缺失的早盘竞价数据（已有数据的日期不受影响，其他模块不受影响），是否继续？`)) {
+                        return;
+                    }
+
+                    // 备份当前auction，便于误操作后可撤回
+                    backupAuctionData('save');
+
+                    missingDates.forEach(date => {
+                        allData.auction[date] = importedAuction[date];
+                    });
+
+                    saveModule('auction');
+                    invalidateTopicCache();
+                    renderAuction();
+                    showToast(`✅ 已补全 ${missingDates.length} 天早盘竞价数据！`);
+                } catch (err) {
+                    console.error('补全早盘竞价数据出错:', err);
                     showToast('❌ 文件格式错误: ' + err.message);
                 }
             };
