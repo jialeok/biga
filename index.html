@@ -8231,16 +8231,21 @@
 
         // 备份早盘竞价数据（用于撤回）
         // type: 'import' 导入时备份, 'save' 保存时备份
-        function backupAuctionData(type) {
+        // 备份早盘竞价数据（用于撤回）
+        // 只备份"这次操作实际改动的那一天"，不再备份最近30天范围。
+        // 这样撤回时只会精准恢复这一天，彻底不会影响其它任何日期的历史数据。
+        // date 参数：这次操作影响的具体日期，不传则默认当天（currentDate）
+        function backupAuctionData(type, date) {
             try {
+                const targetDate = date || currentDate;
                 const auctionData = getAuctionData();
                 const backupKey = type === 'import' ? 'auctionData_import_backup' : 'auctionData_save_backup';
-                // 只备份最近30天，避免数据过大写满 localStorage
-                const allDates = Object.keys(auctionData).sort();
-                const recentDates = allDates.slice(-30);
-                const recentBackup = {};
-                recentDates.forEach(d => { recentBackup[d] = auctionData[d]; });
-                localStorage.setItem(backupKey, JSON.stringify(recentBackup));
+                // 只备份这一天的数据（若这一天当前没有数据，存空数组，表示"备份时这天是空的"）
+                const dayBackup = {
+                    date: targetDate,
+                    data: auctionData[targetDate] || null
+                };
+                localStorage.setItem(backupKey, JSON.stringify(dayBackup));
                 localStorage.setItem(backupKey + '_time', new Date().toISOString());
             } catch (e) {
                 // 备份失败不影响主流程
@@ -8250,6 +8255,7 @@
         }
 
         // 撤回早盘竞价数据
+        // 只精准恢复被备份的那一天，不碰其它任何日期
         function rollbackAuctionData() {
             const importDataStr = localStorage.getItem('auctionData_import_backup');
             const importTime = localStorage.getItem('auctionData_import_backup_time');
@@ -8287,26 +8293,47 @@
                 return false;
             }
 
-            // 显示备份时间
+            let backupPayload;
+            try {
+                backupPayload = JSON.parse(backupDataStr);
+            } catch (e) {
+                alert('备份数据已损坏，无法撤回');
+                return false;
+            }
+
+            // 兼容旧版本备份格式（曾经是"最近30天"的整体对象，没有 date/data 结构）。
+            // 旧格式一旦被恢复会牵连其它日期，为安全起见直接拒绝撤回并清除，而不是尝试恢复。
+            if (!backupPayload || typeof backupPayload !== 'object' || !('date' in backupPayload)) {
+                alert('检测到旧版本的撤回备份（可能影响多天数据），为避免误覆盖历史数据，已自动清除，无法撤回。请重新操作后再试。');
+                localStorage.removeItem('auctionData_import_backup');
+                localStorage.removeItem('auctionData_import_backup_time');
+                localStorage.removeItem('auctionData_save_backup');
+                localStorage.removeItem('auctionData_save_backup_time');
+                return false;
+            }
+
+            const backupDate = backupPayload.date;
+            const backupDayData = backupPayload.data;
+
+            // 显示备份时间和具体日期
             let timeInfo = '';
             if (backupTime) {
                 const date = new Date(backupTime);
-                timeInfo = `（${backupType}备份时间：${date.toLocaleString()}）`;
+                timeInfo = `（${backupType}备份时间：${date.toLocaleString()}，仅恢复 ${backupDate} 这一天）`;
             }
 
             if (!confirm(`确定要撤回早盘竞价数据吗？${timeInfo}`)) {
                 return false;
             }
 
-            // 恢复备份数据
-            // 注意：备份本身只包含最近30天数据（backupAuctionData 为了控制体积做了裁剪），
-            // 之前这里是直接整体覆盖 allData.auction，会把30天之外的历史早盘竞价数据全部清空丢失。
-            // 现在改为：只把备份里的日期合并写回，30天之外未被备份覆盖的历史日期原样保留。
-            const backupAuction = JSON.parse(backupDataStr);
+            // 恢复备份数据：只精准覆盖被备份的那一天，其它日期完全不动
             allData.auction = allData.auction || {};
-            Object.keys(backupAuction).forEach(date => {
-                allData.auction[date] = backupAuction[date];
-            });
+            if (backupDayData === null) {
+                // 备份时这一天本来就没有数据，撤回即恢复为"没有"
+                delete allData.auction[backupDate];
+            } else {
+                allData.auction[backupDate] = backupDayData;
+            }
             saveData();
 
             // 撤回后清除全部备份，避免下次撤回到错误状态
@@ -9189,7 +9216,9 @@
             const twoColField = colTypeRadio ? colTypeRadio.value : 'volume'; // 两列格式时，数字要填入的字段名
 
             // 备份早盘竞价数据（用于撤回），与现有导入功能共用同一套备份/撤回机制
-            backupAuctionData('import');
+            // 注意：这里备份的是 targetDate（用户选择要补录的历史日期），而不是当天，
+            // 因为这次操作实际改动的就是 targetDate 这一天
+            backupAuctionData('import', targetDate);
 
             const lines = pasteText.split(/\r?\n/);
             const auctionData = getAuctionData();
