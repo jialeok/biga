@@ -6908,7 +6908,7 @@
                 </div>
                 <div id="auctionHistoryFillBody" style="display: none; margin-top: 8px;">
                     <div style="font-size: 11px; color: #1e40af; margin-bottom: 8px;">
-                        只补空值，不新增/删除股票；三列自动补两项，两列按右侧类型补一项
+                        只补空值；股票需在当前列表中存在才会补录（不允许导入无关股票）；三列自动补两项，两列按右侧类型补一项
                     </div>
                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
                         <input type="date" id="auctionHistoryFillDate" style="padding: 4px 6px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px;">
@@ -9207,11 +9207,14 @@
             }
         }
 
-        // 历史数据补录：只补数值，绝不新增/删除股票，不改变任何日期的股票列表结构。
+        // 历史数据补录：只补数值字段，不新增/删除股票。
         // 支持两种格式：
         //   三列（Tab分隔）：股票名称[TAB]竞价量[TAB]昨日成交量 —— 两个字段一起补
         //   两列（Tab分隔）：股票名称[TAB]数字 —— 按用户选择的单选（竞价量/昨日成交量）补对应字段
-        // 规则：目标日期当天列表里必须已存在该股票才会补值；已有值不覆盖；不存在的股票直接跳过。
+        // 规则：股票是否存在，以"当前正在查看的日期"（currentDate）的早盘竞价列表为准（这个列表是固定的，不能变）；
+        //       只要该股票在当前列表里存在，就允许把数值补进"目标日期"（下拉框选的历史日期）对应的记录里；
+        //       目标日期原本没有该股票的记录时，会新建一条只含数值的记录（不算新增股票，只是数据记录，因为该股票本身在当前列表里是存在的）；
+        //       已有值不覆盖；当前列表里不存在的股票，直接跳过，不导入。
         function importAuctionHistoryFill() {
             const textarea = document.getElementById('auctionHistoryFillInput');
             const rawText = textarea ? textarea.value : '';
@@ -9248,10 +9251,13 @@
             const lines = pasteText.split(/\r?\n/);
             const auctionData = getAuctionData();
             const targetList = [...(auctionData[targetDate] || [])];
+            // 股票是否存在的判断依据：当前正在查看的日期的早盘竞价列表（固定的股票列表，不可新增/删除）
+            const currentStockSet = new Set(getTodayAuction().map(item => item.stock && item.stock.trim()).filter(Boolean));
 
             let filledCount = 0;     // 成功补齐的字段数（三列格式里补两个字段算两次）
-            let skippedNotFound = 0; // 目标日期列表里找不到该股票，跳过
+            let addedCount = 0;      // 目标日期记录里原本没有该股票的数据记录，新增了一条
             let skippedHasValue = 0; // 股票存在但字段已有值，跳过
+            let skippedNotInCurrent = 0; // 当前列表里不存在该股票，跳过（不允许导入无关股票）
             let invalidCount = 0;    // 无法解析的行数
 
             lines.forEach((line, index) => {
@@ -9267,11 +9273,19 @@
                     return;
                 }
 
-                // 找到目标日期列表里对应的股票（只匹配已存在的，不新增）
-                const existingIndex = targetList.findIndex(item => item.stock && item.stock.trim() === stock);
-                if (existingIndex < 0) {
-                    skippedNotFound++;
+                // 股票必须存在于当前列表（currentDate），否则视为无关股票，直接跳过
+                if (!currentStockSet.has(stock)) {
+                    skippedNotInCurrent++;
                     return;
+                }
+
+                // 查找目标日期的数据记录里是否已有该股票；没有的话新建一条只含数值的记录
+                let existingIndex = targetList.findIndex(item => item.stock && item.stock.trim() === stock);
+                let isNewRecord = false;
+                if (existingIndex < 0) {
+                    targetList.push({ stock, volume: '', yestVolume: '', note: '', selected: false, bought: false, sold: false, fixed: false });
+                    existingIndex = targetList.length - 1;
+                    isNewRecord = true;
                 }
 
                 const nonEmptyCells = rawCells.slice(1).map(c => c.trim()).filter(c => c !== '');
@@ -9285,6 +9299,7 @@
 
                     if (parsedVolume === null && parsedYest === null) {
                         invalidCount++;
+                        if (isNewRecord) targetList.pop(); // 无法解析，撤销刚才新增的空记录
                         return;
                     }
 
@@ -9313,6 +9328,9 @@
                     }
                     if (didFill) {
                         targetList[existingIndex] = { ...item };
+                        if (isNewRecord) addedCount++;
+                    } else if (isNewRecord) {
+                        targetList.pop(); // 新增的记录一个字段都没填上，撤销
                     }
                 } else if (nonEmptyCells.length === 1) {
                     // 两列格式：股票名称[TAB]数字，按用户选择的字段类型补录
@@ -9320,6 +9338,7 @@
                     const parsedValue = parseVolumeOnlyText(valueText);
                     if (parsedValue === null) {
                         invalidCount++;
+                        if (isNewRecord) targetList.pop();
                         return;
                     }
 
@@ -9329,19 +9348,23 @@
                     if (isEmpty) {
                         targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
                         filledCount++;
+                        if (isNewRecord) addedCount++;
                     } else {
                         skippedHasValue++;
+                        if (isNewRecord) targetList.pop();
                     }
                 } else {
                     invalidCount++;
+                    if (isNewRecord) targetList.pop();
                 }
             });
 
             if (filledCount === 0) {
+
                 if (statusEl) {
                     let msg = '未补录任何数据';
                     const parts = [];
-                    if (skippedNotFound > 0) parts.push(`${skippedNotFound}条该日期列表中不存在`);
+                    if (skippedNotInCurrent > 0) parts.push(`${skippedNotInCurrent}条不在当前股票列表中`);
                     if (skippedHasValue > 0) parts.push(`${skippedHasValue}个字段已有值`);
                     if (invalidCount > 0) parts.push(`${invalidCount}行无法识别`);
                     if (parts.length) msg += `（${parts.join('，')}）`;
@@ -9357,7 +9380,8 @@
 
             textarea.value = '';
             let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
-            if (skippedNotFound > 0) statusMsg += ` 跳过${skippedNotFound}条(该日期列表中不存在)`;
+            if (addedCount > 0) statusMsg += ` 新增${addedCount}条数据记录`;
+            if (skippedNotInCurrent > 0) statusMsg += ` 跳过${skippedNotInCurrent}条(不在当前股票列表中)`;
             if (skippedHasValue > 0) statusMsg += ` 跳过${skippedHasValue}个(已有值)`;
             if (invalidCount > 0) statusMsg += ` 无法识别${invalidCount}行`;
             if (statusEl) {
