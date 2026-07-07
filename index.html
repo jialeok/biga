@@ -8940,20 +8940,23 @@
                     const existingNote = auctionList[existingIndex].note || '';
                     const newNote = noteItem.note || '';
                     
-                    // 检查新导入的是否是纯涨幅（如 +2.3% 或 -1.5% 或 2.3%）
-                    const isNewPercent = /^[+-]?\d+\.?\d*%$/.test(newNote.trim());
+                    // 检查新导入的是否是纯涨幅类信息（如 +2.3% 、 -1.5% 、 2.3%、停牌、涨停、跌停）
+                    // 停牌/涨停/跌停这类状态词和百分比一样，都代表"当天涨跌状态"，导入时应替换旧涨幅而不是追加合并
+                    const trimmedNewNote = newNote.trim();
+                    const isNewPercent = /^[+-]?\d+\.?\d*%$/.test(trimmedNewNote);
+                    const isNewStatusWord = /^(停牌|涨停|跌停)$/.test(trimmedNewNote);
+                    const isNewChangeInfo = isNewPercent || isNewStatusWord;
                     
-                    if (isNewPercent && existingNote) {
-                        // 新导入的是涨幅，替换原有涨幅，保留其他内容
+                    if (isNewChangeInfo && existingNote) {
+                        // 新导入的是涨幅/停牌等状态，替换原有涨幅，保留其他内容（题材括号、占比等）
                         const bracketMatches = existingNote.match(/\([^)]+\)/g) || [];
-                        const ztDtMatches = existingNote.match(/涨停|跌停/g) || [];
-                        const uniqueZtDt = [...new Set(ztDtMatches)];
-                        // 保留原有裸露占比（不带+/-前缀的纯数字%，如7%、29%）
-                        const bareOccupancy = existingNote.replace(/\([^)]+\)/g, '').match(/(?<![+-])\b\d+\.?\d*%/g) || [];
+                        // 旧注释里的涨停/跌停不再保留，因为新导入的状态（含"停牌"）应完全取代它
+                        // 保留原有裸露占比（不带+/-前缀的纯数字%，如7%、29%；前面也不能紧跟数字/%，避免把脏数据里
+                        // 拼接残留的另一个百分比误判成占比，如 "-6.75%2.92%" 中的 "2.92%" 不应被当作占比保留）
+                        const bareOccupancy = existingNote.replace(/\([^)]+\)/g, '').match(/(?<![+-\d.%])\d+\.?\d*%/g) || [];
 
-                        // 构建新注释：新涨幅 + 涨停/跌停 + 占比 + 题材
-                        let newNoteBuilt = newNote.trim();
-                        if (uniqueZtDt.length > 0) newNoteBuilt += uniqueZtDt.join('');
+                        // 构建新注释：新涨幅/状态词 + 占比 + 题材
+                        let newNoteBuilt = trimmedNewNote;
                         if (bareOccupancy.length > 0) newNoteBuilt += bareOccupancy.join('');
                         newNoteBuilt += bracketMatches.join('');
                         const normalizedNote = newNoteBuilt.replace(/[，、;；]/g, ',');
