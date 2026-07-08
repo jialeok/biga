@@ -2394,7 +2394,80 @@
             background: #fffbeb;
             padding: 5px 10px;
             border-bottom: 1px solid #ede9fe;
+            position: relative;
         }
+
+        /* 排序规则说明图标：灰色圆圈+问号，固定在"竞放量数"横幅右侧 */
+        .auction-sort-help-icon {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #cbd5e1;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            line-height: 16px;
+            text-align: center;
+            cursor: pointer;
+            user-select: none;
+            flex-shrink: 0;
+        }
+
+        .auction-sort-help-icon:active {
+            background: #94a3b8;
+        }
+
+        /* 排序规则说明浮层 */
+        .auction-sort-help-panel {
+            display: none;
+            position: absolute;
+            right: 8px;
+            top: 100%;
+            margin-top: 4px;
+            width: 280px;
+            max-height: 360px;
+            overflow-y: auto;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+            padding: 10px 12px;
+            text-align: left;
+            font-size: 11px;
+            line-height: 1.6;
+            color: #334155;
+            z-index: 50;
+        }
+
+        .auction-sort-help-panel.show {
+            display: block;
+        }
+
+        .auction-sort-help-panel h4 {
+            margin: 8px 0 3px;
+            font-size: 11.5px;
+            color: #1e293b;
+        }
+
+        .auction-sort-help-panel h4:first-child {
+            margin-top: 0;
+        }
+
+        .auction-sort-help-panel p {
+            margin: 0 0 4px;
+        }
+
+        .auction-sort-help-panel .help-tag {
+            font-weight: 700;
+        }
+
+        .auction-sort-help-panel .help-tag.tag-ratio { color: #7c3aed; }
+        .auction-sort-help-panel .help-tag.tag-parallel { color: #059669; }
+        .auction-sort-help-panel .help-tag.tag-jingyest { color: #2563eb; }
 
         .auction-ratio-clickable {
             cursor: pointer;
@@ -5760,6 +5833,8 @@
                         </div>
                         <div class="auction-highratio-stat" id="auctionHighRatioStat">
                             竞放量数：<span id="auctionHighRatioCount" style="font-weight:700;">-</span><span id="auctionHighRatioArrow" style="font-weight:700;"></span>
+                            <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('auctionSortHelpPanel')">?</span>
+                            <div class="auction-sort-help-panel" id="auctionSortHelpPanel" onclick="event.stopPropagation();"></div>
                         </div>
                         <div class="auction-content" id="auctionContent" ondblclick="event.stopPropagation();openAuctionEdit()">
                         </div>
@@ -5799,6 +5874,8 @@
                         </div>
                         <div class="auction-highratio-stat" id="auctionHighRatioStat2">
                             竞放量数：<span id="auctionHighRatioCount2" style="font-weight:700;">-</span><span id="auctionHighRatioArrow2" style="font-weight:700;"></span>
+                            <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('auctionSortHelpPanel2')">?</span>
+                            <div class="auction-sort-help-panel" id="auctionSortHelpPanel2" onclick="event.stopPropagation();"></div>
                         </div>
                         <div class="auction-content" id="auctionContent2" ondblclick="event.stopPropagation();openCoreTopicModal()">
                         </div>
@@ -13578,6 +13655,44 @@
             }
             renderAuction();
         }
+
+        // 排序规则说明浮层的固定文案（环比/平行/竞昨三个开关各自的判定与排序逻辑）
+        const AUCTION_SORT_HELP_HTML = `
+            <p style="color:#64748b;">位数差 = |今日竞价量位数 − 今日昨日成交量位数|（数字按十进制位数计算，如102是3位）。位数差越小，两者量级越接近。</p>
+            <h4><span class="help-tag tag-ratio">环比</span></h4>
+            <p>① 达标：今/昨比(今日竞价量÷昨日竞价量)≥1.5，组内按位数差从小到大排，位数差相同按比值从高到低排。</p>
+            <p>② 不达标但比值可算：同样按位数差→比值排，排在①之后。</p>
+            <p>③ 比值无法计算（断点/无数据）：保持原顺序，垫底。</p>
+            <h4><span class="help-tag tag-parallel">平行</span></h4>
+            <p>达标条件：今日竞价量＞T-1日竞价量，且 T-1日成交量＞T-2日成交量。</p>
+            <p>① 达标：按位数差从小到大排，位数差相同按差值(今/昨比－昨/前比)从高到低排。</p>
+            <p>② 不达标但差值可算：同样按位数差→差值排，排在①之后。</p>
+            <p>③ 差值无法计算：保持原顺序，垫底。</p>
+            <h4><span class="help-tag tag-jingyest">竞/昨</span></h4>
+            <p>在"平行"达标基础上，进一步要求差值(今/昨比－昨/前比)＞0，开启时联动打开"平行"。</p>
+            <p>① 竞/昨达标：按位数差从小到大排，位数差相同按差值从高到低排。</p>
+            <p>② 仅平行达标（竞/昨未达标）：同样按位数差→差值排，排在①之后（差值不要求＞0）。</p>
+            <p>③ 平行也不达标：保持原顺序，垫底。</p>
+        `;
+
+        // 展开/收起排序规则说明浮层。panelId 为对应页面（第一页/第二页）的浮层元素 id
+        // 点击图标时：若面板已打开则关闭；若关闭则先关闭其它已打开的说明面板，再打开当前这个
+        function toggleAuctionSortHelp(panelId) {
+            const panel = document.getElementById(panelId);
+            if (!panel) return;
+            const isOpen = panel.classList.contains('show');
+            // 先关闭所有说明面板（保证同一时间只有一个打开）
+            document.querySelectorAll('.auction-sort-help-panel.show').forEach(p => p.classList.remove('show'));
+            if (!isOpen) {
+                panel.innerHTML = AUCTION_SORT_HELP_HTML;
+                panel.classList.add('show');
+            }
+        }
+
+        // 点击页面任意其它位置时，关闭所有已打开的排序规则说明浮层
+        document.addEventListener('click', function() {
+            document.querySelectorAll('.auction-sort-help-panel.show').forEach(p => p.classList.remove('show'));
+        });
 
         // 展开/收起某只股票的5日竞价量+昨日成交量趋势图
         function toggleAuctionTrendPanel(index) {
