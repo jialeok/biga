@@ -10116,23 +10116,36 @@
                     return todayVolume / prevVolume;
                 });
                 renderOrder = renderOrder
-                    .map((idx, pos) => ({ idx, ratio: ratioCache[pos] }))
+                    .map((idx, pos) => {
+                        const it = auctionList[idx];
+                        // 位数差：|今日竞价量位数 - 今日昨日成交量位数|，与"平行"/"竞/昨"保持同一套定义，能算出来才参与位数差比较
+                        const todayVolume = it && it.volume !== '' && it.volume != null ? parseFloat(it.volume) : null;
+                        const yestVolume = it && it.yestVolume !== '' && it.yestVolume != null ? parseFloat(it.yestVolume) : null;
+                        const digitGap = (todayVolume !== null && yestVolume !== null) ? Math.abs(getDigitCount(todayVolume) - getDigitCount(yestVolume)) : null;
+                        return { idx, ratio: ratioCache[pos], digitGap };
+                    })
                     .sort((a, b) => {
-                        // null（无法计算）永远排在最后；两者都有值则按比值从高到低
+                        // 比值(今/昨比)无法计算的永远排最后
                         if (a.ratio === null && b.ratio === null) return 0;
                         if (a.ratio === null) return 1;
                         if (b.ratio === null) return -1;
-                        return b.ratio - a.ratio;
+                        // 位数差为主排序键：从小到大；位数差无法计算的排在有位数差的后面
+                        if (a.digitGap === null && b.digitGap === null) return b.ratio - a.ratio;
+                        if (a.digitGap === null) return 1;
+                        if (b.digitGap === null) return -1;
+                        if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap;
+                        return b.ratio - a.ratio; // 位数差相同时，比值从高到低
                     })
                     .map(x => x.idx);
             } else if (sortByParallelEnabled) {
                 if (sortByJingYestEnabled) {
                     // "竞/昨"是"平行"的加强筛选，排序需三层：
                     //   1. 竞/昨达标：先按"位数差"(|竞价量位数-昨日成交量位数|)从小到大排，位数差相同再按"差值"(今/昨比-昨/前比)从高到低排
-                    //   2. 平行达标但竞/昨未达标：保持原相对顺序，紧随其后
+                    //   2. 平行达标但竞/昨未达标：同样按"位数差"从小到大、"差值"从高到低排（差值此时不要求>0，能算出来就参与）
                     //   3. 平行也不达标：保持原相对顺序，垫底
                     const jingYestDiffMap = getJingYestStocksForDate(currentDate);
                     const parallelStockNamesForSort = getParallelStocksForDate(currentDate);
+                    const allRatioDiffInfo = getRatioDiffInfoForDate(currentDate);
                     renderOrder = renderOrder
                         .map((idx, pos) => {
                             const stockName = auctionList[idx] && auctionList[idx].stock ? auctionList[idx].stock.trim() : '';
@@ -10140,15 +10153,23 @@
                             const isParallel = parallelStockNamesForSort.has(stockName);
                             // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
                             const tier = info !== null ? 0 : (isParallel ? 1 : 2);
-                            return { idx, pos, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null, tier };
+                            // tier1时，从"全量差值/位数差信息"里取该股票的数据（不要求diff>0）
+                            const fallbackInfo = tier === 1 ? allRatioDiffInfo.get(stockName) : null;
+                            const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
+                            const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
+                            return { idx, pos, diff, digitGap, tier };
                         })
                         .sort((a, b) => {
                             if (a.tier !== b.tier) return a.tier - b.tier;
-                            if (a.tier === 0) {
+                            if (a.tier === 0 || a.tier === 1) {
+                                // 无法算出diff/digitGap的，排在同档位内能算出来的后面，仍保持原相对顺序
+                                if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
+                                if (a.digitGap === null) return 1;
+                                if (b.digitGap === null) return -1;
                                 if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
                                 return b.diff - a.diff; // 位数差相同时，差值从高到低
                             }
-                            return a.pos - b.pos; // 同档位内保持原相对顺序
+                            return a.pos - b.pos; // tier2：保持原相对顺序
                         })
                         .map(x => x.idx);
                 } else {
@@ -11018,32 +11039,49 @@
                         </div>
                 `;
                 
-                // 若开启"环比"，题材分组顺序不变，仅对分组内部个股按 今日竞价量/昨日竞价量 从高到低排列
+                // 若开启"环比"，题材分组顺序不变，仅对分组内部个股先按"位数差"从小到大排，位数差相同再按 今日竞价量/昨日竞价量 从高到低排列
                 // 昨日无记录/竞价量为0/断点的股票排在本分组最后（沿用与第一页一致的判定口径）
                 let stocksToRender = group.stocks;
                 if (sortByRatioEnabled2) {
                     const prevAuctionListForSort = prevAuctionList;
-                    stocksToRender = group.stocks.slice().sort((a, b) => {
-                        const getRatio = (s) => {
-                            if (!s.stock) return null;
+                    stocksToRender = group.stocks
+                        .map((s, pos) => {
+                            if (!s.stock) return { s, pos, ratio: null, digitGap: null };
                             const todayItem = auctionList.find(item => item.stock && item.stock.trim() === s.stock.trim());
                             const todayVolume = todayItem && todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
-                            if (todayVolume === null || todayVolume === 0) return null;
-                            const prevItem = prevAuctionListForSort.find(p => p.stock && p.stock.trim() === s.stock.trim());
-                            const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
-                            if (prevVolume === null || prevVolume === 0) return null;
-                            return todayVolume / prevVolume;
-                        };
-                        const ratioA = getRatio(a);
-                        const ratioB = getRatio(b);
-                        if (ratioA === null && ratioB === null) return 0;
-                        if (ratioA === null) return 1;
-                        if (ratioB === null) return -1;
-                        return ratioB - ratioA;
-                    });
+                            const yestVolume = todayItem && todayItem.yestVolume !== '' && todayItem.yestVolume != null ? parseFloat(todayItem.yestVolume) : null;
+                            let ratio = null;
+                            if (todayVolume !== null && todayVolume !== 0) {
+                                const prevItem = prevAuctionListForSort.find(p => p.stock && p.stock.trim() === s.stock.trim());
+                                const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                                if (prevVolume !== null && prevVolume !== 0) {
+                                    ratio = todayVolume / prevVolume;
+                                }
+                            }
+                            // 位数差：|今日竞价量位数 - 今日昨日成交量位数|，与"平行"/"竞/昨"保持同一套定义
+                            const digitGap = (todayVolume !== null && yestVolume !== null) ? Math.abs(getDigitCount(todayVolume) - getDigitCount(yestVolume)) : null;
+                            return { s, pos, ratio, digitGap };
+                        })
+                        .sort((a, b) => {
+                            // 比值(今/昨比)无法计算的永远排最后
+                            if (a.ratio === null && b.ratio === null) return a.pos - b.pos;
+                            if (a.ratio === null) return 1;
+                            if (b.ratio === null) return -1;
+                            // 位数差为主排序键：从小到大；位数差无法计算的排在有位数差的后面
+                            if (a.digitGap === null && b.digitGap === null) return b.ratio - a.ratio;
+                            if (a.digitGap === null) return 1;
+                            if (b.digitGap === null) return -1;
+                            if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap;
+                            return b.ratio - a.ratio; // 位数差相同时，比值从高到低
+                        })
+                        .map(x => x.s);
                 } else if (sortByParallelEnabled2 && parallelStockNames2) {
                     if (sortByJingYestEnabled2 && jingYestStockNames2) {
-                        // "竞/昨"：组内达标股票先按"位数差"从小到大排，位数差相同再按差值(今/昨比 - 昨/前比)从高到低排；未达标的排最后，保持原相对顺序
+                        // "竞/昨"是"平行"的加强筛选，排序需三层：
+                        //   1. 竞/昨达标：先按"位数差"从小到大排，位数差相同再按差值(今/昨比 - 昨/前比)从高到低排
+                        //   2. 平行达标但竞/昨未达标：同样按位数差/差值排序（差值不要求>0，能算出来就参与）
+                        //   3. 平行也不达标：保持原相对顺序，垫底
+                        const allRatioDiffInfo2 = getRatioDiffInfoForDate(currentDate);
                         stocksToRender = group.stocks
                             .map((s, pos) => {
                                 const name = s.stock ? s.stock.trim() : '';
@@ -11051,15 +11089,21 @@
                                 const isParallel = parallelStockNames2.has(name);
                                 // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
                                 const tier = info !== null ? 0 : (isParallel ? 1 : 2);
-                                return { s, pos, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null, tier };
+                                const fallbackInfo = tier === 1 ? allRatioDiffInfo2.get(name) : null;
+                                const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
+                                const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
+                                return { s, pos, diff, digitGap, tier };
                             })
                             .sort((a, b) => {
                                 if (a.tier !== b.tier) return a.tier - b.tier;
-                                if (a.tier === 0) {
+                                if (a.tier === 0 || a.tier === 1) {
+                                    if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
+                                    if (a.digitGap === null) return 1;
+                                    if (b.digitGap === null) return -1;
                                     if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
                                     return b.diff - a.diff; // 位数差相同时，差值从高到低
                                 }
-                                return a.pos - b.pos; // 同档位内保持原相对顺序
+                                return a.pos - b.pos; // tier2：保持原相对顺序
                             })
                             .map(x => x.s);
                     } else {
@@ -13605,56 +13649,64 @@
             return stockNames;
         }
 
-        // 判断"竞/昨"条件：必须先满足"平行"条件，再额外要求 今/昨比 > 昨/前比
-        //   今/昨比 = 今日竞价量 / T-1竞价量（与展开面板"今/昨比"一致）
-        //   昨/前比 = 昨日成交量(T的yestVolume) / 前日成交量(T-1的yestVolume)（与展开面板"昨/前比"一致）
-        // 两个比值都必须能计算出来（无断点、分母不为0），且严格 今/昨比 > 昨/前比 才算达标
-        // 返回 Map<股票名称, 差值(今/昨比 - 昨/前比)>，key集合是 getParallelStocksForDate 结果的子集
-        // 差值越大表示"竞放"信号相对"放量"信号越强，用于按差值从高到低排序
         // 计算一个正数的十进制位数（字符串长度）。用于"位数差"排序：
-        // 位数差 = |竞价量位数 - 昨日成交量位数|，位数差越小说明竞价量与成交量的量级越接近，视为信号更清晰，排序优先级更高
+        // 位数差 = |今日竞价量位数 - 今日昨日成交量位数|，位数差越小说明竞价量与成交量的量级越接近，视为信号更清晰，排序优先级更高
+        // 该定义在"环比"、"平行"、"竞/昨"三个排序场景下保持统一
         function getDigitCount(num) {
             const intPart = Math.floor(Math.abs(num));
             return String(intPart).length;
         }
 
-        // 判断"竞/昨"条件：必须先满足"平行"条件，再额外要求 今/昨比 > 昨/前比
-        //   今/昨比 = 今日竞价量 / T-1竞价量（与展开面板"今/昨比"一致）
-        //   昨/前比 = 昨日成交量(T的yestVolume) / 前日成交量(T-1的yestVolume)（与展开面板"昨/前比"一致）
-        // 两个比值都必须能计算出来（无断点、分母不为0），且严格 今/昨比 > 昨/前比 才算达标
-        // 返回 Map<股票名称, {diff, digitGap}>，key集合是 getParallelStocksForDate 结果的子集
-        //   diff = 今/昨比 - 昨/前比（越大表示"竞放"信号相对"放量"信号越强）
-        //   digitGap = |今日竞价量位数 - 今日昨日成交量位数|（越小表示量级越接近，排序优先级越高）
-        // 排序时先比 digitGap（从小到大），digitGap 相同再比 diff（从大到小）
-        function getJingYestStocksForDate(dateStr) {
-            const parallelStockNames = getParallelStocksForDate(dateStr);
+        // 计算指定日期下，每只股票的 {diff, digitGap}（不要求满足平行或竞/昨的达标条件，单纯计算数值）：
+        //   今/昨比 = 今日竞价量 / T-1交易日竞价量
+        //   昨/前比 = 昨日成交量(T记录的yestVolume) / 前日成交量(T-1记录的yestVolume)
+        //   diff = 今/昨比 - 昨/前比（可正可负）
+        //   digitGap = |今日竞价量位数 - 今日昨日成交量位数|
+        // 任一比值无法计算（断点/分母为0）则该股票不在返回结果中
+        // 供"环比"排序之外的"平行仅达标(Tier1)"和"竞/昨达标(Tier0)"两个场景共用，避免重复实现
+        function getRatioDiffInfoForDate(dateStr) {
             const auctionData = getAuctionData();
             const todayList = auctionData[dateStr] || [];
             const t1Date = getPreviousTradingDay(dateStr);
             const t1List = t1Date ? (auctionData[t1Date] || []) : [];
 
-            const stockDiffMap = new Map();
-            parallelStockNames.forEach(name => {
-                const todayItem = todayList.find(p => p.stock && p.stock.trim() === name);
+            const infoMap = new Map();
+            todayList.forEach(item => {
+                if (!item || !item.stock) return;
+                const name = item.stock.trim();
                 const t1Item = t1List.find(p => p.stock && p.stock.trim() === name);
-                if (!todayItem || !t1Item) return;
+                if (!t1Item) return;
 
                 // 今/昨比：今日竞价量 / T-1竞价量
-                const todayVolume = todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
+                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
                 const t1Volume = t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
                 if (todayVolume === null || t1Volume === null || t1Volume === 0) return;
                 const jingRatio = todayVolume / t1Volume;
 
                 // 昨/前比：昨日成交量(今天记录的yestVolume) / 前日成交量(T-1记录的yestVolume)
-                const yestVolume = todayItem.yestVolume !== '' && todayItem.yestVolume != null ? parseFloat(todayItem.yestVolume) : null;
+                const yestVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
                 const prevVolume = t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
                 if (yestVolume === null || prevVolume === null || prevVolume === 0) return;
                 const yestRatio = yestVolume / prevVolume;
 
-                if (jingRatio > yestRatio) {
-                    // 位数差：今日竞价量(todayVolume) 与 今日昨日成交量(yestVolume) 的位数差
-                    const digitGap = Math.abs(getDigitCount(todayVolume) - getDigitCount(yestVolume));
-                    stockDiffMap.set(name, { diff: jingRatio - yestRatio, digitGap });
+                const digitGap = Math.abs(getDigitCount(todayVolume) - getDigitCount(yestVolume));
+                infoMap.set(name, { diff: jingRatio - yestRatio, digitGap });
+            });
+            return infoMap;
+        }
+
+        // 判断"竞/昨"条件：必须先满足"平行"条件，再额外要求 今/昨比 > 昨/前比（即 diff > 0）
+        // 返回 Map<股票名称, {diff, digitGap}>，key集合是 getParallelStocksForDate 结果的子集，且 diff 必然 > 0
+        // 排序时先比 digitGap（从小到大），digitGap 相同再比 diff（从大到小）
+        function getJingYestStocksForDate(dateStr) {
+            const parallelStockNames = getParallelStocksForDate(dateStr);
+            const infoMap = getRatioDiffInfoForDate(dateStr);
+
+            const stockDiffMap = new Map();
+            parallelStockNames.forEach(name => {
+                const info = infoMap.get(name);
+                if (info && info.diff > 0) {
+                    stockDiffMap.set(name, info);
                 }
             });
             return stockDiffMap;
