@@ -10257,13 +10257,28 @@
                         })
                         .map(x => x.idx);
                 } else {
-                    // 纯"平行"：达标的排前面，其余原相对顺序不变（stable sort）
+                    // 纯"平行"（"竞/昨"未开启）：与其它排序保持同一套三层模式：
+                    //   1. 平行达标：按位数差从小到大排，位数差相同按差值(今/昨比-昨/前比)从高到低排（差值不要求>0）
+                    //   2. 不达标：保持原相对顺序，垫底
                     const parallelStockNames = getParallelStocksForDate(currentDate);
+                    const allRatioDiffInfoForParallel = getRatioDiffInfoForDate(currentDate);
                     renderOrder = renderOrder
-                        .map(idx => ({ idx, qualifies: auctionList[idx] && auctionList[idx].stock && parallelStockNames.has(auctionList[idx].stock.trim()) }))
+                        .map((idx, pos) => {
+                            const stockName = auctionList[idx] && auctionList[idx].stock ? auctionList[idx].stock.trim() : '';
+                            const qualifies = stockName && parallelStockNames.has(stockName);
+                            const info = qualifies ? allRatioDiffInfoForParallel.get(stockName) : null;
+                            return { idx, pos, qualifies, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null };
+                        })
                         .sort((a, b) => {
-                            if (a.qualifies === b.qualifies) return 0;
-                            return a.qualifies ? -1 : 1;
+                            if (a.qualifies !== b.qualifies) return a.qualifies ? -1 : 1;
+                            if (a.qualifies) {
+                                if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
+                                if (a.digitGap === null) return 1;
+                                if (b.digitGap === null) return -1;
+                                if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
+                                return b.diff - a.diff; // 位数差相同时，差值从高到低
+                            }
+                            return a.pos - b.pos; // 不达标：保持原相对顺序
                         })
                         .map(x => x.idx);
                 }
@@ -11196,13 +11211,29 @@
                             })
                             .map(x => x.s);
                     } else {
-                        // 纯"平行"：题材分组顺序不变，仅将分组内达标个股排到本分组最前面
-                        stocksToRender = group.stocks.slice().sort((a, b) => {
-                            const qualifiesA = a.stock && parallelStockNames2.has(a.stock.trim());
-                            const qualifiesB = b.stock && parallelStockNames2.has(b.stock.trim());
-                            if (qualifiesA === qualifiesB) return 0;
-                            return qualifiesA ? -1 : 1;
-                        });
+                        // 纯"平行"（"竞/昨"未开启）：题材分组顺序不变，组内排序与其它场景保持同一套三层模式：
+                        //   1. 平行达标：按位数差从小到大排，位数差相同按差值(今/昨比-昨/前比)从高到低排（差值不要求>0）
+                        //   2. 不达标：保持原相对顺序，垫底
+                        const allRatioDiffInfoForParallel2 = getRatioDiffInfoForDate(currentDate);
+                        stocksToRender = group.stocks
+                            .map((s, pos) => {
+                                const name = s.stock ? s.stock.trim() : '';
+                                const qualifies = name && parallelStockNames2.has(name);
+                                const info = qualifies ? allRatioDiffInfoForParallel2.get(name) : null;
+                                return { s, pos, qualifies, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null };
+                            })
+                            .sort((a, b) => {
+                                if (a.qualifies !== b.qualifies) return a.qualifies ? -1 : 1;
+                                if (a.qualifies) {
+                                    if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
+                                    if (a.digitGap === null) return 1;
+                                    if (b.digitGap === null) return -1;
+                                    if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
+                                    return b.diff - a.diff; // 位数差相同时，差值从高到低
+                                }
+                                return a.pos - b.pos; // 不达标：保持原相对顺序
+                            })
+                            .map(x => x.s);
                     }
                 }
                 
