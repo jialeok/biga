@@ -10104,37 +10104,44 @@
                     .sort((a, b) => b.count - a.count)
                     .map(x => x.idx);
             } else if (sortByRatioEnabled) {
+                // "环比"排序需三层，与"平行"/"竞/昨"保持同一套模式：
+                //   1. 达标（今日竞价量/昨日竞价量 四舍五入到一位小数 >= 1.5，与竞放量高光口径一致）：
+                //      按"位数差"(|竞价量位数-昨日成交量位数|)从小到大排，位数差相同再按比值从高到低排
+                //   2. 不达标但比值能算出来：同样按位数差从小到大、比值从高到低排
+                //   3. 比值无法计算（昨日无记录/竞价量为0/断点）：保持原相对顺序，垫底
+                const highRatioStocksForSort = getHighRatioStocksForDate(currentDate);
                 const prevDate = getPreviousTradingDay(currentDate);
                 const prevDayList = prevDate ? (getAuctionData()[prevDate] || []) : [];
-                const ratioCache = renderOrder.map(idx => {
-                    const it = auctionList[idx];
-                    const todayVolume = it && it.volume ? parseFloat(it.volume) : 0;
-                    if (!it || !it.stock || !todayVolume) return null; // 今日竞价量本身没有，也视为无法计算
-                    const prevItem = prevDayList.find(p => p.stock && p.stock.trim() === it.stock.trim());
-                    const prevVolume = prevItem && prevItem.volume ? parseFloat(prevItem.volume) : 0;
-                    if (!prevVolume) return null; // 昨日无记录或昨日竞价量为0，视为无法计算
-                    return todayVolume / prevVolume;
-                });
                 renderOrder = renderOrder
                     .map((idx, pos) => {
                         const it = auctionList[idx];
-                        // 位数差：|今日竞价量位数 - 今日昨日成交量位数|，与"平行"/"竞/昨"保持同一套定义，能算出来才参与位数差比较
+                        const stockName = it && it.stock ? it.stock.trim() : '';
                         const todayVolume = it && it.volume !== '' && it.volume != null ? parseFloat(it.volume) : null;
                         const yestVolume = it && it.yestVolume !== '' && it.yestVolume != null ? parseFloat(it.yestVolume) : null;
+                        let ratio = null;
+                        if (todayVolume !== null && todayVolume !== 0) {
+                            const prevItem = prevDayList.find(p => p.stock && p.stock.trim() === stockName);
+                            const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                            if (prevVolume !== null && prevVolume !== 0) {
+                                ratio = todayVolume / prevVolume;
+                            }
+                        }
                         const digitGap = (todayVolume !== null && yestVolume !== null) ? Math.abs(getDigitCount(todayVolume) - getDigitCount(yestVolume)) : null;
-                        return { idx, ratio: ratioCache[pos], digitGap };
+                        // tier: 0 = 达标（竞放量高光），1 = 不达标但比值可算，2 = 比值无法计算
+                        const isHighRatio = stockName && highRatioStocksForSort.stockNames.has(stockName);
+                        const tier = isHighRatio ? 0 : (ratio !== null ? 1 : 2);
+                        return { idx, pos, ratio, digitGap, tier };
                     })
                     .sort((a, b) => {
-                        // 比值(今/昨比)无法计算的永远排最后
-                        if (a.ratio === null && b.ratio === null) return 0;
-                        if (a.ratio === null) return 1;
-                        if (b.ratio === null) return -1;
-                        // 位数差为主排序键：从小到大；位数差无法计算的排在有位数差的后面
-                        if (a.digitGap === null && b.digitGap === null) return b.ratio - a.ratio;
-                        if (a.digitGap === null) return 1;
-                        if (b.digitGap === null) return -1;
-                        if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap;
-                        return b.ratio - a.ratio; // 位数差相同时，比值从高到低
+                        if (a.tier !== b.tier) return a.tier - b.tier;
+                        if (a.tier === 0 || a.tier === 1) {
+                            if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
+                            if (a.digitGap === null) return 1;
+                            if (b.digitGap === null) return -1;
+                            if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
+                            return b.ratio - a.ratio; // 位数差相同时，比值从高到低
+                        }
+                        return a.pos - b.pos; // tier2：保持原相对顺序
                     })
                     .map(x => x.idx);
             } else if (sortByParallelEnabled) {
@@ -11039,20 +11046,23 @@
                         </div>
                 `;
                 
-                // 若开启"环比"，题材分组顺序不变，仅对分组内部个股先按"位数差"从小到大排，位数差相同再按 今日竞价量/昨日竞价量 从高到低排列
-                // 昨日无记录/竞价量为0/断点的股票排在本分组最后（沿用与第一页一致的判定口径）
+                // 若开启"环比"，题材分组顺序不变，仅对分组内部个股按三层排序：
+                //   1. 达标（今日竞价量/昨日竞价量 四舍五入到一位小数 >= 1.5，与竞放量高光口径一致）：位数差从小到大，位数差相同再按比值从高到低
+                //   2. 不达标但比值能算出来：同样按位数差从小到大、比值从高到低排
+                //   3. 比值无法计算（昨日无记录/竞价量为0/断点）：保持原相对顺序，垫底
                 let stocksToRender = group.stocks;
                 if (sortByRatioEnabled2) {
                     const prevAuctionListForSort = prevAuctionList;
                     stocksToRender = group.stocks
                         .map((s, pos) => {
-                            if (!s.stock) return { s, pos, ratio: null, digitGap: null };
-                            const todayItem = auctionList.find(item => item.stock && item.stock.trim() === s.stock.trim());
+                            const stockName = s.stock ? s.stock.trim() : '';
+                            if (!stockName) return { s, pos, ratio: null, digitGap: null, tier: 2 };
+                            const todayItem = auctionList.find(item => item.stock && item.stock.trim() === stockName);
                             const todayVolume = todayItem && todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
                             const yestVolume = todayItem && todayItem.yestVolume !== '' && todayItem.yestVolume != null ? parseFloat(todayItem.yestVolume) : null;
                             let ratio = null;
                             if (todayVolume !== null && todayVolume !== 0) {
-                                const prevItem = prevAuctionListForSort.find(p => p.stock && p.stock.trim() === s.stock.trim());
+                                const prevItem = prevAuctionListForSort.find(p => p.stock && p.stock.trim() === stockName);
                                 const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
                                 if (prevVolume !== null && prevVolume !== 0) {
                                     ratio = todayVolume / prevVolume;
@@ -11060,19 +11070,21 @@
                             }
                             // 位数差：|今日竞价量位数 - 今日昨日成交量位数|，与"平行"/"竞/昨"保持同一套定义
                             const digitGap = (todayVolume !== null && yestVolume !== null) ? Math.abs(getDigitCount(todayVolume) - getDigitCount(yestVolume)) : null;
-                            return { s, pos, ratio, digitGap };
+                            // tier: 0 = 达标（竞放量高光），1 = 不达标但比值可算，2 = 比值无法计算
+                            const isHighRatio = highRatioInfo2.stockNames.has(stockName);
+                            const tier = isHighRatio ? 0 : (ratio !== null ? 1 : 2);
+                            return { s, pos, ratio, digitGap, tier };
                         })
                         .sort((a, b) => {
-                            // 比值(今/昨比)无法计算的永远排最后
-                            if (a.ratio === null && b.ratio === null) return a.pos - b.pos;
-                            if (a.ratio === null) return 1;
-                            if (b.ratio === null) return -1;
-                            // 位数差为主排序键：从小到大；位数差无法计算的排在有位数差的后面
-                            if (a.digitGap === null && b.digitGap === null) return b.ratio - a.ratio;
-                            if (a.digitGap === null) return 1;
-                            if (b.digitGap === null) return -1;
-                            if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap;
-                            return b.ratio - a.ratio; // 位数差相同时，比值从高到低
+                            if (a.tier !== b.tier) return a.tier - b.tier;
+                            if (a.tier === 0 || a.tier === 1) {
+                                if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
+                                if (a.digitGap === null) return 1;
+                                if (b.digitGap === null) return -1;
+                                if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
+                                return b.ratio - a.ratio; // 位数差相同时，比值从高到低
+                            }
+                            return a.pos - b.pos; // tier2：保持原相对顺序
                         })
                         .map(x => x.s);
                 } else if (sortByParallelEnabled2 && parallelStockNames2) {
