@@ -10123,19 +10123,25 @@
                     .map(x => x.idx);
             } else if (sortByParallelEnabled) {
                 if (sortByJingYestEnabled) {
-                    // "竞/昨"：达标股票按差值(今/昨比 - 昨/前比)从高到低排列；未达标的排最后，保持原相对顺序
+                    // "竞/昨"是"平行"的加强筛选，排序需三层：
+                    //   1. 竞/昨达标（差值可算）：按差值(今/昨比 - 昨/前比)从高到低排列
+                    //   2. 平行达标但竞/昨未达标：保持原相对顺序，紧随其后
+                    //   3. 平行也不达标：保持原相对顺序，垫底
                     const jingYestDiffMap = getJingYestStocksForDate(currentDate);
+                    const parallelStockNamesForSort = getParallelStocksForDate(currentDate);
                     renderOrder = renderOrder
                         .map((idx, pos) => {
                             const stockName = auctionList[idx] && auctionList[idx].stock ? auctionList[idx].stock.trim() : '';
                             const diff = jingYestDiffMap.has(stockName) ? jingYestDiffMap.get(stockName) : null;
-                            return { idx, pos, diff };
+                            const isParallel = parallelStockNamesForSort.has(stockName);
+                            // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
+                            const tier = diff !== null ? 0 : (isParallel ? 1 : 2);
+                            return { idx, pos, diff, tier };
                         })
                         .sort((a, b) => {
-                            if (a.diff === null && b.diff === null) return a.pos - b.pos; // 都未达标，保持原相对顺序
-                            if (a.diff === null) return 1;  // 未达标垫底
-                            if (b.diff === null) return -1;
-                            return b.diff - a.diff; // 差值从高到低
+                            if (a.tier !== b.tier) return a.tier - b.tier;
+                            if (a.tier === 0) return b.diff - a.diff; // 差值从高到低
+                            return a.pos - b.pos; // 同档位内保持原相对顺序
                         })
                         .map(x => x.idx);
                 } else {
@@ -11035,13 +11041,15 @@
                             .map((s, pos) => {
                                 const name = s.stock ? s.stock.trim() : '';
                                 const diff = jingYestStockNames2.has(name) ? jingYestStockNames2.get(name) : null;
-                                return { s, pos, diff };
+                                const isParallel = parallelStockNames2.has(name);
+                                // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
+                                const tier = diff !== null ? 0 : (isParallel ? 1 : 2);
+                                return { s, pos, diff, tier };
                             })
                             .sort((a, b) => {
-                                if (a.diff === null && b.diff === null) return a.pos - b.pos;
-                                if (a.diff === null) return 1;
-                                if (b.diff === null) return -1;
-                                return b.diff - a.diff;
+                                if (a.tier !== b.tier) return a.tier - b.tier;
+                                if (a.tier === 0) return b.diff - a.diff; // 差值从高到低
+                                return a.pos - b.pos; // 同档位内保持原相对顺序
                             })
                             .map(x => x.s);
                     } else {
