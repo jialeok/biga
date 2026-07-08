@@ -13769,7 +13769,7 @@
                 }
             }
 
-            // 差值 = 今/昨比 - 昨/前比，两个比值都能算出来时才显示，居中放在"昨日成交量"标题行中间
+            // 差值 = 今/昨比 - 昨/前比，两个比值都能算出来时才显示，居中放在"竞价量"标题行中间（与"今/昨比"同一行）
             let diffHtml = '';
             if (jingRatioForDiff !== null && yestRatioForDiff !== null) {
                 const diff = (jingRatioForDiff - yestRatioForDiff).toFixed(1);
@@ -13779,11 +13779,11 @@
             return `
                 <div style="padding: 6px 8px 8px; background: #f8fafc;">
                     <div style="font-size:10px; color:#94a3b8; margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;">
-                        <span>竞价量(万) 近5日</span>${ratioHtml}
+                        <span>竞价量(万) 近5日</span>${diffHtml ? `<span style="flex:1; text-align:center;">${diffHtml}</span>` : '<span style="flex:1;"></span>'}${ratioHtml}
                     </div>
                     ${volumeSvg}
                     <div style="font-size:10px; color:#94a3b8; margin: 4px 0 2px; display:flex; justify-content:space-between; align-items:center;">
-                        <span>昨日成交量(万) 近5日</span>${diffHtml ? `<span style="flex:1; text-align:center;">${diffHtml}</span>` : '<span style="flex:1;"></span>'}${yestRatioHtml}
+                        <span>昨日成交量(万) 近5日</span>${yestRatioHtml}
                     </div>
                     ${yestSvg}
                 </div>
