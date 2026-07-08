@@ -9836,22 +9836,26 @@
             // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
             recalcDuibanFromAuction();
 
-            // 日期发生变化时，三个开关（全部展开/按数据排序/竞价量环比排序）重置为默认关闭状态（不记忆）
+            // 日期发生变化时，所有排序/展开开关重置为默认关闭状态（不记忆）
             if (_lastAuctionRenderDate !== null && _lastAuctionRenderDate !== currentDate) {
                 const expandToggle = document.getElementById('auctionExpandAllToggle');
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
                 const ratioToggle = document.getElementById('auctionSortByRatioToggle');
                 const parallelToggle = document.getElementById('auctionSortByParallelToggle');
+                const jingYestToggle = document.getElementById('auctionSortByJingYestToggle');
                 const expandToggle2 = document.getElementById('auctionExpandAllToggle2');
                 const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
                 const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
+                const jingYestToggle2 = document.getElementById('auctionSortByJingYestToggle2');
                 if (expandToggle) expandToggle.checked = false;
                 if (sortToggle) sortToggle.checked = false;
                 if (ratioToggle) ratioToggle.checked = false;
                 if (parallelToggle) parallelToggle.checked = false;
+                if (jingYestToggle) jingYestToggle.checked = false;
                 if (expandToggle2) expandToggle2.checked = false;
                 if (ratioToggle2) ratioToggle2.checked = false;
                 if (parallelToggle2) parallelToggle2.checked = false;
+                if (jingYestToggle2) jingYestToggle2.checked = false;
             }
             _lastAuctionRenderDate = currentDate;
 
@@ -13739,11 +13743,13 @@
             // 计算"今日竞价量 / 昨日竞价量"比值：history最后一项是今天，倒数第二项是昨天
             // 若昨天是断点（无数据）或昨日竞价量为0，则不显示比值
             let ratioHtml = '';
+            let jingRatioForDiff = null; // 供下方差值计算复用
             if (history.length >= 2) {
                 const todayVal = history[history.length - 1].volume;
                 const yestVal = history[history.length - 2].volume;
                 if (todayVal !== null && yestVal !== null && yestVal !== 0) {
-                    const ratio = (todayVal / yestVal).toFixed(1);
+                    jingRatioForDiff = todayVal / yestVal;
+                    const ratio = jingRatioForDiff.toFixed(1);
                     ratioHtml = `<span style="color:#6366f1; font-weight:600;">今/昨比 ${ratio}</span>`;
                 }
             }
@@ -13752,13 +13758,22 @@
             // 倒数第二项(昨天)的yestVolume是"前日成交量"
             // 若前日是断点（无数据）或前日成交量为0，则不显示比值
             let yestRatioHtml = '';
+            let yestRatioForDiff = null; // 供下方差值计算复用
             if (history.length >= 2) {
                 const yestVolumeVal = history[history.length - 1].yestVolume;
                 const prevVolumeVal = history[history.length - 2].yestVolume;
                 if (yestVolumeVal !== null && prevVolumeVal !== null && prevVolumeVal !== 0) {
-                    const yestRatio = (yestVolumeVal / prevVolumeVal).toFixed(1);
+                    yestRatioForDiff = yestVolumeVal / prevVolumeVal;
+                    const yestRatio = yestRatioForDiff.toFixed(1);
                     yestRatioHtml = `<span style="color:#10b981; font-weight:600;">昨/前比 ${yestRatio}</span>`;
                 }
+            }
+
+            // 差值 = 今/昨比 - 昨/前比，两个比值都能算出来时才显示，居中放在"昨日成交量"标题行中间
+            let diffHtml = '';
+            if (jingRatioForDiff !== null && yestRatioForDiff !== null) {
+                const diff = (jingRatioForDiff - yestRatioForDiff).toFixed(1);
+                diffHtml = `<span style="color:#2563eb; font-weight:600;">差值 ${diff}</span>`;
             }
 
             return `
@@ -13768,7 +13783,7 @@
                     </div>
                     ${volumeSvg}
                     <div style="font-size:10px; color:#94a3b8; margin: 4px 0 2px; display:flex; justify-content:space-between; align-items:center;">
-                        <span>昨日成交量(万) 近5日</span>${yestRatioHtml}
+                        <span>昨日成交量(万) 近5日</span>${diffHtml ? `<span style="flex:1; text-align:center;">${diffHtml}</span>` : '<span style="flex:1;"></span>'}${yestRatioHtml}
                     </div>
                     ${yestSvg}
                 </div>
