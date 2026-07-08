@@ -1901,6 +1901,18 @@
             border-bottom: 1px solid #ede9fe;
         }
 
+        /* 第二行工具栏：放置"竞/昨"等后续新增开关，避免挤压第一行 */
+        .auction-toolbar-row2 {
+            display: flex;
+            flex-wrap: nowrap;
+            justify-content: flex-start;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 8px;
+            background: #f8f7ff;
+            border-bottom: 1px solid #ede9fe;
+        }
+
         .auction-toggle-item {
             display: flex;
             align-items: center;
@@ -2364,6 +2376,15 @@
 
         .auction-item.parallel-match:hover {
             background: #d1fae5;
+        }
+
+        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：独立护眼色，仅在"竞/昨"开关打开时显示，优先于平行高光 */
+        .auction-item.jing-yest-match {
+            background: #eff6ff;
+        }
+
+        .auction-item.jing-yest-match:hover {
+            background: #dbeafe;
         }
 
         .auction-highratio-stat {
@@ -2870,6 +2891,11 @@
         /* 平行达标行：独立护眼色，仅在"平行"开关打开时显示，优先于竞放量高光 */
         .auction-topic-row.parallel-match {
             background: #ecfdf5;
+        }
+
+        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：独立护眼色，仅在"竞/昨"开关打开时显示，优先于平行高光 */
+        .auction-topic-row.jing-yest-match {
+            background: #eff6ff;
         }
 
         .auction-topic-stock {
@@ -5723,6 +5749,15 @@
                                 </label>
                             </div>
                         </div>
+                        <div class="auction-toolbar-row2" id="auctionToolbarRow2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">竞/昨</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByJingYestToggle" onchange="onAuctionSortByJingYestToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
                         <div class="auction-highratio-stat" id="auctionHighRatioStat">
                             竞放量数：<span id="auctionHighRatioCount" style="font-weight:700;">-</span><span id="auctionHighRatioArrow" style="font-weight:700;"></span>
                         </div>
@@ -5749,6 +5784,15 @@
                                 <span class="auction-toggle-label">平行</span>
                                 <label class="auction-toggle-switch">
                                     <input type="checkbox" id="auctionSortByParallelToggle2" onchange="onAuctionSortByParallelToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-toolbar-row2" id="auctionToolbarRow2_2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">竞/昨</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByJingYestToggle2" onchange="onAuctionSortByJingYestToggle2Change()">
                                     <span class="auction-toggle-slider"></span>
                                 </label>
                             </div>
@@ -10006,6 +10050,9 @@
             const highRatioToday = getHighRatioStocksForDate(currentDate);
             // 计算"平行"达标股票集合（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量），供高光判断复用
             const parallelStocksToday = getParallelStocksForDate(currentDate);
+            // 计算"竞/昨"达标股票集合（平行基础上，今/昨比 > 昨/前比），供高光判断复用；仅在"竞/昨"开关打开时才需要
+            const jingYestToggleChecked = document.getElementById('auctionSortByJingYestToggle')?.checked;
+            const jingYestStocksToday = jingYestToggleChecked ? getJingYestStocksForDate(currentDate) : null;
             const highRatioCountEl = document.getElementById('auctionHighRatioCount');
             const highRatioArrowEl = document.getElementById('auctionHighRatioArrow');
             if (highRatioCountEl) {
@@ -10039,6 +10086,7 @@
             const sortByDataEnabled = document.getElementById('auctionSortByDataToggle')?.checked;
             const sortByRatioEnabled = document.getElementById('auctionSortByRatioToggle')?.checked;
             const sortByParallelEnabled = document.getElementById('auctionSortByParallelToggle')?.checked;
+            const sortByJingYestEnabled = document.getElementById('auctionSortByJingYestToggle')?.checked;
 
             if (sortByDataEnabled) {
                 const dataCountCache = renderOrder.map(idx => {
@@ -10074,9 +10122,10 @@
                     })
                     .map(x => x.idx);
             } else if (sortByParallelEnabled) {
-                const parallelStockNames = getParallelStocksForDate(currentDate);
+                // 若"竞/昨"也开启，用更严格的竞/昨候选集排序（平行的子集：今/昨比 > 昨/前比）；否则用纯平行候选集
+                const qualifyStockNames = sortByJingYestEnabled ? getJingYestStocksForDate(currentDate) : getParallelStocksForDate(currentDate);
                 renderOrder = renderOrder
-                    .map(idx => ({ idx, qualifies: auctionList[idx] && auctionList[idx].stock && parallelStockNames.has(auctionList[idx].stock.trim()) }))
+                    .map(idx => ({ idx, qualifies: auctionList[idx] && auctionList[idx].stock && qualifyStockNames.has(auctionList[idx].stock.trim()) }))
                     .sort((a, b) => {
                         if (a.qualifies === b.qualifies) return 0;
                         return a.qualifies ? -1 : 1; // 达标的排前面，其余原相对顺序不变（stable sort）
@@ -10135,9 +10184,13 @@
                 }
                 // 竞放量高光（今日竞价量/昨日竞价量 >= 1.5）：仅在"环比"开关打开时才显示
                 // 平行高光（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：仅在"平行"开关打开时才显示，优先于竞放量高光
+                // 竞/昨高光（平行基础上，今/昨比 > 昨/前比）：仅在"竞/昨"开关打开时才显示，优先于平行高光
+                const isJingYestMatch = jingYestToggleChecked && jingYestStocksToday && item.stock && jingYestStocksToday.has(item.stock.trim());
                 const isParallelMatch = sortByParallelEnabled && item.stock && parallelStocksToday.has(item.stock.trim());
                 const isHighRatioMatch = sortByRatioEnabled && item.stock && highRatioToday.stockNames.has(item.stock.trim());
-                if (isParallelMatch) {
+                if (isJingYestMatch) {
+                    itemClass += ' jing-yest-match';
+                } else if (isParallelMatch) {
                     itemClass += ' parallel-match';
                 } else if (isHighRatioMatch) {
                     itemClass += ' high-ratio';
@@ -10795,6 +10848,9 @@
             // 是否开启"平行"（分组内部把 今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面）
             const sortByParallelEnabled2 = document.getElementById('auctionSortByParallelToggle2')?.checked;
             const parallelStockNames2 = sortByParallelEnabled2 ? getParallelStocksForDate(currentDate) : null;
+            // 是否开启"竞/昨"（在平行基础上，进一步要求 今/昨比 > 昨/前比）
+            const sortByJingYestEnabled2 = document.getElementById('auctionSortByJingYestToggle2')?.checked;
+            const jingYestStockNames2 = sortByJingYestEnabled2 ? getJingYestStocksForDate(currentDate) : null;
 
             // 统计每只股票出现在多少个题材中（排除"其它"）
             const stockTopicCount = {};
@@ -10955,10 +11011,12 @@
                         return ratioB - ratioA;
                     });
                 } else if (sortByParallelEnabled2 && parallelStockNames2) {
-                    // 若开启"平行"，题材分组顺序不变，仅将分组内 今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的个股排到本分组最前面
+                    // 若开启"平行"，题材分组顺序不变，仅将分组内达标个股排到本分组最前面
+                    // 若"竞/昨"也开启，用更严格的候选集（平行的子集：今/昨比 > 昨/前比）
+                    const qualifyStockNames2 = sortByJingYestEnabled2 && jingYestStockNames2 ? jingYestStockNames2 : parallelStockNames2;
                     stocksToRender = group.stocks.slice().sort((a, b) => {
-                        const qualifiesA = a.stock && parallelStockNames2.has(a.stock.trim());
-                        const qualifiesB = b.stock && parallelStockNames2.has(b.stock.trim());
+                        const qualifiesA = a.stock && qualifyStockNames2.has(a.stock.trim());
+                        const qualifiesB = b.stock && qualifyStockNames2.has(b.stock.trim());
                         if (qualifiesA === qualifiesB) return 0;
                         return qualifiesA ? -1 : 1;
                     });
@@ -11034,9 +11092,13 @@
                         }
                     }
                     // 竞放量高光：仅在"环比"开关打开时才显示；平行高光：仅在"平行"开关打开时才显示，优先于竞放量高光
+                    // 竞/昨高光：仅在"竞/昨"开关打开时才显示，优先于平行高光
+                    const isJingYestMatch2 = sortByJingYestEnabled2 && jingYestStockNames2 && stock.stock && jingYestStockNames2.has(stock.stock.trim());
                     const isParallelMatch2 = sortByParallelEnabled2 && parallelStockNames2 && stock.stock && parallelStockNames2.has(stock.stock.trim());
                     const isHighRatioMatch2 = sortByRatioEnabled2 && stock.stock && highRatioInfo2.stockNames.has(stock.stock.trim());
-                    if (isParallelMatch2) {
+                    if (isJingYestMatch2) {
+                        rowClass += ' jing-yest-match';
+                    } else if (isParallelMatch2) {
                         rowClass += ' parallel-match';
                     } else if (isHighRatioMatch2) {
                         rowClass += ' high-ratio';
@@ -13305,6 +13367,27 @@
                 // 与"环比"互斥，打开这个就关闭另一个
                 const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
                 if (ratioToggle2) ratioToggle2.checked = false;
+            } else {
+                // 关闭"平行"时，"竞/昨"是平行的子条件，必须一并关闭
+                const jingYestToggle2 = document.getElementById('auctionSortByJingYestToggle2');
+                if (jingYestToggle2) jingYestToggle2.checked = false;
+            }
+            renderAuctionPage2();
+        }
+
+        // 第二页"竞/昨"开关变化时的处理：在"平行"达标的基础上，进一步要求 今/昨比 > 昨/前比
+        // 单向联动："竞/昨"打开会联动打开"平行"；关闭会联动关闭"平行"。
+        function onAuctionSortByJingYestToggle2Change() {
+            const jingYestChecked = document.getElementById('auctionSortByJingYestToggle2').checked;
+            const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
+            if (jingYestChecked) {
+                // 打开"竞/昨" → 联动打开"平行"，并保持与"环比"互斥
+                const ratioToggle2 = document.getElementById('auctionSortByRatioToggle2');
+                if (ratioToggle2) ratioToggle2.checked = false;
+                if (parallelToggle2) parallelToggle2.checked = true;
+            } else {
+                // 关闭"竞/昨" → 联动关闭"平行"
+                if (parallelToggle2) parallelToggle2.checked = false;
             }
             renderAuctionPage2();
         }
@@ -13361,6 +13444,30 @@
                 if (sortToggle) sortToggle.checked = false;
                 if (ratioToggle) ratioToggle.checked = false;
                 // 注意：不再联动打开"全部展开"，需用户手动开启（与第二页保持一致）
+            } else {
+                // 关闭"平行"时，"竞/昨"是平行的子条件，必须一并关闭，否则条件失去依据
+                const jingYestToggle = document.getElementById('auctionSortByJingYestToggle');
+                if (jingYestToggle) jingYestToggle.checked = false;
+            }
+            renderAuction();
+        }
+
+        // "竞/昨"开关变化时的处理：在"平行"达标的基础上，进一步要求 今/昨比 > 昨/前比
+        // 单向联动："竞/昨"打开会联动打开"平行"；关闭会联动关闭"平行"。
+        // 反之，单独操作"平行"不会影响"竞/昨"的勾选状态（由 onAuctionSortByParallelToggleChange 里的关闭分支保证依赖关系）
+        function onAuctionSortByJingYestToggleChange() {
+            const jingYestChecked = document.getElementById('auctionSortByJingYestToggle').checked;
+            const parallelToggle = document.getElementById('auctionSortByParallelToggle');
+            if (jingYestChecked) {
+                // 打开"竞/昨" → 联动打开"平行"，并保持与"数据"、"环比"互斥
+                const sortToggle = document.getElementById('auctionSortByDataToggle');
+                const ratioToggle = document.getElementById('auctionSortByRatioToggle');
+                if (sortToggle) sortToggle.checked = false;
+                if (ratioToggle) ratioToggle.checked = false;
+                if (parallelToggle) parallelToggle.checked = true;
+            } else {
+                // 关闭"竞/昨" → 联动关闭"平行"
+                if (parallelToggle) parallelToggle.checked = false;
             }
             renderAuction();
         }
@@ -13443,6 +13550,43 @@
                 if (!(t1OwnVolume > t2OwnVolume)) return;
 
                 stockNames.add(name);
+            });
+            return stockNames;
+        }
+
+        // 判断"竞/昨"条件：必须先满足"平行"条件，再额外要求 今/昨比 > 昨/前比
+        //   今/昨比 = 今日竞价量 / T-1竞价量（与展开面板"今/昨比"一致）
+        //   昨/前比 = 昨日成交量(T的yestVolume) / 前日成交量(T-1的yestVolume)（与展开面板"昨/前比"一致）
+        // 两个比值都必须能计算出来（无断点、分母不为0），且严格 今/昨比 > 昨/前比 才算达标
+        // 返回 Set<股票名称>，是 getParallelStocksForDate 结果的子集
+        function getJingYestStocksForDate(dateStr) {
+            const parallelStockNames = getParallelStocksForDate(dateStr);
+            const auctionData = getAuctionData();
+            const todayList = auctionData[dateStr] || [];
+            const t1Date = getPreviousTradingDay(dateStr);
+            const t1List = t1Date ? (auctionData[t1Date] || []) : [];
+
+            const stockNames = new Set();
+            parallelStockNames.forEach(name => {
+                const todayItem = todayList.find(p => p.stock && p.stock.trim() === name);
+                const t1Item = t1List.find(p => p.stock && p.stock.trim() === name);
+                if (!todayItem || !t1Item) return;
+
+                // 今/昨比：今日竞价量 / T-1竞价量
+                const todayVolume = todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
+                const t1Volume = t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
+                if (todayVolume === null || t1Volume === null || t1Volume === 0) return;
+                const jingRatio = todayVolume / t1Volume;
+
+                // 昨/前比：昨日成交量(今天记录的yestVolume) / 前日成交量(T-1记录的yestVolume)
+                const yestVolume = todayItem.yestVolume !== '' && todayItem.yestVolume != null ? parseFloat(todayItem.yestVolume) : null;
+                const prevVolume = t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
+                if (yestVolume === null || prevVolume === null || prevVolume === 0) return;
+                const yestRatio = yestVolume / prevVolume;
+
+                if (jingRatio > yestRatio) {
+                    stockNames.add(name);
+                }
             });
             return stockNames;
         }
