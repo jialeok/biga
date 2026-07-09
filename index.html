@@ -8951,6 +8951,7 @@
             const raw = ta.value.trim();
             if (!raw) { setStockCodeMapStatus('请先粘贴数据', true); ta.focus(); return; }
             const map = loadAllData().stockCodeMap || {};
+            const newNames = []; // 本次导入的名称（用于同步到今日竞价列表）
             let count = 0;
             raw.split(/\r?\n/).forEach(line => {
                 line = line.trim();
@@ -8971,13 +8972,35 @@
                 else { name = cells[0].trim(); code = cells[1].trim(); }
                 if (!name) return;
                 map[name] = code;
+                newNames.push(name);
                 count++;
             });
             allData.stockCodeMap = map;
             saveModule('stockCodeMap');
+
+            // 同步到今日竞价列表：将导入的名称追加到 auction[currentDate]（已存在的不重复添加）
+            let addedToAuction = 0;
+            if (newNames.length > 0) {
+                const auctionData = loadAllData().auction || {};
+                if (!Array.isArray(auctionData[currentDate])) auctionData[currentDate] = [];
+                const list = auctionData[currentDate];
+                newNames.forEach(name => {
+                    const exists = list.some(item => item && item.stock && item.stock.trim() === name);
+                    if (!exists) {
+                        list.push({ stock: name, volume: '', yestVolume: '', note: '', selected: false, bought: false, sold: false, fixed: false });
+                        addedToAuction++;
+                    }
+                });
+                allData.auction = auctionData;
+                saveModule('auction');
+                // 刷新后台编辑表单和前台看板
+                renderAuctionForm();
+                renderAuction();
+            }
+
             scheduleCloudPush();
             ta.value = '';
-            setStockCodeMapStatus(`✅ 已导入 ${count} 条，映射共 ${Object.keys(map).length} 只`, false);
+            setStockCodeMapStatus(`✅ 已导入 ${count} 条映射，${addedToAuction} 只已加入今日竞价列表`, false);
         }
         function clearStockCodeMap() {
             if (!confirm('确定清空股票代码映射？清空后抓取程序将读不到代码。')) return;
