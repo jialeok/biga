@@ -6514,7 +6514,7 @@
     <div class="bottom-bar">
         <div style="display:flex;align-items:center">
             <button class="icon-btn" onclick="exportData()">📤</button>
-            <span id="cloudSyncIndicator" title="云同步状态" style="font-size:16px;margin-left:10px;cursor:default;">☁️</span>
+            <span id="cloudSyncIndicator" title="点击从云端拉取最新数据" onclick="manualPullCloud()" style="font-size:16px;margin-left:10px;cursor:pointer;">☁️</span>
             <button class="icon-btn" onclick="showImportModal()" style="margin-left:20px">📥</button>
             <button class="date-nav-btn" onclick="goToPrevTradingDay()" title="上一个交易日" style="margin-left:30px">◀</button>
             <button class="date-nav-btn" onclick="goToNextTradingDay()" title="下一个交易日" style="margin-left:18px">▶</button>
@@ -8142,6 +8142,23 @@
             }
         }
 
+        // 手动拉取云端数据（点击云朵图标触发）
+        async function manualPullCloud() {
+            updateCloudSyncUI('syncing');
+            try {
+                await pullFromCloud();
+                allData = null; loadAllData();
+                renderList(); renderJiwang(); renderRank(); renderAuction();
+                renderMulti(); renderHotspot(); renderPattern(); renderBidding();
+                renderDuiban();
+                if (typeof renderEtf === 'function') renderEtf();
+                updateCloudSyncUI('synced');
+            } catch (e) {
+                console.error('手动拉取失败:', e);
+                updateCloudSyncUI('offline');
+            }
+        }
+
         // ============================================================
         // 云端数据推送（防抖，操作停止 2 秒后触发）
         // ============================================================
@@ -8210,6 +8227,35 @@
                 };
 
                 const sb = getSupabase();
+
+                // === 合并云端 auction 数据，防止本地覆盖对比日等云端已有日期 ===
+                try {
+                    const { data: cloudRow, error: cloudErr } = await sb
+                        .from('user_data')
+                        .select('data')
+                        .eq('id', 'owner')
+                        .single();
+                    if (!cloudErr && cloudRow && cloudRow.data && cloudRow.data.auction) {
+                        const cloudAuction = cloudRow.data.auction;
+                        const localAuction = payload.auction || {};
+                        let merged = false;
+                        Object.keys(cloudAuction).forEach(function(date) {
+                            var localDay = localAuction[date];
+                            if (!localDay || !Array.isArray(localDay) || localDay.length === 0) {
+                                localAuction[date] = cloudAuction[date];
+                                merged = true;
+                            }
+                        });
+                        if (merged) {
+                            payload.auction = localAuction;
+                            localStorage.setItem('stockApp_v42_auction', JSON.stringify(localAuction));
+                            allData.auction = localAuction;
+                        }
+                    }
+                } catch (mergeErr) {
+                    console.warn('合并云端auction数据失败:', mergeErr);
+                }
+
                 const { error } = await sb
                     .from('user_data')
                     .upsert({ id: 'owner', data: payload, updated_at: new Date().toISOString() });
