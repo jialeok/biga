@@ -8182,7 +8182,8 @@
                         updated_at: now, updated_by: 'main'
                     };
                 });
-                const { error: insErr } = await sb.from('auction_data').insert(newRows);
+                const { error: insErr } = await sb.from('auction_data')
+                    .upsert(newRows, { onConflict: 'date,stock', ignoreDuplicates: true });
                 if (insErr) throw insErr;
             }
 
@@ -8312,6 +8313,7 @@
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
             let totalRows = 0;
+            let hadError = false;
             for (let di = 0; di < dates.length; di++) {
                 var date = dates[di];
                 var rows = auctionData[date].filter(function(s) { return s && s.stock; }).map(function(item) {
@@ -8330,6 +8332,7 @@
                         .upsert(rows, { onConflict: 'date,stock', ignoreDuplicates: true });
                     if (error) {
                         console.warn('[迁移] 日期', date, '失败:', error.message);
+                        hadError = true;
                         // 如果是表不存在的错误，直接中止
                         if (error.message && error.message.indexOf('relation') >= 0) return;
                     } else {
@@ -8337,12 +8340,18 @@
                     }
                 } catch(e) {
                     console.warn('[迁移] 日期', date, '异常:', e.message);
+                    hadError = true;
                     return; // 表可能不存在，中止迁移
                 }
             }
-            _auctionTableAvailable = true;
-            localStorage.setItem('_auction_table_migrated', '1');
-            console.log('[迁移] auction_data 表已灌入 ' + totalRows + ' 条');
+            // 只有迁移成功（无错误）或表确实可用时才标记
+            if (!hadError || totalRows > 0) {
+                _auctionTableAvailable = true;
+                localStorage.setItem('_auction_table_migrated', '1');
+                console.log('[迁移] auction_data 表已灌入 ' + totalRows + ' 条');
+            } else {
+                console.warn('[迁移] 迁移失败，auction_data 表标记为不可用，保留本地数据');
+            }
         }
 
         // ============================================================
@@ -8406,18 +8415,15 @@
                 allData = null;
 
                 // 从 auction_data 独立表拉取 auction 数据（拆表后新增）
-                // 若新表不可用，回退到 user_data blob 中的 auction 字段（已在上方写入 localStorage）
+                // 若新表不可用或为空，保留本地数据（不清空）
                 try {
                     const tableAuction = await pullAuctionFromTable();
                     if (Object.keys(tableAuction).length > 0) {
                         // 新表有数据，覆盖本地 auction（新表是 source of truth）
                         localStorage.setItem('stockApp_v42_auction', JSON.stringify(tableAuction));
                         allData = null; // 重置内存，让下次读取用新数据
-                    } else if (_auctionTableAvailable) {
-                        // 新表为空但可用：清空本地 auction（云端确实无数据）
-                        localStorage.setItem('stockApp_v42_auction', JSON.stringify({}));
-                        allData = null;
                     }
+                    // 新表为空时：保留本地数据，不清空（可能是迁移未完成或表刚创建）
                     // 更新状态签名，避免 pull 后立即触发无意义的 push
                     const todayList = (loadAllData().auction || {})[currentDate] || [];
                     _lastPushedAuctionStatus = JSON.stringify(todayList.map(function(s) {
