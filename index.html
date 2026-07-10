@@ -7992,6 +7992,8 @@
                         // owner 行变化 → 自动拉取最新数据并刷新
                         if (rowId === 'owner') {
                             if (_justPushed) return; // 自己刚推的，忽略
+                            // 取消待推送，防止拉取过程中旧数据被推回云端
+                            if (_pushDebounceTimer) { clearTimeout(_pushDebounceTimer); _pushDebounceTimer = null; }
                             pullFromCloud().then(function() {
                                 allData = null; loadAllData();
                                 renderList(); renderJiwang(); renderRank(); renderAuction();
@@ -8168,6 +8170,14 @@
             updateCloudSyncUI('syncing');
         }
 
+        // 记录"确实发生过增删股票操作"的 auction 日期。
+        // 只有被标记过的日期，在 pushToCloud 合并云端数据时才允许用本地名单覆盖云端，
+        // 避免仅仅因为翻看某个历史日期（currentDate 指向它）就被误判为"允许增删"。
+        if (!window._auctionDirtyDates) window._auctionDirtyDates = new Set();
+        function markAuctionDirty(date) {
+            if (date) window._auctionDirtyDates.add(date);
+        }
+
         async function pushToCloud() {
             updateCloudSyncUI('syncing');
             try {
@@ -8228,7 +8238,7 @@
 
                 const sb = getSupabase();
 
-                // === 合并云端 auction 数据，防止本地覆盖对比日等云端已有日期 ===
+                // === 合并云端 auction 数据，防止本地脏数据覆盖云端 ===
                 try {
                     const { data: cloudRow, error: cloudErr } = await sb
                         .from('user_data')
@@ -8239,12 +8249,57 @@
                         const cloudAuction = cloudRow.data.auction;
                         const localAuction = payload.auction || {};
                         let merged = false;
+                        // 1) 云端有但本地没有的日期：从云端补充到本地
                         Object.keys(cloudAuction).forEach(function(date) {
                             var localDay = localAuction[date];
                             if (!localDay || !Array.isArray(localDay) || localDay.length === 0) {
                                 localAuction[date] = cloudAuction[date];
                                 merged = true;
                             }
+                        });
+                        // 2) 本地有但云端没有的日期：从本地删除（防止旧同步脏数据被推回云端）
+                        if (Object.keys(cloudAuction).length > 0) {
+                            Object.keys(localAuction).forEach(function(date) {
+                                if (!cloudAuction[date]) {
+                                    delete localAuction[date];
+                                    merged = true;
+                                }
+                            });
+                        }
+                        // 3) 两端都有的日期：以云端股票名单为基准，只更新数据，不新增股票
+                        //    （仅当该日期被显式标记为"刚发生过增删股票操作"时才允许绕过此保护，
+                        //     不再用 currentDate 判断——因为 currentDate 只是"当前正在查看的日期"，
+                        //     翻看历史日期时若触发了任意保存，会被误判为"允许增删"从而覆盖云端旧数据）
+                        Object.keys(cloudAuction).forEach(function(date) {
+                            var localDay = localAuction[date];
+                            var cloudDay = cloudAuction[date];
+                            if (!localDay || !Array.isArray(localDay) || localDay.length === 0) return;
+                            if (!cloudDay || !Array.isArray(cloudDay) || cloudDay.length === 0) return;
+                            if (window._auctionDirtyDates && window._auctionDirtyDates.has(date)) return; // 该日期确实发生过增删，允许覆盖
+                            // 以云端名单为准，本地数据只更新匹配股票的字段
+                            var mergedDay = cloudDay.map(function(cStock) {
+                                if (!cStock || !cStock.stock) return cStock;
+                                var localStock = null;
+                                for (var i = 0; i < localDay.length; i++) {
+                                    if (localDay[i] && localDay[i].stock && localDay[i].stock.trim() === cStock.stock.trim()) {
+                                        localStock = localDay[i];
+                                        break;
+                                    }
+                                }
+                                if (!localStock) return cStock;
+                                return {
+                                    stock: cStock.stock,
+                                    volume: localStock.volume || cStock.volume || '',
+                                    yestVolume: localStock.yestVolume || cStock.yestVolume || '',
+                                    note: localStock.note || cStock.note || '',
+                                    selected: localStock.selected || cStock.selected || false,
+                                    bought: localStock.bought || cStock.bought || false,
+                                    sold: localStock.sold || cStock.sold || false,
+                                    fixed: localStock.fixed || cStock.fixed || false
+                                };
+                            });
+                            localAuction[date] = mergedDay;
+                            merged = true;
                         });
                         if (merged) {
                             payload.auction = localAuction;
@@ -8264,6 +8319,9 @@
                 // 标记刚推送，5秒内忽略自己触发的 Realtime 通知
                 _justPushed = true;
                 setTimeout(function() { _justPushed = false; }, 5000);
+                // 本次已经把脏日期的增删结果推送上去了，清空标记，
+                // 避免以后该日期被永久"放行覆盖"（否则等于退回到用 currentDate 判断的老问题）
+                if (window._auctionDirtyDates) window._auctionDirtyDates.clear();
                 updateCloudSyncUI('synced');
             } catch (e) {
                 console.error('pushToCloud 失败:', e);
@@ -8567,6 +8625,9 @@
             } else {
                 allData.auction[backupDate] = backupDayData;
             }
+            // 用户主动确认"撤回"了 backupDate 这一天的数据，标记为脏日期，
+            // 允许下次推送时用撤回后的本地状态覆盖云端该日期
+            markAuctionDirty(backupDate);
             saveData();
 
             // 撤回后清除全部备份，避免下次撤回到错误状态
@@ -9039,6 +9100,9 @@
                 });
                 allData.auction = auctionData;
                 saveModule('auction');
+                // 主动往 auction[currentDate] 增加了股票，标记为脏日期，
+                // 允许下次推送时用本地（含新增股票）的名单覆盖云端该日期
+                markAuctionDirty(currentDate);
                 // 刷新后台编辑表单和前台看板
                 renderAuctionForm();
                 renderAuction();
@@ -23874,6 +23938,9 @@
             if (allData.auction && allData.auction[currentDate]) {
                 delete allData.auction[currentDate];
             }
+            // 用户主动清空了本日数据（含 auction），标记为脏日期，
+            // 允许下次推送时以本地（空）状态覆盖云端，而不是被"以云端为基准"保护挡住
+            markAuctionDirty(currentDate);
             
             // 清除独立存储的 duibanData / stockEtfData 等当前日期数据
             ['duibanData', 'duibanComment', 'stockEtfData', 'stockEtfComment'].forEach(function(key) {
@@ -25414,6 +25481,9 @@
 
                     missingDates.forEach(date => {
                         allData.auction[date] = importedAuction[date];
+                        // 用户主动确认了"补全缺失日期"操作，标记这些日期为脏，
+                        // 允许下次推送时用补全后的本地数据覆盖云端（云端该日期本来就是空的）
+                        markAuctionDirty(date);
                     });
 
                     saveModule('auction');
