@@ -25234,6 +25234,13 @@
                             auction: imported.auction || {},
                             tagTitles: imported.tagTitles || {}
                         };
+
+                        // 这是一次"整体导入覆盖"，用户已经在上面的 confirm 中明确同意
+                        // "导入将覆盖现有数据"。此时导入文件里的 auction 才是权威数据，
+                        // 必须把涉及的每个日期都标记为脏，否则 pushToCloud() 里
+                        // "以云端为基准"的保护逻辑会反过来用云端（可能是脏数据）
+                        // 把刚导入的干净数据覆盖掉，导致"导入了但多余股票还在"。
+                        Object.keys(allData.auction).forEach(function(d) { markAuctionDirty(d); });
                         
                         if (imported.bidding) {
                             Object.keys(imported.bidding).forEach(date => {
