@@ -7954,6 +7954,11 @@
         let _auctionRealtimeChannel = null;
         let _scraperRawChannel = null;
         let _scraperRawDataCache = {}; // {date: [{stock, volume, yest_volume}, ...]}
+        let _stockTopicsChannel = null; // stock_topics 表的 Realtime 订阅
+        let _cloudTopicsCache = null; // 从 stock_topics 表加载的题材缓存 {stock: Set(topics)}
+        let _biddingTableAvailable = false; // bidding_data 表是否可用
+        let _biddingRealtimeChannel = null; // bidding_data 表的 Realtime 订阅
+        let _justPushedBidding = false; // 刚推送 bidding_data，忽略自己触发的 Realtime 通知
 
         function generateToken() {
             const arr = new Uint8Array(16);
@@ -7978,6 +7983,8 @@
             stopSessionPoll();
             startAuctionRealtime(); // 同时启动 auction_data 表的 Realtime 订阅
             startScraperRawRealtime(); // 同时启动 scraper_raw_data 表的 Realtime 订阅（对比日曲线）
+            startStockTopicsRealtime(); // 同时启动 stock_topics 表的 Realtime 订阅（题材库）
+            startBiddingRealtime(); // 同时启动 bidding_data 表的 Realtime 订阅（竞价变化看板）
             try {
                 const sb = getSupabase();
                 _realtimeChannel = sb
@@ -8023,6 +8030,8 @@
             }
             stopAuctionRealtime();
             stopScraperRawRealtime();
+            stopStockTopicsRealtime();
+            stopBiddingRealtime();
         }
 
         // 启动 auction_data 表的 Realtime 订阅（抓取程序同步后自动刷新行情数据）
@@ -8163,6 +8172,292 @@
             }
         }
 
+        // ===== stock_topics 表操作（题材库独立表）=====
+        // 从 stock_topics 表全量读取，返回 {stockName: Set(topics)}
+        async function pullStockTopicsFromCloud() {
+            const sb = getSupabase();
+            const allRows = [];
+            let from = 0;
+            const pageSize = 1000;
+            while (true) {
+                const { data, error } = await sb.from('stock_topics')
+                    .select('stock,topics,code')
+                    .range(from, from + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                allRows.push(...data);
+                if (data.length < pageSize) break;
+                from += pageSize;
+            }
+            const result = {};
+            allRows.forEach(function(row) {
+                if (!row || !row.stock) return;
+                const name = row.stock.trim();
+                if (!row.topics) { result[name] = new Set(); return; }
+                const topics = row.topics.split(',').map(function(t) { return t.trim(); }).filter(function(t) { return t; });
+                result[name] = new Set(topics);
+            });
+            return result;
+        }
+
+        // 从云端加载题材库到内存缓存（非阻塞，失败只打日志）
+        async function loadCloudTopics() {
+            try {
+                _cloudTopicsCache = await pullStockTopicsFromCloud();
+                console.log('题材库加载完成:', Object.keys(_cloudTopicsCache).length, '只股票');
+            } catch (e) {
+                console.warn('loadCloudTopics 失败，回退到本地扫描:', e.message);
+                _cloudTopicsCache = null;
+            }
+        }
+
+        // 启动 stock_topics 表的 Realtime 订阅
+        function startStockTopicsRealtime() {
+            stopStockTopicsRealtime();
+            try {
+                const sb = getSupabase();
+                _stockTopicsChannel = sb
+                    .channel('stock_topics_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'stock_topics'
+                    }, function(payload) {
+                        // 题材库变更，重新拉取云端题材并刷新第二页
+                        loadCloudTopics().then(function() {
+                            invalidateTopicCache();
+                            buildTopicCache();
+                            renderAuction();
+                        }).catch(function(e) { console.warn('Stock topics Realtime 重建缓存失败:', e); });
+                    })
+                    .subscribe();
+                console.log('Stock topics Realtime 订阅已启动');
+            } catch (e) { console.error('Stock topics Realtime 订阅失败:', e); }
+        }
+
+        function stopStockTopicsRealtime() {
+            if (_stockTopicsChannel) {
+                try { getSupabase().removeChannel(_stockTopicsChannel); } catch(e) {}
+                _stockTopicsChannel = null;
+            }
+        }
+
+        // ===== bidding_data 表操作（竞价变化看板独立表）=====
+        // 从 bidding_data 表全量读取，返回 {date: [rows]}
+        async function pullBiddingFromTable() {
+            const sb = getSupabase();
+            const result = {};
+            let offset = 0;
+            const pageSize = 1000;
+            while (true) {
+                const { data, error } = await sb.from('bidding_data')
+                    .select('"date",name,time915,time920,time930,"change",close,time930_initial,time930_initial_modifiedAt,time930_modifiedAt')
+                    .range(offset, offset + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                data.forEach(function(row) {
+                    if (!row || !row.date || !row.name) return;
+                    if (!result[row.date]) result[row.date] = [];
+                    var item = {
+                        name: row.name,
+                        time915: row.time915 || '',
+                        time920: row.time920 || '',
+                        time930: row.time930 || '',
+                        change: row.change || '',
+                        close: row.close || ''
+                    };
+                    if (row.time930_initial !== null && row.time930_initial !== undefined) {
+                        item.time930_initial = row.time930_initial;
+                    }
+                    if (row.time930_initial_modifiedAt !== null && row.time930_initial_modifiedAt !== undefined) {
+                        item.time930_initial_modifiedAt = row.time930_initial_modifiedAt;
+                    }
+                    if (row.time930_modifiedAt !== null && row.time930_modifiedAt !== undefined) {
+                        item.time930_modifiedAt = row.time930_modifiedAt;
+                    }
+                    result[row.date].push(item);
+                });
+                if (data.length < pageSize) break;
+                offset += pageSize;
+            }
+            _biddingTableAvailable = true;
+            return result;
+        }
+
+        // 拉取单日 bidding 数据并合并到本地
+        async function pullBiddingForDate(date) {
+            if (!date) return;
+            const sb = getSupabase();
+            const { data, error } = await sb.from('bidding_data')
+                .select('name,time915,time920,time930,"change",close,time930_initial,time930_initial_modifiedAt,time930_modifiedAt')
+                .eq('"date"', date);
+            if (error) throw error;
+            if (!data || data.length === 0) return;
+            const rows = data.map(function(row) {
+                var item = {
+                    name: row.name,
+                    time915: row.time915 || '',
+                    time920: row.time920 || '',
+                    time930: row.time930 || '',
+                    change: row.change || '',
+                    close: row.close || ''
+                };
+                if (row.time930_initial !== null && row.time930_initial !== undefined) {
+                    item.time930_initial = row.time930_initial;
+                }
+                if (row.time930_initial_modifiedAt !== null && row.time930_initial_modifiedAt !== undefined) {
+                    item.time930_initial_modifiedAt = row.time930_initial_modifiedAt;
+                }
+                if (row.time930_modifiedAt !== null && row.time930_modifiedAt !== undefined) {
+                    item.time930_modifiedAt = row.time930_modifiedAt;
+                }
+                return item;
+            });
+            const biddingData = getBiddingData();
+            biddingData[date] = rows;
+            saveData();
+            _biddingTableAvailable = true;
+        }
+
+        // 当日竞价变化数据 UPSERT 到 bidding_data 表
+        async function pushBiddingToCloud(date) {
+            if (!_biddingTableAvailable) return; // 表不可用时跳过
+            _justPushedBidding = true; // 标记自己推送，5秒内忽略 Realtime 通知
+            setTimeout(function() { _justPushedBidding = false; }, 5000);
+            const sb = getSupabase();
+            const biddingData = getBiddingData()[date] || [];
+            if (biddingData.length === 0) return;
+            const now = new Date().toISOString();
+            const rows = biddingData.filter(function(r) { return r && r.name; }).map(function(item) {
+                var row = {
+                    date: date,
+                    name: item.name,
+                    time915: item.time915 || '',
+                    time920: item.time920 || '',
+                    time930: item.time930 || '',
+                    change: item.change || '',
+                    close: item.close || '',
+                    updated_at: now
+                };
+                if (item.time930_initial !== undefined && item.time930_initial !== null) {
+                    row.time930_initial = item.time930_initial;
+                }
+                if (item.time930_initial_modifiedAt !== undefined && item.time930_initial_modifiedAt !== null) {
+                    row.time930_initial_modifiedAt = item.time930_initial_modifiedAt;
+                }
+                if (item.time930_modifiedAt !== undefined && item.time930_modifiedAt !== null) {
+                    row.time930_modifiedAt = item.time930_modifiedAt;
+                }
+                return row;
+            });
+            if (rows.length === 0) return;
+            const { error } = await sb.from('bidding_data')
+                .upsert(rows, { onConflict: 'date,name' });
+            if (error) throw error;
+        }
+
+        // 一次性迁移：将本地 allData.bidding 灌入 bidding_data 表
+        async function migrateBiddingToTable() {
+            if (localStorage.getItem('_bidding_table_migrated') === '1') {
+                _biddingTableAvailable = true; // 已迁移过，标记表可用
+                return;
+            }
+            const biddingData = getBiddingData();
+            const dates = Object.keys(biddingData).filter(function(d) {
+                return Array.isArray(biddingData[d]) && biddingData[d].length > 0;
+            });
+            if (dates.length === 0) {
+                // 本地无数据，检查表是否可用（尝试读一行）
+                try {
+                    const sb = getSupabase();
+                    const { data, error } = await sb.from('bidding_data').select('"date"').limit(1);
+                    if (!error) {
+                        _biddingTableAvailable = true;
+                        localStorage.setItem('_bidding_table_migrated', '1');
+                        console.log('[迁移] 本地无 bidding 数据，bidding_data 表已就绪');
+                    }
+                } catch(e) { console.warn('[迁移] bidding_data 表不可用:', e.message); }
+                return;
+            }
+            const sb = getSupabase();
+            const now = new Date().toISOString();
+            let totalRows = 0;
+            let hadError = false;
+            for (let di = 0; di < dates.length; di++) {
+                var date = dates[di];
+                var rows = biddingData[date].filter(function(r) { return r && r.name; }).map(function(item) {
+                    var row = {
+                        date: date,
+                        name: item.name,
+                        time915: item.time915 || '',
+                        time920: item.time920 || '',
+                        time930: item.time930 || '',
+                        change: item.change || '',
+                        close: item.close || '',
+                        updated_at: now
+                    };
+                    if (item.time930_initial !== undefined && item.time930_initial !== null) {
+                        row.time930_initial = item.time930_initial;
+                    }
+                    if (item.time930_initial_modifiedAt !== undefined && item.time930_initial_modifiedAt !== null) {
+                        row.time930_initial_modifiedAt = item.time930_initial_modifiedAt;
+                    }
+                    if (item.time930_modifiedAt !== undefined && item.time930_modifiedAt !== null) {
+                        row.time930_modifiedAt = item.time930_modifiedAt;
+                    }
+                    return row;
+                });
+                if (rows.length === 0) continue;
+                try {
+                    var { error } = await sb.from('bidding_data')
+                        .upsert(rows, { onConflict: 'date,name', ignoreDuplicates: true });
+                    if (error) {
+                        console.warn('[迁移] bidding_data 日期', date, '失败:', error.message);
+                        hadError = true;
+                    } else {
+                        totalRows += rows.length;
+                    }
+                } catch(e) {
+                    console.warn('[迁移] bidding_data 日期', date, '异常:', e.message);
+                    hadError = true;
+                }
+            }
+            if (!hadError) {
+                _biddingTableAvailable = true;
+                localStorage.setItem('_bidding_table_migrated', '1');
+                console.log('[迁移] bidding_data 迁移完成:', totalRows, '行');
+            }
+        }
+
+        // 启动 bidding_data 表的 Realtime 订阅（其它设备保存时自动刷新）
+        function startBiddingRealtime() {
+            stopBiddingRealtime();
+            try {
+                const sb = getSupabase();
+                _biddingRealtimeChannel = sb
+                    .channel('bidding_data_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'bidding_data'
+                    }, function(payload) {
+                        if (_justPushedBidding) return; // 自己刚推的，忽略
+                        const row = payload.new || payload.old;
+                        if (!row || !row.date) return;
+                        const changedDate = row.date;
+                        // 拉取该日期的最新竞价数据并刷新看板
+                        pullBiddingForDate(changedDate).then(function() {
+                            if (changedDate === currentDate) renderBidding();
+                        }).catch(function(e) { console.warn('Bidding Realtime 拉取失败:', e); });
+                    })
+                    .subscribe();
+                console.log('Bidding Realtime 订阅已启动');
+            } catch (e) { console.error('Bidding Realtime 订阅失败:', e); }
+        }
+
+        function stopBiddingRealtime() {
+            if (_biddingRealtimeChannel) {
+                try { getSupabase().removeChannel(_biddingRealtimeChannel); } catch(e) {}
+                _biddingRealtimeChannel = null;
+            }
+        }
+
         // 预加载当前日期及前几个交易日的 scraper_raw_data（用于对比日曲线显示）
         // 非阻塞，失败只打日志，不影响主流程
         async function preloadScraperRawData(endDate, count) {
@@ -8247,6 +8542,8 @@
 
             // 预加载对比日曲线数据（非阻塞，完成后刷新竞价看板）
             preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
+            // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
+            loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
         }
 
         // ============================================================
@@ -8612,6 +8909,17 @@
                     console.warn('auction_data 表拉取失败，回退到 blob:', tableErr.message);
                 }
 
+                // 从 bidding_data 独立表拉取 bidding 数据
+                try {
+                    const tableBidding = await pullBiddingFromTable();
+                    if (Object.keys(tableBidding).length > 0) {
+                        localStorage.setItem('stockApp_v42_bidding', JSON.stringify(tableBidding));
+                        allData = null; // 重置内存，让下次读取用新数据
+                    }
+                } catch(tableErr) {
+                    console.warn('bidding_data 表拉取失败，回退到 blob:', tableErr.message);
+                }
+
                 statusEl.innerHTML = '<span style="color:#34d399">✅ 云端数据同步成功</span>';
             } catch (e) {
                 console.error('pullFromCloud 失败:', e);
@@ -8632,6 +8940,8 @@
                 updateCloudSyncUI('synced');
                 // 预加载对比日曲线数据（非阻塞，完成后刷新竞价看板）
                 preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
+            // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
+            loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
             } catch (e) {
                 console.error('手动拉取失败:', e);
                 updateCloudSyncUI('offline');
@@ -8694,7 +9004,7 @@
                     multi: allData.multi || {},
                     hotspot: allData.hotspot || {},
                     pattern: allData.pattern || {},
-                    bidding: allData.bidding || {},
+                    bidding: _biddingTableAvailable ? {} : (allData.bidding || {}),
                     auction: _auctionTableAvailable ? {} : (allData.auction || {}),
                     tagTitles: allData.tagTitles || {},
                     holidays: allData.holidays || [],
@@ -8729,6 +9039,8 @@
                 // auction 数据同步到独立表（按列归属更新，不覆盖抓取程序的行情列）
                 // 脏日期标记在 pushAuctionToCloud 内部清空
                 pushAuctionToCloud();
+                // bidding 数据同步到独立表
+                try { pushBiddingToCloud(currentDate); } catch(e) { console.warn('pushBiddingToCloud 失败:', e); }
                 updateCloudSyncUI('synced');
             } catch (e) {
                 console.error('pushToCloud 失败:', e);
@@ -9331,6 +9643,18 @@
         function buildTopicCache() {
             if (_topicCacheBuilt && _topicCache) return _topicCache;
             _topicCache = {};
+
+            // 1. 优先从云端 stock_topics 表缓存加载
+            if (_cloudTopicsCache) {
+                Object.keys(_cloudTopicsCache).forEach(function(name) {
+                    const topics = _cloudTopicsCache[name];
+                    if (topics && topics.size > 0) {
+                        _topicCache[name] = new Set(topics);
+                    }
+                });
+            }
+
+            // 2. 补充扫描本地历史竞价数据的 note 字段（合并去重）
             const auctionData = getAuctionData();
             // 只扫最近3个月（约66个交易日），兼顾性能和题材识别覆盖率
             const TOPIC_CACHE_DAYS = 66;
@@ -11441,6 +11765,8 @@
         // 获取题材分组（使用核心词匹配）
         function getTopicGroups(auctionList) {
             const coreTopics = getCoreTopics();
+            // 预构建历史题材缓存，供当日 note 为空时回退使用
+            buildTopicCache();
             const coreGroups = {};
             
             coreTopics.forEach(core => {
@@ -11450,7 +11776,14 @@
             const otherStocks = {};
             
             auctionList.forEach(item => {
-                const topics = extractTopics(item.note);
+                let topics = extractTopics(item.note);
+                // 当日 note 为空时，回退到历史题材缓存（从历史日期的 note 中提取）
+                if (topics.length === 0 && item.stock) {
+                    const historyNote = getStockHistoryTopics(item.stock);
+                    if (historyNote) {
+                        topics = extractTopics(historyNote);
+                    }
+                }
                 const volume = parseFloat(item.volume) || 0;
                 const yestVolume = parseFloat(item.yestVolume) || 0;
                 let ratioValue = 0;
@@ -16633,6 +16966,8 @@
 
             getBiddingData()[currentDate] = biddingData;
             saveData();
+            // 同步到 bidding_data 独立表（非阻塞）
+            pushBiddingToCloud(currentDate).catch(function(e) { console.warn('saveBidding pushBiddingToCloud 失败:', e); });
             
             // Fix Bug5: iOS上点"保存"时oninput可能来不及触发syncBiddingCloseToEtf
             // 在saveBidding中主动同步板块ETF收盘值到早盘ETF看板
@@ -26212,6 +26547,8 @@
             
             // 迁移 auction 数据到独立表（拆表后新增，首次运行时自动执行）
             migrateAuctionToTable();
+            // 迁移 bidding 数据到独立表（拆表后新增，首次运行时自动执行）
+            migrateBiddingToTable();
 
             // 加载第四页数据
             loadCopiedStocks();
