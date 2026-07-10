@@ -6514,7 +6514,7 @@
     <div class="bottom-bar">
         <div style="display:flex;align-items:center">
             <button class="icon-btn" onclick="exportData()">📤</button>
-            <span id="cloudSyncIndicator" title="云同步状态" style="font-size:16px;margin-left:10px;cursor:default;">☁️</span>
+            <span id="cloudSyncIndicator" title="点击从云端拉取最新数据" onclick="manualPullCloud()" style="font-size:16px;margin-left:10px;cursor:pointer;">☁️</span>
             <button class="icon-btn" onclick="showImportModal()" style="margin-left:20px">📥</button>
             <button class="date-nav-btn" onclick="goToPrevTradingDay()" title="上一个交易日" style="margin-left:30px">◀</button>
             <button class="date-nav-btn" onclick="goToNextTradingDay()" title="下一个交易日" style="margin-left:18px">▶</button>
@@ -7031,6 +7031,29 @@
                 <button type="button" onclick="replaceConceptFromPaste()" style="margin-top: 8px; margin-left: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: #fff; border: none; border-radius: 4px; cursor: pointer;">替换概念</button>
                 <button type="button" onclick="openAiVisionModal()" style="margin-top: 8px; margin-left: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer;">📷 AI识图</button>
                 <span id="auctionImportStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
+            </div>
+
+            <!-- 股票代码映射导入（独立，不影响竞价数据；供抓取程序读取名称→代码） -->
+            <div id="stockCodeMapArea" style="margin-bottom: 16px; padding: 10px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 13px; color: #15803d; font-weight: 600;">股票代码映射（供抓取程序读取）</span>
+                    <label class="auction-toggle-switch">
+                        <input type="checkbox" id="stockCodeMapToggle" onchange="onStockCodeMapToggleChange()">
+                        <span class="auction-toggle-slider"></span>
+                    </label>
+                </div>
+                <div id="stockCodeMapBody" style="display: none; margin-top: 8px;">
+                    <div style="font-size: 11px; color: #166534; margin-bottom: 8px; line-height: 1.5;">
+                        两列：股票名称[TAB]股票代码（如 贵州茅台[TAB]600519）。<br>
+                        存为「名称→代码」映射，前台不显示代码，仅供抓取程序读取。同名覆盖，长期复用。
+                    </div>
+                    <textarea id="stockCodeMapInput" placeholder="贵州茅台&#9;600519&#10;平安银行&#9;000001&#10;..." style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bbf7d0; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+                        <button type="button" onclick="importStockCodeMap()" style="padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #10b981, #059669); color: #fff; border: none; border-radius: 4px; cursor: pointer;">导入代码映射</button>
+                        <button type="button" onclick="clearStockCodeMap()" style="padding: 6px 12px; font-size: 12px; background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; cursor: pointer;">清空映射</button>
+                        <span id="stockCodeMapStatus" style="font-size: 12px; color: #059669;"></span>
+                    </div>
+                </div>
             </div>
 
             <!-- 历史数据补录模式：默认关闭，专门用于补录任意历史日期缺失的竞价量/昨日成交量。
@@ -7969,6 +7992,8 @@
                         // owner 行变化 → 自动拉取最新数据并刷新
                         if (rowId === 'owner') {
                             if (_justPushed) return; // 自己刚推的，忽略
+                            // 取消待推送，防止拉取过程中旧数据被推回云端
+                            if (_pushDebounceTimer) { clearTimeout(_pushDebounceTimer); _pushDebounceTimer = null; }
                             pullFromCloud().then(function() {
                                 allData = null; loadAllData();
                                 renderList(); renderJiwang(); renderRank(); renderAuction();
@@ -8053,6 +8078,274 @@
         }
 
         // ============================================================
+        // auction_data 独立表操作（拆表后新增）
+        // 列归属：主程序拥有 date/stock/selected/bought/sold/fixed；
+        //         抓取程序拥有 code/volume/yest_volume/note
+        // ============================================================
+        let _auctionTableAvailable = false; // 运行时标记：auction_data 表是否可用
+        let _lastPushedAuctionStatus = '';  // 上次推送的 auction 状态签名（避免无变化时重复推送）
+
+        // 从 auction_data 表全量读取，组装成 {date: [{stock,code,volume,yestVolume,note,selected,bought,sold,fixed}]} 结构
+        async function pullAuctionFromTable() {
+            const sb = getSupabase();
+            const result = {};
+            let offset = 0;
+            const pageSize = 1000;
+            while (true) {
+                const { data, error } = await sb.from('auction_data')
+                    .select('date,stock,code,volume,yest_volume,note,selected,bought,sold,fixed')
+                    .range(offset, offset + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                data.forEach(function(row) {
+                    if (!result[row.date]) result[row.date] = [];
+                    result[row.date].push({
+                        stock: row.stock,
+                        code: row.code || '',
+                        volume: row.volume || '',
+                        yestVolume: row.yest_volume || '',
+                        note: row.note || '',
+                        selected: row.selected || false,
+                        bought: row.bought || false,
+                        sold: row.sold || false,
+                        fixed: row.fixed || false
+                    });
+                });
+                if (data.length < pageSize) break;
+                offset += pageSize;
+            }
+            _auctionTableAvailable = true;
+            return result;
+        }
+
+        // 批量更新某日期所有股票的状态列（主程序拥有：selected/bought/sold/fixed）
+        // 不触碰行情列（volume/yest_volume/note/code），避免覆盖抓取程序的数据
+        async function pushAuctionStatusForDate(date) {
+            const sb = getSupabase();
+            const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock; });
+            if (auctionList.length === 0) return;
+            const now = new Date().toISOString();
+            // 分批并行更新（每批 25 个），避免过多并发请求
+            const batchSize = 25;
+            for (let i = 0; i < auctionList.length; i += batchSize) {
+                const batch = auctionList.slice(i, i + batchSize);
+                await Promise.all(batch.map(function(item) {
+                    return sb.from('auction_data')
+                        .update({
+                            selected: item.selected || false,
+                            bought: item.bought || false,
+                            sold: item.sold || false,
+                            fixed: item.fixed || false,
+                            updated_at: now,
+                            updated_by: 'main'
+                        })
+                        .eq('date', date)
+                        .eq('stock', item.stock.trim());
+                }));
+            }
+        }
+
+        // 脏日期全量同步（增删股票后调用）：删除云端多余的、插入本地新增的、更新现有状态
+        async function syncAuctionListForDate(date) {
+            const sb = getSupabase();
+            const localList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock; });
+            const localStocks = new Set(localList.map(function(s) { return s.stock.trim(); }));
+
+            // 读取云端该日期已有股票
+            const { data: cloudRows, error: readErr } = await sb.from('auction_data')
+                .select('stock').eq('date', date);
+            if (readErr) throw readErr;
+            const cloudStocks = new Set((cloudRows || []).map(function(r) { return (r.stock || '').trim(); }));
+
+            const now = new Date().toISOString();
+            const scMap = loadAllData().stockCodeMap || {};
+
+            // 1. 删除云端有但本地无的股票
+            const toDelete = [];
+            cloudStocks.forEach(function(s) { if (!localStocks.has(s)) toDelete.push(s); });
+            if (toDelete.length > 0) {
+                await Promise.all(toDelete.map(function(stock) {
+                    return sb.from('auction_data').delete().eq('date', date).eq('stock', stock);
+                }));
+            }
+
+            // 2. 插入本地新增的股票（云端无的）
+            const newStocks = localList.filter(function(s) { return !cloudStocks.has(s.stock.trim()); });
+            if (newStocks.length > 0) {
+                const newRows = newStocks.map(function(s) {
+                    return {
+                        date: date, stock: s.stock.trim(),
+                        code: scMap[s.stock.trim()] || '',
+                        volume: s.volume || '', yest_volume: s.yestVolume || '', note: s.note || '',
+                        selected: s.selected || false, bought: s.bought || false,
+                        sold: s.sold || false, fixed: s.fixed || false,
+                        updated_at: now, updated_by: 'main'
+                    };
+                });
+                const { error: insErr } = await sb.from('auction_data').insert(newRows);
+                if (insErr) throw insErr;
+            }
+
+            // 3. 更新现有股票的状态列
+            const existingStocks = localList.filter(function(s) { return cloudStocks.has(s.stock.trim()); });
+            if (existingStocks.length > 0) {
+                const batchSize = 25;
+                for (let i = 0; i < existingStocks.length; i += batchSize) {
+                    const batch = existingStocks.slice(i, i + batchSize);
+                    await Promise.all(batch.map(function(item) {
+                        return sb.from('auction_data')
+                            .update({
+                                selected: item.selected || false, bought: item.bought || false,
+                                sold: item.sold || false, fixed: item.fixed || false,
+                                updated_at: now, updated_by: 'main'
+                            })
+                            .eq('date', date).eq('stock', item.stock.trim());
+                    }));
+                }
+            }
+        }
+
+        // pushToCloud 中调用：同步 auction 数据到新表
+        async function pushAuctionToCloud() {
+            if (!_auctionTableAvailable) return; // 表不可用时跳过，回退到 user_data
+            const dirtyDates = window._auctionDirtyDates ? Array.from(window._auctionDirtyDates) : [];
+
+            // 1. 脏日期：全量同步（增删股票）
+            for (let i = 0; i < dirtyDates.length; i++) {
+                try { await syncAuctionListForDate(dirtyDates[i]); }
+                catch(e) { console.warn('syncAuctionListForDate 失败:', dirtyDates[i], e); }
+            }
+
+            // 2. 当前日期：仅当状态签名变化时才推送（避免无变化的重复推送）
+            if (dirtyDates.indexOf(currentDate) < 0) {
+                const todayList = getAuctionData()[currentDate] || [];
+                if (todayList.length > 0) {
+                    var statusSig = JSON.stringify(todayList.map(function(s) {
+                        return { s: s.stock, sel: s.selected || false, b: s.bought || false,
+                                 so: s.sold || false, f: s.fixed || false };
+                    }));
+                    if (statusSig !== _lastPushedAuctionStatus) {
+                        try {
+                            await pushAuctionStatusForDate(currentDate);
+                            _lastPushedAuctionStatus = statusSig;
+                        } catch(e) { console.warn('pushAuctionStatusForDate 失败:', e); }
+                    }
+                }
+            }
+
+            // 3. 清空脏日期标记
+            if (window._auctionDirtyDates) window._auctionDirtyDates.clear();
+        }
+
+        // 导入功能用：批量 upsert 行情+状态数据（用于 importAuctionFromPaste / importAuctionHistoryFill）
+        async function pushAuctionDataToCloud(date, items) {
+            if (!_auctionTableAvailable) return;
+            const sb = getSupabase();
+            const scMap = loadAllData().stockCodeMap || {};
+            const now = new Date().toISOString();
+            const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
+                return {
+                    date: date, stock: item.stock.trim(),
+                    code: scMap[item.stock.trim()] || item.code || '',
+                    volume: item.volume || '', yest_volume: item.yestVolume || '', note: item.note || '',
+                    selected: item.selected || false, bought: item.bought || false,
+                    sold: item.sold || false, fixed: item.fixed || false,
+                    updated_at: now, updated_by: 'main'
+                };
+            });
+            if (rows.length === 0) return;
+            const { error } = await sb.from('auction_data')
+                .upsert(rows, { onConflict: 'date,stock' });
+            if (error) throw error;
+            // 更新状态签名（导入后状态可能变了）
+            if (date === currentDate) {
+                _lastPushedAuctionStatus = JSON.stringify((getAuctionData()[currentDate] || []).map(function(s) {
+                    return { s: s.stock, sel: s.selected || false, b: s.bought || false,
+                             so: s.sold || false, f: s.fixed || false };
+                }));
+            }
+        }
+
+        // 导入代码映射后：批量更新某日期的 code 列
+        async function pushAuctionCodeToCloud(date) {
+            if (!_auctionTableAvailable) return;
+            const sb = getSupabase();
+            const scMap = loadAllData().stockCodeMap || {};
+            const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock; });
+            const now = new Date().toISOString();
+            const tasks = [];
+            auctionList.forEach(function(item) {
+                var code = scMap[item.stock.trim()] || '';
+                if (code) {
+                    tasks.push(sb.from('auction_data')
+                        .update({ code: code, updated_at: now, updated_by: 'main' })
+                        .eq('date', date).eq('stock', item.stock.trim()));
+                }
+            });
+            if (tasks.length > 0) await Promise.all(tasks);
+        }
+
+        // 一次性迁移：将本地 allData.auction 灌入 auction_data 表
+        async function migrateAuctionToTable() {
+            if (localStorage.getItem('_auction_table_migrated') === '1') {
+                _auctionTableAvailable = true; // 已迁移过，标记表可用
+                return;
+            }
+            const auctionData = getAuctionData();
+            const dates = Object.keys(auctionData).filter(function(d) {
+                return Array.isArray(auctionData[d]) && auctionData[d].length > 0;
+            });
+            if (dates.length === 0) {
+                // 本地无数据，检查表是否可用（尝试读一行）
+                try {
+                    const sb = getSupabase();
+                    const { data, error } = await sb.from('auction_data').select('date').limit(1);
+                    if (!error) {
+                        _auctionTableAvailable = true;
+                        localStorage.setItem('_auction_table_migrated', '1');
+                        console.log('[迁移] 本地无 auction 数据，auction_data 表已就绪');
+                    }
+                } catch(e) { console.warn('[迁移] 表不可用:', e.message); }
+                return;
+            }
+            const sb = getSupabase();
+            const scMap = loadAllData().stockCodeMap || {};
+            const now = new Date().toISOString();
+            let totalRows = 0;
+            for (let di = 0; di < dates.length; di++) {
+                var date = dates[di];
+                var rows = auctionData[date].filter(function(s) { return s && s.stock; }).map(function(item) {
+                    return {
+                        date: date, stock: item.stock.trim(),
+                        code: scMap[item.stock.trim()] || '',
+                        volume: item.volume || '', yest_volume: item.yestVolume || '', note: item.note || '',
+                        selected: item.selected || false, bought: item.bought || false,
+                        sold: item.sold || false, fixed: item.fixed || false,
+                        updated_at: now, updated_by: 'main'
+                    };
+                });
+                if (rows.length === 0) continue;
+                try {
+                    var { error } = await sb.from('auction_data')
+                        .upsert(rows, { onConflict: 'date,stock', ignoreDuplicates: true });
+                    if (error) {
+                        console.warn('[迁移] 日期', date, '失败:', error.message);
+                        // 如果是表不存在的错误，直接中止
+                        if (error.message && error.message.indexOf('relation') >= 0) return;
+                    } else {
+                        totalRows += rows.length;
+                    }
+                } catch(e) {
+                    console.warn('[迁移] 日期', date, '异常:', e.message);
+                    return; // 表可能不存在，中止迁移
+                }
+            }
+            _auctionTableAvailable = true;
+            localStorage.setItem('_auction_table_migrated', '1');
+            console.log('[迁移] auction_data 表已灌入 ' + totalRows + ' 条');
+        }
+
+        // ============================================================
         // 云端数据拉取（解锁后执行一次）
         // ============================================================
         async function pullFromCloud() {
@@ -8074,7 +8367,7 @@
                 const cloudObj = data.data;
 
                 // 将云端数据写入 localStorage（覆盖本地）
-                const moduleKeys = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays'];
+                const moduleKeys = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'stockCodeMap'];
                 const DV = 'v42';
                 moduleKeys.forEach(key => {
                     if (cloudObj[key] !== undefined) {
@@ -8112,10 +8405,50 @@
                 // 重置内存中的 allData，让 loadAllData() 重新从 localStorage 读取
                 allData = null;
 
+                // 从 auction_data 独立表拉取 auction 数据（拆表后新增）
+                // 若新表不可用，回退到 user_data blob 中的 auction 字段（已在上方写入 localStorage）
+                try {
+                    const tableAuction = await pullAuctionFromTable();
+                    if (Object.keys(tableAuction).length > 0) {
+                        // 新表有数据，覆盖本地 auction（新表是 source of truth）
+                        localStorage.setItem('stockApp_v42_auction', JSON.stringify(tableAuction));
+                        allData = null; // 重置内存，让下次读取用新数据
+                    } else if (_auctionTableAvailable) {
+                        // 新表为空但可用：清空本地 auction（云端确实无数据）
+                        localStorage.setItem('stockApp_v42_auction', JSON.stringify({}));
+                        allData = null;
+                    }
+                    // 更新状态签名，避免 pull 后立即触发无意义的 push
+                    const todayList = (loadAllData().auction || {})[currentDate] || [];
+                    _lastPushedAuctionStatus = JSON.stringify(todayList.map(function(s) {
+                        return { s: s.stock, sel: s.selected || false, b: s.bought || false,
+                                 so: s.sold || false, f: s.fixed || false };
+                    }));
+                } catch(tableErr) {
+                    console.warn('auction_data 表拉取失败，回退到 blob:', tableErr.message);
+                }
+
                 statusEl.innerHTML = '<span style="color:#34d399">✅ 云端数据同步成功</span>';
             } catch (e) {
                 console.error('pullFromCloud 失败:', e);
                 statusEl.innerHTML = '<span style="color:#f87171">⚠️ 云端拉取失败，使用本地数据</span>';
+            }
+        }
+
+        // 手动拉取云端数据（点击云朵图标触发）
+        async function manualPullCloud() {
+            updateCloudSyncUI('syncing');
+            try {
+                await pullFromCloud();
+                allData = null; loadAllData();
+                renderList(); renderJiwang(); renderRank(); renderAuction();
+                renderMulti(); renderHotspot(); renderPattern(); renderBidding();
+                renderDuiban();
+                if (typeof renderEtf === 'function') renderEtf();
+                updateCloudSyncUI('synced');
+            } catch (e) {
+                console.error('手动拉取失败:', e);
+                updateCloudSyncUI('offline');
             }
         }
 
@@ -8126,6 +8459,14 @@
             clearTimeout(_pushDebounceTimer);
             _pushDebounceTimer = setTimeout(pushToCloud, 2000);
             updateCloudSyncUI('syncing');
+        }
+
+        // 记录"确实发生过增删股票操作"的 auction 日期。
+        // 只有被标记过的日期，在 pushToCloud 合并云端数据时才允许用本地名单覆盖云端，
+        // 避免仅仅因为翻看某个历史日期（currentDate 指向它）就被误判为"允许增删"。
+        if (!window._auctionDirtyDates) window._auctionDirtyDates = new Set();
+        function markAuctionDirty(date) {
+            if (date) window._auctionDirtyDates.add(date);
         }
 
         async function pushToCloud() {
@@ -8168,9 +8509,10 @@
                     hotspot: allData.hotspot || {},
                     pattern: allData.pattern || {},
                     bidding: allData.bidding || {},
-                    auction: allData.auction || {},
+                    auction: _auctionTableAvailable ? {} : (allData.auction || {}),
                     tagTitles: allData.tagTitles || {},
                     holidays: allData.holidays || [],
+                    stockCodeMap: allData.stockCodeMap || {},
                     duibanData: JSON.parse(localStorage.getItem('duibanData') || '{}'),
                     duibanComment: JSON.parse(localStorage.getItem('duibanComment') || '{}'),
                     stockEtfData: JSON.parse(localStorage.getItem('stockEtfData') || '{}'),
@@ -8186,6 +8528,10 @@
                 };
 
                 const sb = getSupabase();
+
+                // auction 数据已拆表到 auction_data 独立表，不再在 user_data blob 中合并
+                // （旧合并逻辑已移除，由 pushAuctionToCloud 按列归属更新新表）
+
                 const { error } = await sb
                     .from('user_data')
                     .upsert({ id: 'owner', data: payload, updated_at: new Date().toISOString() });
@@ -8194,6 +8540,9 @@
                 // 标记刚推送，5秒内忽略自己触发的 Realtime 通知
                 _justPushed = true;
                 setTimeout(function() { _justPushed = false; }, 5000);
+                // auction 数据同步到独立表（按列归属更新，不覆盖抓取程序的行情列）
+                // 脏日期标记在 pushAuctionToCloud 内部清空
+                pushAuctionToCloud();
                 updateCloudSyncUI('synced');
             } catch (e) {
                 console.error('pushToCloud 失败:', e);
@@ -8233,7 +8582,7 @@
         }
 
         const DATA_VERSION = 'v42';
-        const MODULE_KEYS = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays'];
+        const MODULE_KEYS = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'stockCodeMap'];
 
         let currentDate = localStorage.getItem('lastEditedDate_' + DATA_VERSION);
         if (!currentDate || currentDate < '2025-01-01') {
@@ -8333,7 +8682,7 @@
                     allData = {
                         stocks: {}, jiwang: {}, rank: {}, multi: {},
                         hotspot: {}, pattern: {}, bidding: {}, tagTitles: {},
-                        auction: {}, holidays: []
+                        auction: {}, holidays: [], stockCodeMap: {}
                     };
                 }
             }
@@ -8497,6 +8846,9 @@
             } else {
                 allData.auction[backupDate] = backupDayData;
             }
+            // 用户主动确认"撤回"了 backupDate 这一天的数据，标记为脏日期，
+            // 允许下次推送时用撤回后的本地状态覆盖云端该日期
+            markAuctionDirty(backupDate);
             saveData();
 
             // 撤回后清除全部备份，避免下次撤回到错误状态
@@ -8904,6 +9256,93 @@
             document.getElementById('auctionModal').classList.remove('active');
         }
 
+        // ============ 股票代码映射（stockCodeMap）============
+        // 独立于竞价数据，只存「名称→代码」，供抓取程序读取，前台不渲染代码
+        function onStockCodeMapToggleChange() {
+            const on = document.getElementById('stockCodeMapToggle').checked;
+            document.getElementById('stockCodeMapBody').style.display = on ? 'block' : 'none';
+            if (on) {
+                const map = loadAllData().stockCodeMap || {};
+                const cnt = Object.keys(map).length;
+                setStockCodeMapStatus(cnt > 0 ? `当前映射已有 ${cnt} 只` : '当前映射为空', false);
+            }
+        }
+        function setStockCodeMapStatus(msg, isErr) {
+            const el = document.getElementById('stockCodeMapStatus');
+            if (!el) return;
+            el.textContent = msg;
+            el.style.color = isErr ? '#dc2626' : '#059669';
+        }
+        function importStockCodeMap() {
+            const ta = document.getElementById('stockCodeMapInput');
+            if (!ta) return;
+            const raw = ta.value.trim();
+            if (!raw) { setStockCodeMapStatus('请先粘贴数据', true); ta.focus(); return; }
+            const map = loadAllData().stockCodeMap || {};
+            const newNames = []; // 本次导入的名称（用于同步到今日竞价列表）
+            let count = 0;
+            raw.split(/\r?\n/).forEach(line => {
+                line = line.trim();
+                if (!line) return;
+                // 跳过表头
+                if (!/\d{6}/.test(line) && /股票名称|股票代码|名称|代码/.test(line)) return;
+                let cells;
+                if (line.includes('|')) cells = line.split('|').map(s => s.trim()).filter(s => s.length > 0);
+                else if (line.includes('\t')) cells = line.split('\t').map(s => s.trim()).filter(s => s.length > 0);
+                else cells = line.split(/\s{2,}|\s+/).map(s => s.trim()).filter(Boolean);
+                if (cells.length < 2) return;
+                // 识别哪列是代码（6位数字，去 SH./SZ. 前缀）
+                let name = '', code = '';
+                const c0 = cells[0].replace(/^SH\.|^SZ\./i, '').trim();
+                const c1 = cells[1].replace(/^SH\.|^SZ\./i, '').trim();
+                if (/^\d{6}$/.test(c0)) { code = c0; name = cells[1].trim(); }
+                else if (/^\d{6}$/.test(c1)) { name = cells[0].trim(); code = c1; }
+                else { name = cells[0].trim(); code = cells[1].trim(); }
+                if (!name) return;
+                map[name] = code;
+                newNames.push(name);
+                count++;
+            });
+            allData.stockCodeMap = map;
+            saveModule('stockCodeMap');
+
+            // 同步到今日竞价列表：将导入的名称追加到 auction[currentDate]（已存在的不重复添加）
+            let addedToAuction = 0;
+            if (newNames.length > 0) {
+                const auctionData = loadAllData().auction || {};
+                if (!Array.isArray(auctionData[currentDate])) auctionData[currentDate] = [];
+                const list = auctionData[currentDate];
+                newNames.forEach(name => {
+                    const exists = list.some(item => item && item.stock && item.stock.trim() === name);
+                    if (!exists) {
+                        list.push({ stock: name, volume: '', yestVolume: '', note: '', selected: false, bought: false, sold: false, fixed: false });
+                        addedToAuction++;
+                    }
+                });
+                allData.auction = auctionData;
+                saveModule('auction');
+                // 主动往 auction[currentDate] 增加了股票，标记为脏日期，
+                // 允许下次推送时用本地（含新增股票）的名单覆盖云端该日期
+                markAuctionDirty(currentDate);
+                // 刷新后台编辑表单和前台看板
+                renderAuctionForm();
+                renderAuction();
+            }
+
+            scheduleCloudPush();
+            // 同步代码到 auction_data 独立表的 code 列（拆表后新增）
+            pushAuctionCodeToCloud(currentDate);
+            ta.value = '';
+            setStockCodeMapStatus(`✅ 已导入 ${count} 条映射，${addedToAuction} 只已加入今日竞价列表`, false);
+        }
+        function clearStockCodeMap() {
+            if (!confirm('确定清空股票代码映射？清空后抓取程序将读不到代码。')) return;
+            allData.stockCodeMap = {};
+            saveModule('stockCodeMap');
+            scheduleCloudPush();
+            setStockCodeMapStatus('已清空映射', false);
+        }
+
         // 删除早盘竞价行
         function removeAuctionRow(index) {
             const row = document.getElementById(`auction-row-${index}`);
@@ -9268,8 +9707,8 @@
             auctionData[currentDate] = auctionList;
             saveModule('auction');
             invalidateTopicCache();
-
-            // 立即清空输入框并显示成功状态
+            // 同步到 auction_data 独立表（拆表后新增）
+            pushAuctionDataToCloud(currentDate, auctionList);
             document.getElementById('auctionPasteInput').value = '';
             let statusMsg = '✅ ';
             if (fullDataCount > 0) statusMsg += `新增${fullDataCount}条`;
@@ -9515,6 +9954,8 @@
             auctionData[targetDate] = targetList;
             saveModule('auction');
             invalidateTopicCache();
+            // 同步到 auction_data 独立表（拆表后新增）
+            pushAuctionDataToCloud(targetDate, targetList);
 
             textarea.value = '';
             let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
@@ -23722,6 +24163,9 @@
             if (allData.auction && allData.auction[currentDate]) {
                 delete allData.auction[currentDate];
             }
+            // 用户主动清空了本日数据（含 auction），标记为脏日期，
+            // 允许下次推送时以本地（空）状态覆盖云端，而不是被"以云端为基准"保护挡住
+            markAuctionDirty(currentDate);
             
             // 清除独立存储的 duibanData / stockEtfData 等当前日期数据
             ['duibanData', 'duibanComment', 'stockEtfData', 'stockEtfComment'].forEach(function(key) {
@@ -25015,6 +25459,13 @@
                             auction: imported.auction || {},
                             tagTitles: imported.tagTitles || {}
                         };
+
+                        // 这是一次"整体导入覆盖"，用户已经在上面的 confirm 中明确同意
+                        // "导入将覆盖现有数据"。此时导入文件里的 auction 才是权威数据，
+                        // 必须把涉及的每个日期都标记为脏，否则 pushToCloud() 里
+                        // "以云端为基准"的保护逻辑会反过来用云端（可能是脏数据）
+                        // 把刚导入的干净数据覆盖掉，导致"导入了但多余股票还在"。
+                        Object.keys(allData.auction).forEach(function(d) { markAuctionDirty(d); });
                         
                         if (imported.bidding) {
                             Object.keys(imported.bidding).forEach(date => {
@@ -25262,6 +25713,9 @@
 
                     missingDates.forEach(date => {
                         allData.auction[date] = importedAuction[date];
+                        // 用户主动确认了"补全缺失日期"操作，标记这些日期为脏，
+                        // 允许下次推送时用补全后的本地数据覆盖云端（云端该日期本来就是空的）
+                        markAuctionDirty(date);
                     });
 
                     saveModule('auction');
@@ -25572,6 +26026,9 @@
             // 先加载数据
             loadAllData();
             
+            // 迁移 auction 数据到独立表（拆表后新增，首次运行时自动执行）
+            migrateAuctionToTable();
+
             // 加载第四页数据
             loadCopiedStocks();
 
