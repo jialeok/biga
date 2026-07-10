@@ -7950,6 +7950,8 @@
         let _sessionToken = null;
         let _realtimeChannel = null;
         let _justPushed = false; // 刚推送完，忽略自己触发的 Realtime 通知
+        let _justPushedAuction = false; // 刚推送 auction_data，忽略自己触发的 Realtime 通知
+        let _auctionRealtimeChannel = null;
 
         function generateToken() {
             const arr = new Uint8Array(16);
@@ -7972,6 +7974,7 @@
         // 启动 Realtime 订阅：同时监听互踢 (session行) 和数据变更 (owner行)
         function startSessionPoll() {
             stopSessionPoll();
+            startAuctionRealtime(); // 同时启动 auction_data 表的 Realtime 订阅
             try {
                 const sb = getSupabase();
                 _realtimeChannel = sb
@@ -8014,6 +8017,83 @@
             if (_realtimeChannel) {
                 try { getSupabase().removeChannel(_realtimeChannel); } catch(e) {}
                 _realtimeChannel = null;
+            }
+            stopAuctionRealtime();
+        }
+
+        // 启动 auction_data 表的 Realtime 订阅（抓取程序同步后自动刷新行情数据）
+        function startAuctionRealtime() {
+            stopAuctionRealtime();
+            try {
+                const sb = getSupabase();
+                _auctionRealtimeChannel = sb
+                    .channel('auction_data_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'auction_data'
+                    }, function(payload) {
+                        if (_justPushedAuction) return; // 自己刚推的，忽略
+                        const row = payload.new || payload.old;
+                        if (!row || !row.date) return;
+                        const changedDate = row.date;
+                        // 拉取该日期的最新行情数据并合并（保留本地状态标记）
+                        pullAuctionMarketDataForDate(changedDate).then(function() {
+                            renderAuction();
+                        }).catch(function(e) { console.warn('Auction Realtime 拉取失败:', e); });
+                    })
+                    .subscribe();
+                console.log('Auction Realtime 订阅已启动');
+            } catch (e) {
+                console.error('Auction Realtime 订阅失败:', e);
+            }
+        }
+
+        function stopAuctionRealtime() {
+            if (_auctionRealtimeChannel) {
+                try { getSupabase().removeChannel(_auctionRealtimeChannel); } catch(e) {}
+                _auctionRealtimeChannel = null;
+            }
+        }
+
+        // 拉取某日期的行情数据并合并到本地（只更新行情列，保留本地状态标记）
+        async function pullAuctionMarketDataForDate(date) {
+            if (!_auctionTableAvailable) return;
+            const sb = getSupabase();
+            const { data, error } = await sb.from('auction_data')
+                .select('stock,code,volume,yest_volume,note,selected,bought,sold,fixed')
+                .eq('date', date);
+            if (error) throw error;
+
+            const auctionData = getAuctionData();
+            const localList = auctionData[date] || [];
+            const localMap = {};
+            localList.forEach(function(s) { if (s && s.stock) localMap[s.stock.trim()] = s; });
+
+            // 合并：行情列用云端，状态列保留本地（如本地无则用云端）
+            const mergedList = (data || []).map(function(row) {
+                var local = localMap[(row.stock || '').trim()];
+                return {
+                    stock: row.stock,
+                    code: row.code || '',
+                    volume: row.volume || '',
+                    yestVolume: row.yest_volume || '',
+                    note: row.note || '',
+                    selected: local ? (local.selected || false) : (row.selected || false),
+                    bought: local ? (local.bought || false) : (row.bought || false),
+                    sold: local ? (local.sold || false) : (row.sold || false),
+                    fixed: local ? (local.fixed || false) : (row.fixed || false)
+                };
+            });
+
+            auctionData[date] = mergedList;
+            saveModule('auction');
+            allData = null; // 重置内存
+
+            // 更新状态签名，避免 pull 后立即触发无意义的 push
+            if (date === currentDate) {
+                _lastPushedAuctionStatus = JSON.stringify(mergedList.map(function(s) {
+                    return { s: s.stock, sel: s.selected || false, b: s.bought || false,
+                             so: s.sold || false, f: s.fixed || false };
+                }));
             }
         }
 
@@ -8209,6 +8289,8 @@
         // pushToCloud 中调用：同步 auction 数据到新表
         async function pushAuctionToCloud() {
             if (!_auctionTableAvailable) return; // 表不可用时跳过，回退到 user_data
+            _justPushedAuction = true; // 标记自己推送，5秒内忽略 Realtime 通知
+            setTimeout(function() { _justPushedAuction = false; }, 5000);
             const dirtyDates = window._auctionDirtyDates ? Array.from(window._auctionDirtyDates) : [];
 
             // 1. 脏日期：全量同步（增删股票）
@@ -8241,6 +8323,8 @@
         // 导入功能用：批量 upsert 行情+状态数据（用于 importAuctionFromPaste / importAuctionHistoryFill）
         async function pushAuctionDataToCloud(date, items) {
             if (!_auctionTableAvailable) return;
+            _justPushedAuction = true;
+            setTimeout(function() { _justPushedAuction = false; }, 5000);
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
@@ -8270,6 +8354,8 @@
         // 导入代码映射后：批量更新某日期的 code 列
         async function pushAuctionCodeToCloud(date) {
             if (!_auctionTableAvailable) return;
+            _justPushedAuction = true;
+            setTimeout(function() { _justPushedAuction = false; }, 5000);
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock; });
