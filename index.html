@@ -2390,7 +2390,7 @@
         .auction-highratio-stat {
             text-align: center;
             font-size: 11.5px;
-            color: #92400e;
+            color: #dc2626;
             background: #fffbeb;
             padding: 5px 10px;
             border-bottom: 1px solid #ede9fe;
@@ -5849,7 +5849,7 @@
                             </div>
                         </div>
                         <div class="auction-highratio-stat" id="auctionHighRatioStat">
-                            竞放量数：<span id="auctionHighRatioCount" style="font-weight:700;">-</span><span id="auctionHighRatioArrow" style="font-weight:700;"></span>
+                            竞/昨数：<span id="auctionJingYestCount" style="font-weight:700;">-</span>&nbsp;&nbsp;&nbsp;竞放量数：<span id="auctionHighRatioCount" style="font-weight:700;">-</span><span id="auctionHighRatioArrow" style="font-weight:700;"></span>
                             <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('auctionSortHelpPanel')">?</span>
                             <div class="auction-sort-help-panel" id="auctionSortHelpPanel" onclick="event.stopPropagation();"></div>
                         </div>
@@ -5890,7 +5890,7 @@
                             </div>
                         </div>
                         <div class="auction-highratio-stat" id="auctionHighRatioStat2">
-                            竞放量数：<span id="auctionHighRatioCount2" style="font-weight:700;">-</span><span id="auctionHighRatioArrow2" style="font-weight:700;"></span>
+                            竞/昨数：<span id="auctionJingYestCount2" style="font-weight:700;">-</span>&nbsp;&nbsp;&nbsp;竞放量数：<span id="auctionHighRatioCount2" style="font-weight:700;">-</span><span id="auctionHighRatioArrow2" style="font-weight:700;"></span>
                             <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('auctionSortHelpPanel2')">?</span>
                             <div class="auction-sort-help-panel" id="auctionSortHelpPanel2" onclick="event.stopPropagation();"></div>
                         </div>
@@ -10998,10 +10998,12 @@
                 const strengthArrowEl = document.getElementById('auctionStrengthArrow');
                 if (strengthValueEl) strengthValueEl.textContent = '-';
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
-                // 没有数据时，"竞放量数"也要重置为 -，避免残留上一个有数据日期的数值
+                // 没有数据时，"竞放量数"、"竞/昨数"也要重置为 -，避免残留上一个有数据日期的数值
                 const highRatioCountElEmpty = document.getElementById('auctionHighRatioCount');
                 const highRatioArrowElEmpty = document.getElementById('auctionHighRatioArrow');
+                const jingYestCountElEmpty = document.getElementById('auctionJingYestCount');
                 if (highRatioCountElEmpty) highRatioCountElEmpty.textContent = '-';
+                if (jingYestCountElEmpty) jingYestCountElEmpty.textContent = '-';
                 if (highRatioArrowElEmpty) {
                     highRatioArrowElEmpty.textContent = '';
                     highRatioArrowElEmpty.style.color = '';
@@ -11123,9 +11125,9 @@
             const highRatioToday = getHighRatioStocksForDate(currentDate);
             // 计算"平行"达标股票集合（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量），供高光判断复用
             const parallelStocksToday = getParallelStocksForDate(currentDate);
-            // 计算"竞/昨"达标股票集合（平行基础上，今/昨比 > 昨/前比），供高光判断复用；仅在"竞/昨"开关打开时才需要
+            // 计算"竞/昨"达标股票集合（平行基础上，今/昨比 > 昨/前比），供高光判断复用；不依赖开关，随时计算以便"竞/昨数"常驻显示
             const jingYestToggleChecked = document.getElementById('auctionSortByJingYestToggle')?.checked;
-            const jingYestStocksToday = jingYestToggleChecked ? getJingYestStocksForDate(currentDate) : null;
+            const jingYestStocksToday = getJingYestStocksForDate(currentDate);
             // "竞/昨"高光新规则：Tier0（平行达标+差值>0）里，只有位数差≤1（同位数或相差一位）才允许高光；
             // 位数差≥2的股票仍属于Tier0、排序位置不变，只是不显示浅蓝色高光。
             // jingYestHighlightSet 就是"实际允许高光"的子集，专供高光判断使用；排序逻辑继续用 jingYestStocksToday，不受影响。
@@ -11135,6 +11137,11 @@
             // 若"竞/昨"开启，且计算结果里一个高光都没有（Tier0本就为空，或Tier0里全部位数差≥2），则弹一次黄色警示Toast，提示"全部没有，谨慎出手"
             if (jingYestToggleChecked && jingYestHighlightSet && jingYestHighlightSet.size === 0) {
                 maybeShowJingYestEmptyToast();
+            }
+            // "竞/昨数"：常驻显示实际允许高光的达标股票数量，不带箭头
+            const jingYestCountEl = document.getElementById('auctionJingYestCount');
+            if (jingYestCountEl) {
+                jingYestCountEl.textContent = jingYestHighlightSet ? jingYestHighlightSet.size : '-';
             }
             const highRatioCountEl = document.getElementById('auctionHighRatioCount');
             const highRatioArrowEl = document.getElementById('auctionHighRatioArrow');
@@ -11153,7 +11160,7 @@
                         highRatioArrowEl.style.color = '#16a34a';
                     } else {
                         highRatioArrowEl.textContent = ' -';
-                        highRatioArrowEl.style.color = '#92400e';
+                        highRatioArrowEl.style.color = '#dc2626';
                     }
                 } else {
                     highRatioArrowEl.textContent = '';
@@ -12037,9 +12044,9 @@
             // 是否开启"平行"（分组内部把 今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面）
             const sortByParallelEnabled2 = document.getElementById('auctionSortByParallelToggle2')?.checked;
             const parallelStockNames2 = sortByParallelEnabled2 ? getParallelStocksForDate(currentDate) : null;
-            // 是否开启"竞/昨"（在平行基础上，进一步要求 今/昨比 > 昨/前比）
+            // 是否开启"竞/昨"（在平行基础上，进一步要求 今/昨比 > 昨/前比）；集合本身不依赖开关，随时计算以便"竞/昨数"常驻显示
             const sortByJingYestEnabled2 = document.getElementById('auctionSortByJingYestToggle2')?.checked;
-            const jingYestStockNames2 = sortByJingYestEnabled2 ? getJingYestStocksForDate(currentDate) : null;
+            const jingYestStockNames2 = getJingYestStocksForDate(currentDate);
             // "竞/昨"高光新规则（与第一页一致）：Tier0里只有位数差≤1才允许高光，位数差≥2的仍属于Tier0、排序不变，只是不高光
             // 排序逻辑（上面第11031行 jingYestStockNames2）不受影响，此子集只供高光判断使用
             const jingYestHighlightSet2 = jingYestStockNames2
@@ -12411,6 +12418,12 @@
                 expandAllAuctionTrendPanelsP2();
             }
 
+            // "竞/昨数"（第二页）：常驻显示实际允许高光的达标股票数量，不带箭头
+            const jingYestCountEl2 = document.getElementById('auctionJingYestCount2');
+            if (jingYestCountEl2) {
+                jingYestCountEl2.textContent = jingYestHighlightSet2 ? jingYestHighlightSet2.size : '-';
+            }
+
             // 更新"竞放量数"统计及与昨天的对比箭头（第二页复用第一页同一套计算函数）
             const highRatioCountEl2 = document.getElementById('auctionHighRatioCount2');
             const highRatioArrowEl2 = document.getElementById('auctionHighRatioArrow2');
@@ -12429,7 +12442,7 @@
                         highRatioArrowEl2.style.color = '#16a34a';
                     } else {
                         highRatioArrowEl2.textContent = ' -';
-                        highRatioArrowEl2.style.color = '#92400e';
+                        highRatioArrowEl2.style.color = '#dc2626';
                     }
                 } else {
                     highRatioArrowEl2.textContent = '';
@@ -14615,9 +14628,11 @@
         function onAuctionSortByRatioToggle2Change() {
             const ratioChecked = document.getElementById('auctionSortByRatioToggle2').checked;
             if (ratioChecked) {
-                // 与"平行"互斥，打开这个就关闭另一个
+                // 与"平行"、"竞/昨"互斥，打开这个就关闭另外两个（"竞/昨"是"平行"的加强条件，必须一并关闭）
                 const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
+                const jingYestToggle2 = document.getElementById('auctionSortByJingYestToggle2');
                 if (parallelToggle2) parallelToggle2.checked = false;
+                if (jingYestToggle2) jingYestToggle2.checked = false;
             }
             renderAuctionPage2();
         }
@@ -14686,11 +14701,13 @@
         function onAuctionSortByRatioToggleChange() {
             const ratioChecked = document.getElementById('auctionSortByRatioToggle').checked;
             if (ratioChecked) {
-                // 与"数据"、"平行"互斥，打开这个就关闭另外两个
+                // 与"数据"、"平行"、"竞/昨"互斥，打开这个就关闭其余三个（"竞/昨"是"平行"的加强条件，必须一并关闭）
                 const sortToggle = document.getElementById('auctionSortByDataToggle');
                 const parallelToggle = document.getElementById('auctionSortByParallelToggle');
+                const jingYestToggle = document.getElementById('auctionSortByJingYestToggle');
                 if (sortToggle) sortToggle.checked = false;
                 if (parallelToggle) parallelToggle.checked = false;
+                if (jingYestToggle) jingYestToggle.checked = false;
                 // 注意：不联动打开"全部展开"，需用户手动开启
             }
             renderAuction();
