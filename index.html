@@ -8036,6 +8036,37 @@
         }
 
         // 启动 auction_data 表的 Realtime 订阅（抓取程序同步后自动刷新行情数据）
+        // Realtime 防抖：收集变更日期，800ms 静默后统一拉取+渲染一次
+        // （抓取程序分批写入会产生大量通知，防抖避免每次通知都触发 renderAuction 导致卡顿）
+        var _auctionRealtimeTimer = null;
+        var _pendingRealtimeDates = new Set();
+        function _debounceAuctionRealtime(date) {
+            _pendingRealtimeDates.add(date);
+            if (_auctionRealtimeTimer) clearTimeout(_auctionRealtimeTimer);
+            _auctionRealtimeTimer = setTimeout(function() {
+                var dates = Array.from(_pendingRealtimeDates);
+                _pendingRealtimeDates.clear();
+                _auctionRealtimeTimer = null;
+                var tasks = dates.map(function(d) {
+                    var t = [];
+                    if (typeof pullAuctionMarketDataForDate === 'function') {
+                        t.push(pullAuctionMarketDataForDate(d).catch(function(e) {
+                            console.warn('Realtime pullAuctionMarketDataForDate 失败:', e);
+                        }));
+                    }
+                    if (typeof pullScraperRawDataForDate === 'function') {
+                        t.push(pullScraperRawDataForDate(d).catch(function(e) {
+                            console.warn('Realtime pullScraperRawDataForDate 失败:', e);
+                        }));
+                    }
+                    return Promise.all(t);
+                });
+                Promise.all(tasks).then(function() {
+                    renderAuction();
+                });
+            }, 800);
+        }
+
         function startAuctionRealtime() {
             stopAuctionRealtime();
             try {
@@ -8048,11 +8079,7 @@
                         if (_justPushedAuction) return; // 自己刚推的，忽略
                         const row = payload.new || payload.old;
                         if (!row || !row.date) return;
-                        const changedDate = row.date;
-                        // 拉取该日期的最新行情数据并合并（保留本地状态标记）
-                        pullAuctionMarketDataForDate(changedDate).then(function() {
-                            renderAuction();
-                        }).catch(function(e) { console.warn('Auction Realtime 拉取失败:', e); });
+                        _debounceAuctionRealtime(row.date);
                     })
                     .subscribe();
                 console.log('Auction Realtime 订阅已启动');
@@ -8156,10 +8183,7 @@
                     }, function(payload) {
                         const row = payload.new || payload.old;
                         if (!row || !row.date) return;
-                        var changedDate = row.date;
-                        pullScraperRawDataForDate(changedDate).then(function() {
-                            renderAuction();
-                        }).catch(function(e) { console.warn('Scraper raw Realtime 拉取失败:', e); });
+                        _debounceAuctionRealtime(row.date);
                     })
                     .subscribe();
                 console.log('Scraper raw Realtime 订阅已启动');
@@ -10880,6 +10904,11 @@
             if (board) {
                 board.classList.remove('collapsed');
             }
+            
+            // 标记当前日期为脏，触发 syncAuctionListForDate 全量增删同步
+            // （处理股票名称修改：删除云端旧名称行，插入新名称行）
+            markAuctionDirty(currentDate);
+            scheduleCloudPush();
             
             closeAuctionModal();
         }
