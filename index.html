@@ -11298,10 +11298,35 @@
             const _autoAddedSet = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + currentDate) || '[]'));
 
             // 拆分渲染顺序：观察组 + 常规组
-            const _obsIndices = (_obsStocks && _obsStocks.size > 0)
+            // "竞/昨"关闭时：保持原样，观察组整体置顶、虚线分隔，与之前行为一致。
+            // "竞/昨"打开时：观察组不再整体置顶——
+            //   · 若观察组股票今天也重新达标，或本来就是用户自己导入的（非系统自动补入），则并入常规组正常排序；
+            //     其中"非用户导入、但今天重新达标"的，名称后加蓝色小号上标"观"以便识别；
+            //   · 只有"系统自动补入 且 今天未达标"的观察组股票才会被隐藏（不渲染，但数据仍完整保留在 auctionList/存储中，供抓取程序继续同步）。
+            const _obsIndicesRaw = (_obsStocks && _obsStocks.size > 0)
                 ? renderOrder.filter(i => auctionList[i] && auctionList[i].stock && _obsStocks.has(auctionList[i].stock.trim()))
                 : [];
-            const _regularIndices = renderOrder.filter(i => _obsIndices.indexOf(i) < 0);
+
+            let _obsIndices, _regularIndices, _hiddenObsIndices;
+            if (jingYestToggleChecked) {
+                _hiddenObsIndices = [];
+                const _mergedRegular = [];
+                _obsIndicesRaw.forEach(i => {
+                    const stockName = auctionList[i].stock.trim();
+                    const _isAutoAdded = _autoAddedSet.has(stockName);
+                    const _matchesToday = jingYestHighlightSet && jingYestHighlightSet.has(stockName);
+                    if (_isAutoAdded && !_matchesToday) {
+                        _hiddenObsIndices.push(i); // 纯自动补入且今天未达标 → 隐藏（仅隐藏展示，数据不受影响）
+                    } else {
+                        _mergedRegular.push(i); // 用户自己导入的，或今天重新达标的 → 并入常规组
+                    }
+                });
+                _obsIndices = [];
+                _regularIndices = renderOrder.filter(i => _hiddenObsIndices.indexOf(i) < 0);
+            } else {
+                _obsIndices = _obsIndicesRaw;
+                _regularIndices = renderOrder.filter(i => _obsIndices.indexOf(i) < 0);
+            }
 
             // 渲染单只股票的 HTML（闭包，复用外层变量）
             function _renderAuctionItem(index, displayNum) {
@@ -11405,10 +11430,19 @@
                     volumeHtml = `<a href="${duibanTushiLink}" target="_blank" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${volumeDisplay}</a>`;
                 }
 
-                // 观察组 * 标记：在上一交易日"竞/昨"达标且已在当日列表中的股票，名称后加 *
+                // 观察组标记：
+                // · "*"：上一交易日"竞/昨"达标、且用户自己已在当日列表中导入的股票（原有逻辑，仅在"竞/昨"关闭的置顶展示下有意义）
+                // · 蓝色小号上标"观"：并非用户导入、纯靠观察组机制补入列表，但今天又重新达标的股票——
+                //   用于在"竞/昨"打开、观察组与常规组合并展示时，仍能一眼识别出它不是用户主动导入的
                 const _isObs = _obsStocks && item.stock && _obsStocks.has(item.stock.trim());
                 const _isAutoAdded = item.stock && _autoAddedSet.has(item.stock.trim());
-                const _stockNameDisplay = (_isObs && !_isAutoAdded) ? (item.stock || '-') + '*' : (item.stock || '-');
+                const _matchesTodayForTag = jingYestToggleChecked && jingYestHighlightSet && item.stock && jingYestHighlightSet.has(item.stock.trim());
+                let _stockNameDisplay = item.stock || '-';
+                if (jingYestToggleChecked && _isObs && _isAutoAdded && _matchesTodayForTag) {
+                    _stockNameDisplay += '<sup style="color:#3b82f6;font-size:10px;font-weight:700;">观</sup>';
+                } else if (!jingYestToggleChecked && _isObs && !_isAutoAdded) {
+                    _stockNameDisplay += '*';
+                }
                 
                 return `
                     <div class="${itemClass}" data-index="${index}">
@@ -11422,7 +11456,7 @@
                 `;
             }
 
-            // 先渲染观察组，再渲染常规组，中间留小空隙
+            // 先渲染观察组，再渲染常规组，中间留小空隙（虚线分隔）；"竞/昨"打开时 _obsIndices 为空，直接只渲染合并后的 _regularIndices
             let _displayNum = 1;
             _obsIndices.forEach((i) => { html += _renderAuctionItem(i, _displayNum++); });
             if (_obsIndices.length > 0 && _regularIndices.length > 0) {
