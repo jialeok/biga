@@ -11472,19 +11472,20 @@
                     ratioClass = 'auction-ratio highlight-light auction-ratio-clickable';
                 }
                 
-                const noteAttr = item.note ? ` data-note="${item.note.replace(/"/g, '&quot;')}"` : '';
+                const displayNote = getDisplayNote(item);
+                const noteAttr = displayNote ? ` data-note="${displayNote.replace(/"/g, '&quot;')}"` : '';
                 
                 const volumeDisplay = item.volume ? Math.round(parseFloat(item.volume)) : '-';
                 const yestVolumeDisplay = item.yestVolume ? Math.round(parseFloat(item.yestVolume)) : '-';
                 
                 let yestColorClass = '';
-                if (item.note) {
-                    if (item.note.includes('涨停')) {
+                if (displayNote) {
+                    if (displayNote.includes('涨停')) {
                         yestColorClass = ' auction-yest-red';
-                    } else if (item.note.includes('跌停')) {
+                    } else if (displayNote.includes('跌停')) {
                         yestColorClass = ' auction-yest-green';
                     } else {
-                        const numMatches = item.note.match(/-?\d+\.?\d*/g);
+                        const numMatches = displayNote.match(/-?\d+\.?\d*/g);
                         if (numMatches && numMatches.length > 0) {
                             const lastNum = parseFloat(numMatches[numMatches.length - 1]);
                             if (lastNum > 0) {
@@ -14175,6 +14176,15 @@
             return note;
         }
 
+        // 获取用于展示的完整 note（优先用 changePct + topics 重建，回退到旧 note）
+        function getDisplayNote(item) {
+            if (!item) return '';
+            if (item.changePct || item.topics) {
+                return buildNoteFromFields(item.changePct, item.topics);
+            }
+            return item.note || '';
+        }
+
         // 提取涨幅显示值（优先用 changePct 字段，回退到 note 解析）
         function getChangePctDisplay(item) {
             if (item && item.changePct) return item.changePct;
@@ -15363,12 +15373,16 @@
         // 显示注释输入框
         function showAuctionNoteInput(index, element) {
             const auctionList = getTodayAuction();
-            const currentNote = auctionList[index]?.note || '';
+            const currentNote = getDisplayNote(auctionList[index]);
             const note = prompt('请输入注释（如涨幅）：', currentNote);
             if (note !== null) {
                 // 将中文标点转换为英文逗号（节省空间）
                 const normalizedNote = note.replace(/[，、;；]/g, ',');
                 auctionList[index].note = normalizedNote;
+                // 重新解析 note → changePct + topics，保持三字段同步
+                var parsed = parseNoteToFields(normalizedNote);
+                auctionList[index].changePct = parsed.changePct;
+                auctionList[index].topics = parsed.topics;
                 saveData();
                 renderAuction();
                 
