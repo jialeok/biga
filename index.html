@@ -7098,6 +7098,7 @@
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #f97316, #ea580c);" onclick="clearAllAuctionText()">清除文字</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #6b7280, #4b5563);" onclick="clearAllAuctionNotes()">清除注释</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #7f1d1d, #991b1b);" onclick="clearAllAuctionRows()">清空所有行</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #0891b2, #0e7490);" onclick="refreshScraperRawData()">刷新对比日</button>
             </form>
         </div>
     </div>
@@ -8480,6 +8481,18 @@
             } catch (e) {
                 console.warn('preloadScraperRawData 失败:', e);
             }
+        }
+
+        // 手动刷新对比日数据（按钮触发）：强制清除缓存后重新加载
+        function refreshScraperRawData() {
+            if (typeof showToast === 'function') showToast('正在加载对比日数据…');
+            _scraperRawDataCache = {};
+            preloadScraperRawData(currentDate, 5).then(function() {
+                renderAuction();
+                if (typeof showToast === 'function') showToast('对比日数据已刷新');
+            }).catch(function(e) {
+                if (typeof showToast === 'function') showToast('对比日数据加载失败: ' + (e.message || e));
+            });
         }
 
         function forceLogout() {
@@ -10898,6 +10911,10 @@
         function renderAuction() {
             // 保存滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
             var _savedScrollY = window.scrollY;
+            // 懒加载：如果对比日数据缓存为空，异步触发加载（非阻塞，完成后刷新）
+            if (Object.keys(_scraperRawDataCache).length === 0) {
+                preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
+            }
             // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
             ensureObservationStocks(currentDate);
             // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
@@ -24575,6 +24592,8 @@
             currentDate = newDate;
             allData = null;
             setFilter('all');
+            // 切日期后主动加载对比日数据（非阻塞，完成后刷新竞价看板）
+            preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             // 使用 requestAnimationFrame 延迟渲染，提高翻页响应速度
             requestAnimationFrame(() => {
                 renderList();
@@ -24600,6 +24619,8 @@
             currentDate = date;
             allData = null;
             setFilter('all');
+            // 切日期后主动加载对比日数据（非阻塞，完成后刷新竞价看板）
+            preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             requestAnimationFrame(() => {
                 renderList();
                 autoCalculateRecentMultiScore();
@@ -24625,6 +24646,8 @@
             currentDate = today;
             allData = null;
             setFilter('all');
+            // 切日期后主动加载对比日数据（非阻塞，完成后刷新竞价看板）
+            preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             requestAnimationFrame(() => {
                 renderList();
                 autoCalculateRecentMultiScore();
