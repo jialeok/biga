@@ -8313,7 +8313,8 @@
             });
             const biddingData = getBiddingData();
             biddingData[date] = rows;
-            saveData();
+            saveModule('bidding'); // 只写 localStorage，不触发 scheduleCloudPush（避免 Realtime 循环）
+            allData = null; // 重置内存
             _biddingTableAvailable = true;
         }
 
@@ -8855,6 +8856,12 @@
                 const DV = 'v42';
                 moduleKeys.forEach(key => {
                     if (cloudObj[key] !== undefined) {
+                        // 已拆到独立表的模块：blob 中如果是空对象，不覆盖本地（数据在独立表中，空对象是拆表后的正常状态）
+                        if ((key === 'bidding' || key === 'auction') &&
+                            cloudObj[key] && typeof cloudObj[key] === 'object' &&
+                            Object.keys(cloudObj[key]).length === 0) {
+                            return; // 跳过，保留本地数据
+                        }
                         localStorage.setItem('stockApp_' + DV + '_' + key, JSON.stringify(cloudObj[key]));
                     }
                 });
@@ -8919,6 +8926,9 @@
                 } catch(tableErr) {
                     console.warn('bidding_data 表拉取失败，回退到 blob:', tableErr.message);
                 }
+
+                // 观察组可能受云端数据影响（上一交易日"竞/昨"达标股票可能变化），清除标记重新计算
+                try { localStorage.removeItem('obsEnsured_' + currentDate); } catch(e) {}
 
                 statusEl.innerHTML = '<span style="color:#34d399">✅ 云端数据同步成功</span>';
             } catch (e) {
@@ -9915,6 +9925,14 @@
             // 备份早盘竞价数据（用于撤回）
             backupAuctionData('import');
 
+            // 导入新数据后，观察组需重新计算：
+            // - 已在导入列表中的观察组股票 → 加 * 标记
+            // - 不在导入列表中的观察组股票 → 自动添加
+            try {
+                localStorage.removeItem('obsEnsured_' + currentDate);
+                localStorage.removeItem('obsAutoAdded_' + currentDate);
+            } catch(e) {}
+
             buildTopicCache();
 
             // 兼容 \r\n（Excel/Windows换行）和 \n
@@ -10878,6 +10896,10 @@
         let _lastAuctionRenderDate = null;
 
         function renderAuction() {
+            // 保存滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
+            var _savedScrollY = window.scrollY;
+            // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
+            ensureObservationStocks(currentDate);
             // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
             recalcDuibanFromAuction();
 
@@ -10988,6 +11010,8 @@
                 renderAuctionPage3();
                 renderAuctionStatsBoard();
                 initAuctionSwipe();
+                // 恢复滚动位置
+                window.scrollTo(0, _savedScrollY);
                 return;
             }
             
@@ -11262,7 +11286,18 @@
                 }
             }
 
-            renderOrder.forEach((index) => {
+            // 观察组：上一交易日"竞/昨"达标股票
+            const _obsStocks = getJingYestStocksForDate(getPreviousTradingDay(currentDate));
+            const _autoAddedSet = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + currentDate) || '[]'));
+
+            // 拆分渲染顺序：观察组 + 常规组
+            const _obsIndices = (_obsStocks && _obsStocks.size > 0)
+                ? renderOrder.filter(i => auctionList[i] && auctionList[i].stock && _obsStocks.has(auctionList[i].stock.trim()))
+                : [];
+            const _regularIndices = renderOrder.filter(i => _obsIndices.indexOf(i) < 0);
+
+            // 渲染单只股票的 HTML（闭包，复用外层变量）
+            function _renderAuctionItem(index, displayNum) {
                 const item = auctionList[index];
                 const volume = parseFloat(item.volume) || 0;
                 const yestVolume = parseFloat(item.yestVolume) || 0;
@@ -11362,18 +11397,31 @@
                 if (duibanTushiLink && volumeDisplay !== '-') {
                     volumeHtml = `<a href="${duibanTushiLink}" target="_blank" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${volumeDisplay}</a>`;
                 }
+
+                // 观察组 * 标记：在上一交易日"竞/昨"达标且已在当日列表中的股票，名称后加 *
+                const _isObs = _obsStocks && item.stock && _obsStocks.has(item.stock.trim());
+                const _isAutoAdded = item.stock && _autoAddedSet.has(item.stock.trim());
+                const _stockNameDisplay = (_isObs && !_isAutoAdded) ? (item.stock || '-') + '*' : (item.stock || '-');
                 
-                html += `
+                return `
                     <div class="${itemClass}" data-index="${index}">
-                        <div class="${numberClass}" data-index="${index}">${index + 1}</div>
-                        <div class="${stockClass} auction-note-trigger"${noteAttr}>${item.stock || '-'}</div>
+                        <div class="${numberClass}" data-index="${index}">${displayNum}</div>
+                        <div class="${stockClass} auction-note-trigger"${noteAttr}>${_stockNameDisplay}</div>
                         <div class="auction-volume">${volumeHtml}</div>
                         <div class="auction-yest auction-yest-note${yestColorClass}" data-index="${index}"${noteAttr}>${yestVolumeDisplay}</div>
                         <div class="${ratioClass}" data-index="${index}">${ratio}${ratioArrow}</div>
                     </div>
                     <div class="auction-trend-panel" id="auctionTrendPanel-${index}" data-index="${index}" style="display:none;"></div>
                 `;
-            });
+            }
+
+            // 先渲染观察组，再渲染常规组，中间留小空隙
+            let _displayNum = 1;
+            _obsIndices.forEach((i) => { html += _renderAuctionItem(i, _displayNum++); });
+            if (_obsIndices.length > 0 && _regularIndices.length > 0) {
+                html += '<div style="margin-top:12px;"></div>';
+            }
+            _regularIndices.forEach((i) => { html += _renderAuctionItem(i, _displayNum++); });
             
             auctionContent.innerHTML = html;
             
@@ -11568,8 +11616,11 @@
             renderAuctionPage3();
             renderAuctionStatsBoard();
             initAuctionSwipe();
+            // 恢复滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
+            window.scrollTo(0, _savedScrollY);
+            requestAnimationFrame(function() { window.scrollTo(0, _savedScrollY); });
         }
-        
+
         // 高亮搜索结果
         function highlightAuctionSearch(keyword) {
             const items = document.querySelectorAll('.auction-item');
@@ -14864,6 +14915,55 @@
                 }
             });
             return stockDiffMap;
+        }
+
+        // ============================================================
+        // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
+        // ============================================================
+        function ensureObservationStocks(date) {
+            if (!date) return;
+            // 防重复：每日期只执行一次
+            if (localStorage.getItem('obsEnsured_' + date) === '1') return;
+
+            const prevDay = getPreviousTradingDay(date);
+            if (!prevDay) return;
+
+            // 上一交易日的"竞/昨"达标股票
+            const obsStocks = getJingYestStocksForDate(prevDay);
+            if (!obsStocks || obsStocks.size === 0) {
+                localStorage.setItem('obsEnsured_' + date, '1');
+                return;
+            }
+
+            // 当日已有股票名集合
+            const auctionData = getAuctionData();
+            const dayList = auctionData[date] || [];
+            const existingNames = new Set(dayList.map(function(s) { return s.stock ? s.stock.trim() : ''; }));
+
+            // 已自动添加的股票名集合
+            var autoAdded = JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]');
+            var autoAddedSet = new Set(autoAdded);
+
+            var hasNew = false;
+            obsStocks.forEach(function(info, name) {
+                if (!existingNames.has(name)) {
+                    // 不在当日列表中 → 自动添加
+                    dayList.push({ stock: name, volume: '', yestVolume: '', note: '' });
+                    autoAddedSet.add(name);
+                    hasNew = true;
+                }
+            });
+
+            if (hasNew) {
+                auctionData[date] = dayList;
+                saveModule('auction');
+                markAuctionDirty(date);
+                scheduleCloudPush();
+            }
+
+            // 保存 autoAdded 集合（即使没有新增，也要保存空集合以区分 * 标记）
+            localStorage.setItem('obsAutoAdded_' + date, JSON.stringify([...autoAddedSet]));
+            localStorage.setItem('obsEnsured_' + date, '1');
         }
 
         function getAuctionStockHistory(stockName, endDate, count) {
