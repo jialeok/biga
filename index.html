@@ -8100,7 +8100,7 @@
             if (!_auctionTableAvailable) return;
             const sb = getSupabase();
             const { data, error } = await sb.from('auction_data')
-                .select('stock,code,volume,yest_volume,note,selected,bought,sold,fixed')
+                .select('stock,code,volume,yest_volume,note,change_pct,topics,selected,bought,sold,fixed')
                 .eq('date', date);
             if (error) throw error;
 
@@ -8118,6 +8118,8 @@
                     volume: row.volume || '',
                     yestVolume: row.yest_volume || '',
                     note: row.note || '',
+                    changePct: row.change_pct || '',
+                    topics: row.topics || '',
                     selected: local ? (local.selected || false) : (row.selected || false),
                     bought: local ? (local.bought || false) : (row.bought || false),
                     sold: local ? (local.sold || false) : (row.sold || false),
@@ -8143,7 +8145,7 @@
         async function pullScraperRawDataForDate(date) {
             const sb = getSupabase();
             const { data, error } = await sb.from('scraper_raw_data')
-                .select('stock,volume,yest_volume')
+                .select('stock,volume,yest_volume,change_pct')
                 .eq('date', date);
             if (error) throw error;
             _scraperRawDataCache[date] = data || [];
@@ -8684,6 +8686,7 @@
                         date: date, stock: s.stock.trim(),
                         code: scMap[s.stock.trim()] || '',
                         volume: s.volume || '', yest_volume: s.yestVolume || '', note: s.note || '',
+                        change_pct: s.changePct || '', topics: s.topics || '',
                         selected: s.selected || false, bought: s.bought || false,
                         sold: s.sold || false, fixed: s.fixed || false,
                         updated_at: now, updated_by: 'main'
@@ -8760,6 +8763,7 @@
                     date: date, stock: item.stock.trim(),
                     code: scMap[item.stock.trim()] || item.code || '',
                     volume: item.volume || '', yest_volume: item.yestVolume || '', note: item.note || '',
+                    change_pct: item.changePct || '', topics: item.topics || '',
                     selected: item.selected || false, bought: item.bought || false,
                     sold: item.sold || false, fixed: item.fixed || false,
                     updated_at: now, updated_by: 'main'
@@ -9713,15 +9717,24 @@
                 if (date === currentDate) return;
                 const dayList = auctionData[date] || [];
                 dayList.forEach(item => {
-                    if (!item.stock || !item.note) return;
+                    if (!item.stock) return;
                     const name = item.stock.trim();
-                    const bracketMatches = item.note.match(/\([^)]+\)/g) || [];
-                    if (bracketMatches.length === 0) return;
-                    if (!_topicCache[name]) _topicCache[name] = new Set();
-                    bracketMatches.forEach(match => {
-                        const topics = match.replace(/[()（）]/g, '').split(/[,，、;；]/).map(t => t.trim()).filter(t => t);
-                        topics.forEach(t => _topicCache[name].add(t));
-                    });
+                    // 优先从 topics 字段读取
+                    if (item.topics) {
+                        if (!_topicCache[name]) _topicCache[name] = new Set();
+                        item.topics.split(/[,，、;；]/).forEach(t => {
+                            t = t.trim(); if (t) _topicCache[name].add(t);
+                        });
+                    }
+                    // 兼容旧 note 字段（括号内题材）
+                    if (item.note) {
+                        const bracketMatches = item.note.match(/\([^)]+\)/g) || [];
+                        bracketMatches.forEach(match => {
+                            if (!_topicCache[name]) _topicCache[name] = new Set();
+                            const topics = match.replace(/[()（）]/g, '').split(/[,，、;；]/).map(t => t.trim()).filter(t => t);
+                            topics.forEach(t => _topicCache[name].add(t));
+                        });
+                    }
                 });
             });
             _topicCacheBuilt = true;
@@ -10007,6 +10020,8 @@
                             volume: col2, 
                             yestVolume: col3,
                             note: existingItem ? existingItem.note : '',
+                            changePct: existingItem ? (existingItem.changePct || '') : '',
+                            topics: existingItem ? (existingItem.topics || '') : '',
                             selected: existingItem ? existingItem.selected : false,
                             bought: existingItem ? existingItem.bought : false,
                             sold: existingItem ? existingItem.sold : false,
@@ -10035,11 +10050,10 @@
                                 }
                             }
                         }
-                        let note = noteParts.join('');
-                        if (conceptPart) {
-                            note += '(' + conceptPart + ')';
-                        }
-                        noteList.push({ stock, note });
+                        var changePctStr = noteParts.join('');
+                        var topicsStr = conceptPart ? conceptPart.replace(/[，、;；]/g, ',') : '';
+                        var note = buildNoteFromFields(changePctStr, topicsStr);
+                        noteList.push({ stock: stock, note: note, changePct: changePctStr, topics: topicsStr });
                     }
                 } else if (cells.length === 2) {
                     const stock = cells[0] ? cells[0].trim() : '';
@@ -10050,13 +10064,15 @@
 
                     const col2HasPercent = col2.includes('%');
                     const col2IsNum = /^[+-]?\d+\.?\d*$/.test(col2) || /^[+-]?\d+\.?\d*%$/.test(col2);
-                    let note = '';
+                    var changePctStr = '';
+                    var topicsStr = '';
                     if (col2HasPercent || col2IsNum) {
-                        note = col2;
+                        changePctStr = col2;
                     } else {
-                        note = '(' + col2 + ')';
+                        topicsStr = col2.replace(/[，、;；]/g, ',');
                     }
-                    noteList.push({ stock, note });
+                    var note = buildNoteFromFields(changePctStr, topicsStr);
+                    noteList.push({ stock: stock, note: note, changePct: changePctStr, topics: topicsStr });
                 } else {
                     const trimmedLine = line.trim();
                     const percentMatch = trimmedLine.match(/^(.+?)\s+([+-]?\d+\.?\d*)%$/);
@@ -10065,24 +10081,25 @@
                     const conceptMatch = trimmedLine.match(/^(.+?)\s+([^\d].+)$/);
                     
                     let stock = '';
-                    let note = '';
+                    var changePctStr = '';
+                    var topicsStr = '';
                     
                     if (percentMatch) {
                         stock = percentMatch[1].trim();
-                        note = percentMatch[2] + '%';
+                        changePctStr = percentMatch[2] + '%';
                     } else if (spaceMatch) {
                         stock = spaceMatch[1].trim();
-                        note = spaceMatch[2] + '%';
+                        changePctStr = spaceMatch[2] + '%';
                     } else if (conceptMatch) {
                         stock = conceptMatch[1].trim();
-                        const concept = conceptMatch[2].trim();
-                        note = '(' + concept + ')';
+                        topicsStr = conceptMatch[2].trim().replace(/[，、;；]/g, ',');
                     } else {
                         return;
                     }
 
                     if (stock) {
-                        noteList.push({ stock, note });
+                        var note = buildNoteFromFields(changePctStr, topicsStr);
+                        noteList.push({ stock: stock, note: note, changePct: changePctStr, topics: topicsStr });
                     }
                 }
             });
@@ -10104,11 +10121,15 @@
                     item => item.stock && item.stock.trim() === dataItem.stock
                 );
                 if (existingIndex >= 0) {
-                    const existingNote = auctionList[existingIndex].note || '';
-                    let noteToUse = existingNote;
-                    if (!existingNote) {
+                    var existingNote = auctionList[existingIndex].note || '';
+                    var existingChangePct = auctionList[existingIndex].changePct || '';
+                    var existingTopics = auctionList[existingIndex].topics || '';
+                    if (!existingNote && !existingChangePct && !existingTopics) {
                         const historyTopics = getStockHistoryTopics(dataItem.stock);
-                        noteToUse = historyTopics;
+                        existingNote = historyTopics;
+                        var parsed = parseNoteToFields(historyTopics);
+                        existingChangePct = parsed.changePct;
+                        existingTopics = parsed.topics;
                     }
                     // 保留原有的 bought、selected、sold 和 fixed 状态
                     const existingBought = auctionList[existingIndex].bought;
@@ -10119,7 +10140,9 @@
                         ...auctionList[existingIndex],
                         volume: dataItem.volume,
                         yestVolume: dataItem.yestVolume,
-                        note: noteToUse,
+                        note: existingNote,
+                        changePct: existingChangePct,
+                        topics: existingTopics,
                         bought: existingBought,
                         selected: existingSelected,
                         sold: existingSold,
@@ -10128,9 +10151,12 @@
                     fullDataUpdateCount++;
                 } else {
                     const historyTopics = getStockHistoryTopics(dataItem.stock);
+                    var parsedHist = parseNoteToFields(historyTopics);
                     auctionList.push({
                         ...dataItem,
-                        note: historyTopics
+                        note: historyTopics,
+                        changePct: dataItem.changePct || parsedHist.changePct,
+                        topics: dataItem.topics || parsedHist.topics
                     });
                     fullDataCount++;
                 }
@@ -10143,93 +10169,80 @@
                 
                 // 获取历史题材
                 const historyTopics = getStockHistoryTopics(noteItem.stock);
+                var historyParsed = parseNoteToFields(historyTopics);
+                var newChangePct = noteItem.changePct || '';
+                var newTopics = noteItem.topics || '';
                 
                 if (existingIndex >= 0) {
-                    const existingNote = auctionList[existingIndex].note || '';
-                    const newNote = noteItem.note || '';
-                    
-                    // 检查新导入的是否是纯涨幅类信息（如 +2.3% 、 -1.5% 、 2.3%、停牌、涨停、跌停）
-                    // 停牌/涨停/跌停这类状态词和百分比一样，都代表"当天涨跌状态"，导入时应替换旧涨幅而不是追加合并
-                    const trimmedNewNote = newNote.trim();
-                    const isNewPercent = /^[+-]?\d+\.?\d*%$/.test(trimmedNewNote);
-                    const isNewStatusWord = /^(停牌|涨停|跌停)$/.test(trimmedNewNote);
-                    const isNewChangeInfo = isNewPercent || isNewStatusWord;
-                    
-                    if (isNewChangeInfo && existingNote) {
-                        // 新导入的是涨幅/停牌等状态，完全替换旧涨幅，只保留题材括号内容
-                        // 注：不再尝试保留旧note里的"裸露百分比"，因为该字段本质上和真正的"占比"
-                        // （由竞价量/昨日成交量计算得出，显示在独立的占比列）无关，只是历史遗留逻辑，
-                        // 且无法用正则可靠区分"合法占比"与"脏数据里残留的另一个涨幅"，
-                        // 保留它反而是之前"数字重复拼接"问题的根源，因此直接去掉更安全。
-                        const bracketMatches = existingNote.match(/\([^)]+\)/g) || [];
-
-                        // 构建新注释：新涨幅/状态词 + 题材
-                        let newNoteBuilt = trimmedNewNote + bracketMatches.join('');
-                        const normalizedNote = newNoteBuilt.replace(/[，、;；]/g, ',');
-                        auctionList[existingIndex].note = normalizedNote;
-                    } else if (existingNote && !existingNote.includes(newNote)) {
-                        // 其他情况（如导入题材），合并并去重
-                        const combinedNote = existingNote + newNote;
-                        
-                        // 提取所有括号内的题材并去重
-                        const bracketMatches = combinedNote.match(/\([^)]+\)/g) || [];
-                        const allTopics = new Set();
-                        bracketMatches.forEach(match => {
-                            // 去掉括号，按逗号、顿号、分号分割
-                            const topics = match.slice(1, -1).split(/[,，、;；]/).map(s => s.trim()).filter(s => s);
-                            topics.forEach(t => allTopics.add(t));
-                        });
-                        
-                        // 构建去重后的题材括号
-                        const uniqueBracket = allTopics.size > 0 ? '(' + Array.from(allTopics).join(',') + ')' : '';
-                        
-                        // 提取涨幅和涨停/跌停
-                        const newHasZtDt = newNote.includes('涨停') || newNote.includes('跌停');
-                        const newHasPercent = /-?\d+\.?\d*%/.test(newNote);
-                        let percentMatches = [];
-                        let ztDtMatches = [];
-                        if (newHasPercent) {
-                            percentMatches = newNote.match(/-?\d+\.?\d*%/g) || [];
-                        } else if (newHasZtDt) {
-                            ztDtMatches = newNote.match(/涨停|跌停/g) || [];
-                        } else {
-                            percentMatches = combinedNote.match(/-?\d+\.?\d*%/g) || [];
-                            ztDtMatches = combinedNote.match(/涨停|跌停/g) || [];
-                        }
-                        const uniqueZtDt = [...new Set(ztDtMatches)];
-                        let prefix = percentMatches.join('') + uniqueZtDt.join('');
-                        
-                        // 将中文标点转换为英文逗号（节省空间）
-                        const normalizedNote = (prefix + uniqueBracket).replace(/[，、;；]/g, ',');
-                        auctionList[existingIndex].note = normalizedNote;
-                    } else if (!existingNote) {
-                        // 没有现有注释，使用新注释+历史题材
-                        let finalNote = newNote || '';
-                        if (historyTopics) {
-                            finalNote += historyTopics;
-                        }
-                        // 将中文标点转换为英文逗号（节省空间）
-                        const normalizedNote = finalNote.replace(/[，、;；]/g, ',');
-                        auctionList[existingIndex].note = normalizedNote;
+                    var existingChangePct = auctionList[existingIndex].changePct || '';
+                    var existingTopics = auctionList[existingIndex].topics || '';
+                    // 兼容：如果旧数据没有 changePct/topics 字段，从 note 解析
+                    if (!existingChangePct && !existingTopics && auctionList[existingIndex].note) {
+                        var exParsed = parseNoteToFields(auctionList[existingIndex].note);
+                        existingChangePct = exParsed.changePct;
+                        existingTopics = exParsed.topics;
                     }
+                    
+                    if (newChangePct) {
+                        // 新导入的是涨幅/状态词 → 替换旧涨幅，保留旧题材
+                        auctionList[existingIndex].changePct = newChangePct;
+                        if (!existingTopics && historyParsed.topics) {
+                            existingTopics = historyParsed.topics;
+                        }
+                        auctionList[existingIndex].topics = existingTopics;
+                    } else if (newTopics) {
+                        // 新导入的是题材 → 合并去重
+                        var allTopics = new Set();
+                        if (existingTopics) {
+                            existingTopics.split(/[,，、;；]/).forEach(function(t) {
+                                t = t.trim(); if (t) allTopics.add(t);
+                            });
+                        }
+                        if (historyParsed.topics) {
+                            historyParsed.topics.split(/[,，、;；]/).forEach(function(t) {
+                                t = t.trim(); if (t) allTopics.add(t);
+                            });
+                        }
+                        newTopics.split(/[,，、;；]/).forEach(function(t) {
+                            t = t.trim(); if (t) allTopics.add(t);
+                        });
+                        auctionList[existingIndex].topics = Array.from(allTopics).join(',');
+                        auctionList[existingIndex].changePct = existingChangePct || historyParsed.changePct;
+                    } else {
+                        // 无新数据，保留旧字段
+                        auctionList[existingIndex].changePct = existingChangePct || historyParsed.changePct;
+                        auctionList[existingIndex].topics = existingTopics || historyParsed.topics;
+                    }
+                    // 同步 note 字段（向后兼容）
+                    auctionList[existingIndex].note = buildNoteFromFields(
+                        auctionList[existingIndex].changePct,
+                        auctionList[existingIndex].topics
+                    );
                     noteUpdateCount++;
                 } else {
-                    // 新股票，使用导入的注释+历史题材
-                    let finalNote = noteItem.note || '';
-                    if (historyTopics && !finalNote.includes(historyTopics)) {
-                        // 如果导入的注释中没有题材，添加历史题材
-                        const hasTopics = /\([^)]+\)/.test(finalNote);
-                        if (!hasTopics) {
-                            finalNote += historyTopics;
-                        }
+                    // 新股票，使用导入的字段+历史题材
+                    var finalChangePct = newChangePct || historyParsed.changePct;
+                    var finalTopics = noteItem.topics || '';
+                    // 合并历史题材
+                    if (historyParsed.topics && !finalTopics) {
+                        finalTopics = historyParsed.topics;
+                    } else if (historyParsed.topics && finalTopics) {
+                        var allTopics = new Set();
+                        finalTopics.split(/[,，、;；]/).forEach(function(t) {
+                            t = t.trim(); if (t) allTopics.add(t);
+                        });
+                        historyParsed.topics.split(/[,，、;；]/).forEach(function(t) {
+                            t = t.trim(); if (t) allTopics.add(t);
+                        });
+                        finalTopics = Array.from(allTopics).join(',');
                     }
-                    // 将中文标点转换为英文逗号（节省空间）
-                    const normalizedNote = finalNote.replace(/[，、;；]/g, ',');
                     auctionList.push({
                         stock: noteItem.stock,
                         volume: '',
                         yestVolume: '',
-                        note: normalizedNote,
+                        note: buildNoteFromFields(finalChangePct, finalTopics),
+                        changePct: finalChangePct,
+                        topics: finalTopics,
                         selected: false
                     });
                     noteNewCount++;
@@ -10425,7 +10438,7 @@
                 let existingIndex = targetList.findIndex(item => item.stock && item.stock.trim() === stock);
                 let isNewRecord = false;
                 if (existingIndex < 0) {
-                    targetList.push({ stock, volume: '', yestVolume: '', note: '', selected: false, bought: false, sold: false, fixed: false });
+                    targetList.push({ stock, volume: '', yestVolume: '', note: '', changePct: '', topics: '', selected: false, bought: false, sold: false, fixed: false });
                     existingIndex = targetList.length - 1;
                     isNewRecord = true;
                 }
@@ -10675,10 +10688,14 @@
             let clearCount = 0;
             
             existingList.forEach(item => {
-                if (item.note && item.note.includes('(')) {
-                    let newNote = item.note;
+                if ((item.note && item.note.includes('(')) || item.topics) {
+                    let newNote = item.note || '';
                     newNote = newNote.replace(/\(([^)]+)\)/g, '');
                     item.note = newNote;
+                    item.topics = '';
+                    // 重新解析 note 确保 changePct 一致
+                    var parsed = parseNoteToFields(newNote);
+                    item.changePct = parsed.changePct;
                     clearCount++;
                 }
             });
@@ -10720,6 +10737,10 @@
                     const newNote = percentMatches.join('') + uniqueZtDt.join('') + bracketMatches.join('');
                     if (newNote !== item.note) {
                         item.note = newNote;
+                        // 同步 changePct 和 topics 字段
+                        var parsed = parseNoteToFields(newNote);
+                        item.changePct = parsed.changePct;
+                        item.topics = parsed.topics;
                         clearCount++;
                     }
                 }
@@ -10861,11 +10882,16 @@
                 
                 if (stock) {
                     const existingItem = existingList.find(item => item.stock && item.stock.trim() === stock);
-                    let note = existingItem ? existingItem.note : '';
+                    var note = existingItem ? (existingItem.note || '') : '';
+                    var changePct = existingItem ? (existingItem.changePct || '') : '';
+                    var topics = existingItem ? (existingItem.topics || '') : '';
                     
                     // 如果没有注释，自动填充历史题材
-                    if (!note) {
+                    if (!note && !changePct && !topics) {
                         note = getStockHistoryTopics(stock);
+                        var parsed = parseNoteToFields(note);
+                        changePct = parsed.changePct;
+                        topics = parsed.topics;
                     }
                     
                     auctionList.push({ 
@@ -10873,6 +10899,8 @@
                         volume, 
                         yestVolume,
                         note: note,
+                        changePct: changePct,
+                        topics: topics,
                         selected: existingItem ? existingItem.selected : false,
                         bought: existingItem ? existingItem.bought : false,
                         sold: existingItem ? existingItem.sold : false,
@@ -12399,7 +12427,7 @@
                         }
                     }
                     
-                    const changeValue = extractChangeFromNote(stock.note);
+                    const changeValue = getChangePctDisplay(stock);
                     let changeClass = 'auction-topic-change';
                     if (changeValue.includes('涨停') || (changeValue.startsWith('-') === false && changeValue !== '-')) {
                         changeClass = 'auction-topic-change auction-change-red';
@@ -12581,7 +12609,7 @@
                             strongCount++;
                         }
                         
-                        const changeValue = extractChangeFromNote(stock.note);
+                        const changeValue = getChangePctDisplay(stock);
                         if (changeValue && changeValue !== '-') {
                             if (changeValue.includes('涨停') || (!changeValue.startsWith('-') && !changeValue.includes('跌停'))) {
                                 upCount++;
@@ -12922,7 +12950,7 @@
                         }
                         
                         // 计算涨跌
-                        const changeValue = extractChangeFromNote(stock.note);
+                        const changeValue = getChangePctDisplay(stock);
                         if (changeValue && changeValue !== '-') {
                             if (changeValue.includes('涨停') || (!changeValue.startsWith('-') && !changeValue.includes('跌停'))) {
                                 upCount++;
@@ -14115,6 +14143,59 @@
             if (note.includes('涨停')) return '涨停';
             if (note.includes('跌停')) return '跌停';
             return '-';
+        }
+
+        // 从 note 解析出 { changePct, topics }
+        function parseNoteToFields(note) {
+            if (!note) return { changePct: '', topics: '' };
+            var changePct = '';
+            var pctMatch = note.match(/([+-]?\d+\.?\d*%)/);
+            if (pctMatch) {
+                changePct = pctMatch[1];
+            } else if (note.includes('涨停')) {
+                changePct = '涨停';
+            } else if (note.includes('跌停')) {
+                changePct = '跌停';
+            } else if (note.includes('停牌')) {
+                changePct = '停牌';
+            }
+            var bracketMatches = note.match(/[(（]([^)）]+)[)）]/g) || [];
+            var topics = bracketMatches.map(function(m) {
+                return m.replace(/[()（）]/g, '');
+            }).join(',').replace(/[，、;；]/g, ',');
+            return { changePct: changePct, topics: topics };
+        }
+
+        // 从 changePct + topics 反向构建 note（向后兼容）
+        function buildNoteFromFields(changePct, topics) {
+            var note = changePct || '';
+            if (topics) {
+                note += '(' + topics + ')';
+            }
+            return note;
+        }
+
+        // 提取涨幅显示值（优先用 changePct 字段，回退到 note 解析）
+        function getChangePctDisplay(item) {
+            if (item && item.changePct) return item.changePct;
+            return extractChangeFromNote(item ? item.note : '');
+        }
+
+        // 迁移本地 auctionData 中旧 note 到 changePct + topics 字段
+        function migrateNoteToFields() {
+            var auctionData = getAuctionData();
+            var migrated = false;
+            Object.keys(auctionData).forEach(function(date) {
+                (auctionData[date] || []).forEach(function(item) {
+                    if (item && (!item.changePct || !item.topics) && item.note) {
+                        var parsed = parseNoteToFields(item.note);
+                        if (!item.changePct) item.changePct = parsed.changePct;
+                        if (!item.topics) item.topics = parsed.topics;
+                        migrated = true;
+                    }
+                });
+            });
+            if (migrated) saveModule('auction');
         }
 
         // 打开核心词管理弹窗
@@ -26761,6 +26842,8 @@
             migrateAuctionToTable();
             // 迁移 bidding 数据到独立表（拆表后新增，首次运行时自动执行）
             migrateBiddingToTable();
+            // 迁移旧 note 到 changePct + topics 字段（note 拆字段后新增，首次运行时自动执行）
+            migrateNoteToFields();
 
             // 加载第四页数据
             loadCopiedStocks();
