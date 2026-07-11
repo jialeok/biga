@@ -11293,8 +11293,8 @@
                 }
             }
 
-            // 观察组：上一交易日"竞/昨"达标股票
-            const _obsStocks = getJingYestStocksForDate(getPreviousTradingDay(currentDate));
+            // 观察组：上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与"竞/昨数"统计保持一致
+            const _obsStocks = getJingYestHighlightSetForDate(getPreviousTradingDay(currentDate));
             const _autoAddedSet = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + currentDate) || '[]'));
 
             // 拆分渲染顺序：观察组 + 常规组
@@ -14934,6 +14934,15 @@
             return stockDiffMap;
         }
 
+        // "竞/昨"实际高光（蓝色高光）股票集合：在 getJingYestStocksForDate 的基础上，再要求 digitGap <= 1。
+        // 这才是界面上真正显示蓝色高光、以及"竞/昨数"统计所用的口径。
+        // 观察组继承等下游逻辑必须复用这个过滤后的集合，而不能直接用 getJingYestStocksForDate 的原始 Tier0 结果，
+        // 否则会把"满足平行+差值>0但位数差过大、并未显示蓝色高光"的股票也错误地纳入观察组。
+        function getJingYestHighlightSetForDate(dateStr) {
+            const stockDiffMap = getJingYestStocksForDate(dateStr);
+            return new Set([...stockDiffMap].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name));
+        }
+
         // ============================================================
         // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
         // ============================================================
@@ -14945,8 +14954,8 @@
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
 
-            // 上一交易日的"竞/昨"达标股票
-            const obsStocks = getJingYestStocksForDate(prevDay);
+            // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
+            const obsStocks = getJingYestHighlightSetForDate(prevDay);
             if (!obsStocks || obsStocks.size === 0) {
                 localStorage.setItem('obsEnsured_' + date, '1');
                 return;
@@ -14962,7 +14971,7 @@
             var autoAddedSet = new Set(autoAdded);
 
             var hasNew = false;
-            obsStocks.forEach(function(info, name) {
+            obsStocks.forEach(function(name) {
                 if (!existingNames.has(name)) {
                     // 不在当日列表中 → 自动添加
                     dayList.push({ stock: name, volume: '', yestVolume: '', note: '' });
