@@ -11208,6 +11208,15 @@
             const jingYestHighlightSet = jingYestStocksToday
                 ? new Set([...jingYestStocksToday].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name))
                 : null;
+            // 主列表高亮/排序专用集合：只要求"平行达标 + 位数差≤1"，不再要求差值>0
+            // （"差值>0"这个条件只保留给上面的 jingYestHighlightSet，供"竞/昨数"统计和观察组继承使用，两者互不影响）
+            const allRatioDiffInfoForListHighlight = getRatioDiffInfoForDate(currentDate);
+            const jingYestListHighlightSet = new Set(
+                [...parallelStocksToday].filter(name => {
+                    const info = allRatioDiffInfoForListHighlight.get(name);
+                    return info && info.digitGap <= 1;
+                })
+            );
             // 若"竞/昨"开启，且计算结果里一个高光都没有（Tier0本就为空，或Tier0里全部位数差≥2），则弹一次黄色警示Toast，提示"全部没有，谨慎出手"
             if (jingYestToggleChecked && jingYestHighlightSet && jingYestHighlightSet.size === 0) {
                 maybeShowJingYestEmptyToast();
@@ -11306,29 +11315,22 @@
                     .map(x => x.idx);
             } else if (sortByParallelEnabled) {
                 if (sortByJingYestEnabled) {
-                    // "竞/昨"是"平行"的加强筛选，排序需三层：
-                    //   1. 竞/昨达标：先按"位数差"(|竞价量位数-昨日成交量位数|)从小到大排，位数差相同再按"差值"(今/昨比-昨/前比)从高到低排
-                    //   2. 平行达标但竞/昨未达标：同样按"位数差"从小到大、"差值"从高到低排（差值此时不要求>0，能算出来就参与）
-                    //   3. 平行也不达标：保持原相对顺序，垫底
-                    const jingYestDiffMap = getJingYestStocksForDate(currentDate);
+                    // "竞/昨"开启时，排序与纯"平行"保持一致（不再区分"差值是否>0"）：
+                    //   1. 平行达标：按"位数差"(|竞价量位数-昨日成交量位数|)从小到大排，位数差相同再按"差值"(今/昨比-昨/前比)从高到低排（差值可正可负，都参与排序）
+                    //   2. 平行不达标：保持原相对顺序，垫底
+                    // 注："差值>0"这个条件不再影响排序，只用于"竞/昨数"统计和观察组继承（见 getJingYestStocksForDate）
                     const parallelStockNamesForSort = getParallelStocksForDate(currentDate);
                     const allRatioDiffInfo = getRatioDiffInfoForDate(currentDate);
                     renderOrder = renderOrder
                         .map((idx, pos) => {
                             const stockName = auctionList[idx] && auctionList[idx].stock ? auctionList[idx].stock.trim() : '';
-                            const info = jingYestDiffMap.has(stockName) ? jingYestDiffMap.get(stockName) : null;
-                            const isParallel = parallelStockNamesForSort.has(stockName);
-                            // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
-                            const tier = info !== null ? 0 : (isParallel ? 1 : 2);
-                            // tier1时，从"全量差值/位数差信息"里取该股票的数据（不要求diff>0）
-                            const fallbackInfo = tier === 1 ? allRatioDiffInfo.get(stockName) : null;
-                            const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
-                            const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
-                            return { idx, pos, diff, digitGap, tier };
+                            const qualifies = stockName && parallelStockNamesForSort.has(stockName);
+                            const info = qualifies ? allRatioDiffInfo.get(stockName) : null;
+                            return { idx, pos, qualifies, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null };
                         })
                         .sort((a, b) => {
-                            if (a.tier !== b.tier) return a.tier - b.tier;
-                            if (a.tier === 0 || a.tier === 1) {
+                            if (a.qualifies !== b.qualifies) return a.qualifies ? -1 : 1;
+                            if (a.qualifies) {
                                 // 无法算出diff/digitGap的，排在同档位内能算出来的后面，仍保持原相对顺序
                                 if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
                                 if (a.digitGap === null) return 1;
@@ -11336,7 +11338,7 @@
                                 if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
                                 return b.diff - a.diff; // 位数差相同时，差值从高到低
                             }
-                            return a.pos - b.pos; // tier2：保持原相对顺序
+                            return a.pos - b.pos; // 不达标：保持原相对顺序
                         })
                         .map(x => x.idx);
                 } else {
@@ -11455,7 +11457,7 @@
                 // 竞放量高光（今日竞价量/昨日竞价量 >= 1.5）：仅在"环比"开关打开时才显示
                 // 平行高光（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：仅在"平行"开关打开且"竞/昨"未开启时才显示，优先于竞放量高光
                 // 竞/昨高光（平行基础上，今/昨比 > 昨/前比）：仅在"竞/昨"开关打开时才显示，优先于平行高光；开启后不再叠加平行高光，避免混淆
-                const isJingYestMatch = jingYestToggleChecked && jingYestHighlightSet && item.stock && jingYestHighlightSet.has(item.stock.trim());
+                const isJingYestMatch = jingYestToggleChecked && item.stock && jingYestListHighlightSet.has(item.stock.trim());
                 const isParallelMatch = sortByParallelEnabled && !jingYestToggleChecked && item.stock && parallelStocksToday.has(item.stock.trim());
                 const isHighRatioMatch = sortByRatioEnabled && item.stock && highRatioToday.stockNames.has(item.stock.trim());
                 if (isJingYestMatch) {
@@ -12161,6 +12163,16 @@
             const jingYestHighlightSet2 = jingYestStockNames2
                 ? new Set([...jingYestStockNames2].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name))
                 : null;
+            // 主列表高亮/排序专用集合（第二页）：只要求"平行达标 + 位数差≤1"，不再要求差值>0
+            // （"差值>0"只保留给上面的 jingYestHighlightSet2，供"竞/昨数"统计和观察组继承使用）
+            const jingYestListHighlightSet2 = (function() {
+                if (!sortByJingYestEnabled2 || !parallelStockNames2) return new Set();
+                const ratioDiffInfo2 = getRatioDiffInfoForDate(currentDate);
+                return new Set([...parallelStockNames2].filter(name => {
+                    const info = ratioDiffInfo2.get(name);
+                    return info && info.digitGap <= 1;
+                }));
+            })();
             // 若"竞/昨"（第二页）开启且高光子集为空，弹一次警示Toast；用同一个防抖标记避免与第一页同一时刻重复弹出
             if (sortByJingYestEnabled2 && jingYestHighlightSet2 && jingYestHighlightSet2.size === 0) {
                 maybeShowJingYestEmptyToast();
@@ -12344,33 +12356,28 @@
                         .map(x => x.s);
                 } else if (sortByParallelEnabled2 && parallelStockNames2) {
                     if (sortByJingYestEnabled2 && jingYestStockNames2) {
-                        // "竞/昨"是"平行"的加强筛选，排序需三层：
-                        //   1. 竞/昨达标：先按"位数差"从小到大排，位数差相同再按差值(今/昨比 - 昨/前比)从高到低排
-                        //   2. 平行达标但竞/昨未达标：同样按位数差/差值排序（差值不要求>0，能算出来就参与）
-                        //   3. 平行也不达标：保持原相对顺序，垫底
+                        // "竞/昨"开启时，排序与纯"平行"保持一致（不再区分"差值是否>0"）：
+                        //   1. 平行达标：按位数差从小到大排，位数差相同再按差值(今/昨比 - 昨/前比)从高到低排（差值可正可负，都参与排序）
+                        //   2. 平行不达标：保持原相对顺序，垫底
+                        // 注："差值>0"这个条件不再影响排序，只用于"竞/昨数"统计和观察组继承（见 jingYestStockNames2）
                         const allRatioDiffInfo2 = getRatioDiffInfoForDate(currentDate);
                         stocksToRender = group.stocks
                             .map((s, pos) => {
                                 const name = s.stock ? s.stock.trim() : '';
-                                const info = jingYestStockNames2.has(name) ? jingYestStockNames2.get(name) : null;
-                                const isParallel = parallelStockNames2.has(name);
-                                // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
-                                const tier = info !== null ? 0 : (isParallel ? 1 : 2);
-                                const fallbackInfo = tier === 1 ? allRatioDiffInfo2.get(name) : null;
-                                const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
-                                const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
-                                return { s, pos, diff, digitGap, tier };
+                                const qualifies = name && parallelStockNames2.has(name);
+                                const info = qualifies ? allRatioDiffInfo2.get(name) : null;
+                                return { s, pos, qualifies, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null };
                             })
                             .sort((a, b) => {
-                                if (a.tier !== b.tier) return a.tier - b.tier;
-                                if (a.tier === 0 || a.tier === 1) {
+                                if (a.qualifies !== b.qualifies) return a.qualifies ? -1 : 1;
+                                if (a.qualifies) {
                                     if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
                                     if (a.digitGap === null) return 1;
                                     if (b.digitGap === null) return -1;
                                     if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
                                     return b.diff - a.diff; // 位数差相同时，差值从高到低
                                 }
-                                return a.pos - b.pos; // tier2：保持原相对顺序
+                                return a.pos - b.pos; // 不达标：保持原相对顺序
                             })
                             .map(x => x.s);
                     } else {
@@ -12471,7 +12478,7 @@
                     }
                     // 竞放量高光：仅在"环比"开关打开时才显示；平行高光：仅在"平行"开关打开且"竞/昨"未开启时才显示，优先于竞放量高光
                     // 竞/昨高光：仅在"竞/昨"开关打开时才显示，优先于平行高光；开启后不再叠加平行高光，避免混淆
-                    const isJingYestMatch2 = sortByJingYestEnabled2 && jingYestHighlightSet2 && stock.stock && jingYestHighlightSet2.has(stock.stock.trim());
+                    const isJingYestMatch2 = sortByJingYestEnabled2 && stock.stock && jingYestListHighlightSet2.has(stock.stock.trim());
                     const isParallelMatch2 = sortByParallelEnabled2 && !sortByJingYestEnabled2 && parallelStockNames2 && stock.stock && parallelStockNames2.has(stock.stock.trim());
                     const isHighRatioMatch2 = sortByRatioEnabled2 && stock.stock && highRatioInfo2.stockNames.has(stock.stock.trim());
                     if (isJingYestMatch2) {
