@@ -7913,6 +7913,7 @@
         let allData = null;
         let _topicCache = null;
         let _topicCacheBuilt = false;
+        let expandedAuctionStocks = new Set(); // 记录当前"早盘竞价"第一页中，用户手动展开的股票（按股票名），用于 renderAuction 重新渲染后恢复展开状态
 
         // ============================================================
         // Supabase 云同步配置
@@ -11718,6 +11719,9 @@
             // 若"全部展开"开关已打开，渲染完成后自动展开所有趋势面板
             if (document.getElementById('auctionExpandAllToggle')?.checked) {
                 expandAllAuctionTrendPanels();
+            } else {
+                // 否则恢复用户此前手动展开过的个别股票的趋势面板（避免刷新/轮询导致展开状态丢失）
+                restoreExpandedAuctionTrendPanels();
             }
             
             // 绑定股票名称点击弹出注释 + 长按显示买入提示 + 单击跳转到第二页
@@ -14785,6 +14789,7 @@
         function expandAllAuctionTrendPanels() {
             const auctionList = getTodayAuction();
             auctionList.forEach((item, idx) => {
+                if (item && item.stock) expandedAuctionStocks.add(item.stock.trim());
                 expandAuctionTrendPanel(idx);
             });
         }
@@ -14794,6 +14799,18 @@
             document.querySelectorAll('.auction-trend-panel').forEach(panel => {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
+            });
+            expandedAuctionStocks.clear();
+        }
+
+        // 根据 expandedAuctionStocks 记录的展开状态，在 renderAuction 重新渲染后恢复各行的趋势面板展开
+        function restoreExpandedAuctionTrendPanels() {
+            if (!expandedAuctionStocks || expandedAuctionStocks.size === 0) return;
+            const auctionList = getTodayAuction();
+            auctionList.forEach((item, idx) => {
+                if (item && item.stock && expandedAuctionStocks.has(item.stock.trim())) {
+                    expandAuctionTrendPanel(idx);
+                }
             });
         }
 
@@ -15077,13 +15094,19 @@
             const panel = document.getElementById('auctionTrendPanel-' + index);
             if (!panel) return;
 
+            const auctionList = getTodayAuction();
+            const item = auctionList[index];
+            const stockKey = item && item.stock ? item.stock.trim() : null;
+
             const isOpen = panel.style.display !== 'none';
             if (isOpen) {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
+                if (stockKey) expandedAuctionStocks.delete(stockKey);
                 return;
             }
 
+            if (stockKey) expandedAuctionStocks.add(stockKey);
             expandAuctionTrendPanel(index);
         }
 
