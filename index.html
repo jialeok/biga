@@ -15020,7 +15020,6 @@
             const auctionData = getAuctionData();
             const todayList = auctionData[dateStr] || [];
             const t1Date = getPreviousTradingDay(dateStr);
-            const t1List = t1Date ? (auctionData[t1Date] || []) : [];
 
             const stockNames = new Set();
             todayList.forEach(item => {
@@ -15031,10 +15030,11 @@
                 // T的yestVolume字段 = T-1交易日自身的总成交量
                 const t1OwnVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
 
-                const t1Item = t1List.find(p => p.stock && p.stock.trim() === name);
-                const t1Volume = t1Item && t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
-                // T-1的yestVolume字段 = T-2交易日自身的总成交量
-                const t2OwnVolume = t1Item && t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
+                // T-1交易日竞价量、T-1记录的yestVolume(=T-2成交量)：
+                // 优先查 auction_data 名单表，查不到（例如该股票T-1那天未被加入名单）时回退到 scraper_raw_data 快照，
+                // 与趋势图 getStockHistoryValue 的数据源口径保持一致，避免"新加入名单的股票"因T-1无名单记录而被误判为不满足
+                const t1Volume = t1Date ? getStockHistoryValue(t1Date, name, 'volume') : null;
+                const t2OwnVolume = t1Date ? getStockHistoryValue(t1Date, name, 'yestVolume') : null;
 
                 // 条件1：今日竞价量 > T-1交易日竞价量
                 if (todayVolume === null || t1Volume === null) return;
@@ -15068,24 +15068,23 @@
             const auctionData = getAuctionData();
             const todayList = auctionData[dateStr] || [];
             const t1Date = getPreviousTradingDay(dateStr);
-            const t1List = t1Date ? (auctionData[t1Date] || []) : [];
 
             const infoMap = new Map();
             todayList.forEach(item => {
                 if (!item || !item.stock) return;
                 const name = item.stock.trim();
-                const t1Item = t1List.find(p => p.stock && p.stock.trim() === name);
-                if (!t1Item) return;
+                if (!t1Date) return;
 
                 // 今/昨比：今日竞价量 / T-1竞价量
+                // T-1竞价量：优先查 auction_data 名单表，查不到时回退到 scraper_raw_data 快照（与趋势图口径一致）
                 const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
-                const t1Volume = t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
+                const t1Volume = getStockHistoryValue(t1Date, name, 'volume');
                 if (todayVolume === null || t1Volume === null || t1Volume === 0) return;
                 const jingRatio = todayVolume / t1Volume;
 
-                // 昨/前比：昨日成交量(今天记录的yestVolume) / 前日成交量(T-1记录的yestVolume)
+                // 昨/前比：昨日成交量(今天记录的yestVolume) / 前日成交量(T-1记录的yestVolume，同样支持回退)
                 const yestVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
-                const prevVolume = t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
+                const prevVolume = getStockHistoryValue(t1Date, name, 'yestVolume');
                 if (yestVolume === null || prevVolume === null || prevVolume === 0) return;
                 const yestRatio = yestVolume / prevVolume;
 
