@@ -7098,7 +7098,6 @@
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #f97316, #ea580c);" onclick="clearAllAuctionText()">清除文字</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #6b7280, #4b5563);" onclick="clearAllAuctionNotes()">清除注释</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #7f1d1d, #991b1b);" onclick="clearAllAuctionRows()">清空所有行</button>
-                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #0891b2, #0e7490);" onclick="refreshScraperRawData()">刷新对比日</button>
             </form>
         </div>
     </div>
@@ -7953,8 +7952,7 @@
         let _justPushed = false; // 刚推送完，忽略自己触发的 Realtime 通知
         let _justPushedAuction = false; // 刚推送 auction_data，忽略自己触发的 Realtime 通知
         let _auctionRealtimeChannel = null;
-        let _scraperRawChannel = null;
-        let _scraperRawDataCache = {}; // {date: [{stock, volume, yest_volume}, ...]}
+        let _auctionFullRowCache = {}; // 合表后全量快照缓存 {date: [all rows]}，供历史行情查询
         let _stockTopicsChannel = null; // stock_topics 表的 Realtime 订阅
         let _cloudTopicsCache = null; // 从 stock_topics 表加载的题材缓存 {stock: Set(topics)}
         let _biddingTableAvailable = false; // bidding_data 表是否可用
@@ -7983,7 +7981,6 @@
         function startSessionPoll() {
             stopSessionPoll();
             startAuctionRealtime(); // 同时启动 auction_data 表的 Realtime 订阅
-            startScraperRawRealtime(); // 同时启动 scraper_raw_data 表的 Realtime 订阅（对比日曲线）
             startStockTopicsRealtime(); // 同时启动 stock_topics 表的 Realtime 订阅（题材库）
             startBiddingRealtime(); // 同时启动 bidding_data 表的 Realtime 订阅（竞价变化看板）
             try {
@@ -8030,7 +8027,6 @@
                 _realtimeChannel = null;
             }
             stopAuctionRealtime();
-            stopScraperRawRealtime();
             stopStockTopicsRealtime();
             stopBiddingRealtime();
         }
@@ -8052,11 +8048,6 @@
                     if (typeof pullAuctionMarketDataForDate === 'function') {
                         t.push(pullAuctionMarketDataForDate(d).catch(function(e) {
                             console.warn('Realtime pullAuctionMarketDataForDate 失败:', e);
-                        }));
-                    }
-                    if (typeof pullScraperRawDataForDate === 'function') {
-                        t.push(pullScraperRawDataForDate(d).catch(function(e) {
-                            console.warn('Realtime pullScraperRawDataForDate 失败:', e);
                         }));
                     }
                     return Promise.all(t);
@@ -8100,17 +8091,35 @@
             if (!_auctionTableAvailable) return;
             const sb = getSupabase();
             const { data, error } = await sb.from('auction_data')
-                .select('stock,code,volume,yest_volume,note,change_pct,topics,selected,bought,sold,fixed')
+                .select('stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed')
                 .eq('date', date);
             if (error) throw error;
+
+            // 全量快照缓存：包含该日期所有行（in_watchlist true/false），供历史行情查询
+            _auctionFullRowCache[date] = (data || []).map(function(row) {
+                return {
+                    stock: row.stock,
+                    code: row.code || '',
+                    volume: row.volume || '',
+                    yest_volume: row.yest_volume || '',
+                    note: row.note || '',
+                    change_pct: row.change_pct || '',
+                    topics: row.topics || '',
+                    in_watchlist: row.in_watchlist || false,
+                    selected: row.selected || false,
+                    bought: row.bought || false,
+                    sold: row.sold || false,
+                    fixed: row.fixed || false
+                };
+            });
 
             const auctionData = getAuctionData();
             const localList = auctionData[date] || [];
             const localMap = {};
             localList.forEach(function(s) { if (s && s.stock) localMap[s.stock.trim()] = s; });
 
-            // 合并：行情列用云端，状态列保留本地（如本地无则用云端）
-            const mergedList = (data || []).map(function(row) {
+            // 合并：行情列用云端，状态列保留本地（如本地无则用云端）；只保留 in_watchlist=true 行（渲染用）
+            const mergedList = (data || []).filter(function(row) { return row.in_watchlist; }).map(function(row) {
                 var local = localMap[(row.stock || '').trim()];
                 return {
                     stock: row.stock,
@@ -8140,63 +8149,17 @@
             }
         }
 
-        // ===== scraper_raw_data 表操作（对比日曲线数据，不触碰 auction_data 名单）=====
-        // 从 scraper_raw_data 表拉取某日期的数据并缓存
-        async function pullScraperRawDataForDate(date) {
-            const sb = getSupabase();
-            const { data, error } = await sb.from('scraper_raw_data')
-                .select('stock,volume,yest_volume,change_pct')
-                .eq('date', date);
-            if (error) throw error;
-            _scraperRawDataCache[date] = data || [];
-        }
-
-        // 查询某只股票在某日期的曲线数据（优先 auction_data，回退 scraper_raw_data）
+        // 查询某只股票在某日期的曲线数据（仅查全量快照缓存 _auctionFullRowCache）
         function getStockHistoryValue(date, stockName, field) {
-            // 1. 先查 auction_data 本地数据
-            const auctionData = getAuctionData();
-            const dayList = auctionData[date] || [];
-            const found = dayList.find(function(p) { return p && p.stock && p.stock.trim() === stockName; });
-            if (found && found[field] !== '' && found[field] != null) {
-                return parseFloat(found[field]);
-            }
-            // 2. 回退到 scraper_raw_data 缓存
-            const rawList = _scraperRawDataCache[date];
-            if (rawList) {
-                const rawFound = rawList.find(function(p) { return p && p.stock && p.stock.trim() === stockName; });
-                if (rawFound) {
-                    const rawField = field === 'volume' ? 'volume' : 'yest_volume';
-                    const val = rawFound[rawField];
-                    if (val !== '' && val != null) return parseFloat(val);
-                }
+            const rows = _auctionFullRowCache[date];
+            if (!rows) return null;
+            const rawField = field === 'volume' ? 'volume' : 'yest_volume';
+            const found = rows.find(function(p) { return p && p.stock && p.stock.trim() === stockName; });
+            if (found) {
+                const val = found[rawField];
+                if (val !== '' && val != null) return parseFloat(val);
             }
             return null;
-        }
-
-        // 启动 scraper_raw_data 表的 Realtime 订阅
-        function startScraperRawRealtime() {
-            stopScraperRawRealtime();
-            try {
-                const sb = getSupabase();
-                _scraperRawChannel = sb
-                    .channel('scraper_raw_data_changes')
-                    .on('postgres_changes', {
-                        event: '*', schema: 'public', table: 'scraper_raw_data'
-                    }, function(payload) {
-                        const row = payload.new || payload.old;
-                        if (!row || !row.date) return;
-                        _debounceAuctionRealtime(row.date);
-                    })
-                    .subscribe();
-                console.log('Scraper raw Realtime 订阅已启动');
-            } catch (e) { console.error('Scraper raw Realtime 订阅失败:', e); }
-        }
-
-        function stopScraperRawRealtime() {
-            if (_scraperRawChannel) {
-                try { getSupabase().removeChannel(_scraperRawChannel); } catch(e) {}
-                _scraperRawChannel = null;
-            }
         }
 
         // ===== stock_topics 表操作（题材库独立表）=====
@@ -8486,41 +8449,6 @@
             }
         }
 
-        // 预加载当前日期及前几个交易日的 scraper_raw_data（用于对比日曲线显示）
-        // 非阻塞，失败只打日志，不影响主流程
-        async function preloadScraperRawData(endDate, count) {
-            try {
-                var dates = [];
-                var d = endDate;
-                for (var i = 0; i < count; i++) {
-                    if (!d) break;
-                    dates.push(d);
-                    d = getPreviousTradingDay(d);
-                }
-                var tasks = dates.map(function(dt) {
-                    if (_scraperRawDataCache[dt]) return Promise.resolve();
-                    return pullScraperRawDataForDate(dt).catch(function(e) {
-                        console.warn('预加载 scraper_raw_data 失败 ' + dt + ':', e);
-                    });
-                });
-                await Promise.all(tasks);
-            } catch (e) {
-                console.warn('preloadScraperRawData 失败:', e);
-            }
-        }
-
-        // 手动刷新对比日数据（按钮触发）：强制清除缓存后重新加载
-        function refreshScraperRawData() {
-            if (typeof showToast === 'function') showToast('正在加载对比日数据…');
-            _scraperRawDataCache = {};
-            preloadScraperRawData(currentDate, 5).then(function() {
-                renderAuction();
-                if (typeof showToast === 'function') showToast('对比日数据已刷新');
-            }).catch(function(e) {
-                if (typeof showToast === 'function') showToast('对比日数据加载失败: ' + (e.message || e));
-            });
-        }
-
         function forceLogout() {
             stopSessionPoll();
             clearTimeout(_pushDebounceTimer);
@@ -8580,8 +8508,6 @@
             // 初始化应用
             initApp();
 
-            // 预加载对比日曲线数据（非阻塞，完成后刷新竞价看板）
-            preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
         }
@@ -8594,31 +8520,54 @@
         let _auctionTableAvailable = false; // 运行时标记：auction_data 表是否可用
         let _lastPushedAuctionStatus = '';  // 上次推送的 auction 状态签名（避免无变化时重复推送）
 
-        // 从 auction_data 表全量读取，组装成 {date: [{stock,code,volume,yestVolume,note,selected,bought,sold,fixed}]} 结构
+        // 从 auction_data 表全量读取，组装成 {date: [{stock,code,volume,yestVolume,note,changePct,topics,selected,bought,sold,fixed}]} 结构
+        // 同时构建 _auctionFullRowCache 全量快照缓存（含 in_watchlist=false 行），供历史行情查询
         async function pullAuctionFromTable() {
             const sb = getSupabase();
             const result = {};
+            _auctionFullRowCache = {};
             let offset = 0;
             const pageSize = 1000;
             while (true) {
                 const { data, error } = await sb.from('auction_data')
-                    .select('date,stock,code,volume,yest_volume,note,selected,bought,sold,fixed')
+                    .select('date,stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed')
                     .range(offset, offset + pageSize - 1);
                 if (error) throw error;
                 if (!data || data.length === 0) break;
                 data.forEach(function(row) {
-                    if (!result[row.date]) result[row.date] = [];
-                    result[row.date].push({
+                    // 全量快照缓存：包含所有行（in_watchlist true/false）
+                    if (!_auctionFullRowCache[row.date]) _auctionFullRowCache[row.date] = [];
+                    _auctionFullRowCache[row.date].push({
                         stock: row.stock,
                         code: row.code || '',
                         volume: row.volume || '',
-                        yestVolume: row.yest_volume || '',
+                        yest_volume: row.yest_volume || '',
                         note: row.note || '',
+                        change_pct: row.change_pct || '',
+                        topics: row.topics || '',
+                        in_watchlist: row.in_watchlist || false,
                         selected: row.selected || false,
                         bought: row.bought || false,
                         sold: row.sold || false,
                         fixed: row.fixed || false
                     });
+                    // 返回值只含 in_watchlist=true 行（供 allData.auction 渲染）
+                    if (row.in_watchlist) {
+                        if (!result[row.date]) result[row.date] = [];
+                        result[row.date].push({
+                            stock: row.stock,
+                            code: row.code || '',
+                            volume: row.volume || '',
+                            yestVolume: row.yest_volume || '',
+                            note: row.note || '',
+                            changePct: row.change_pct || '',
+                            topics: row.topics || '',
+                            selected: row.selected || false,
+                            bought: row.bought || false,
+                            sold: row.sold || false,
+                            fixed: row.fixed || false
+                        });
+                    }
                 });
                 if (data.length < pageSize) break;
                 offset += pageSize;
@@ -8645,6 +8594,7 @@
                             bought: item.bought || false,
                             sold: item.sold || false,
                             fixed: item.fixed || false,
+                            in_watchlist: true,
                             updated_at: now,
                             updated_by: 'main'
                         })
@@ -8654,7 +8604,7 @@
             }
         }
 
-        // 脏日期全量同步（增删股票后调用）：删除云端多余的、插入本地新增的、更新现有状态
+        // 脏日期全量同步（增删股票后调用）：移出云端多余股票（置 in_watchlist=false）、插入本地新增的、更新现有状态
         async function syncAuctionListForDate(date) {
             const sb = getSupabase();
             const localList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock; });
@@ -8669,12 +8619,14 @@
             const now = new Date().toISOString();
             const scMap = loadAllData().stockCodeMap || {};
 
-            // 1. 删除云端有但本地无的股票
-            const toDelete = [];
-            cloudStocks.forEach(function(s) { if (!localStocks.has(s)) toDelete.push(s); });
-            if (toDelete.length > 0) {
-                await Promise.all(toDelete.map(function(stock) {
-                    return sb.from('auction_data').delete().eq('date', date).eq('stock', stock);
+            // 1. 云端有但本地无的股票：置 in_watchlist=false（不再物理删除，保留全量快照）
+            const toRemove = [];
+            cloudStocks.forEach(function(s) { if (!localStocks.has(s)) toRemove.push(s); });
+            if (toRemove.length > 0) {
+                await Promise.all(toRemove.map(function(stock) {
+                    return sb.from('auction_data')
+                        .update({ in_watchlist: false, updated_at: now, updated_by: 'main' })
+                        .eq('date', date).eq('stock', stock);
                 }));
             }
 
@@ -8687,6 +8639,7 @@
                         code: scMap[s.stock.trim()] || '',
                         volume: s.volume || '', yest_volume: s.yestVolume || '', note: s.note || '',
                         change_pct: s.changePct || '', topics: s.topics || '',
+                        in_watchlist: true,
                         selected: s.selected || false, bought: s.bought || false,
                         sold: s.sold || false, fixed: s.fixed || false,
                         updated_at: now, updated_by: 'main'
@@ -8708,6 +8661,7 @@
                             .update({
                                 selected: item.selected || false, bought: item.bought || false,
                                 sold: item.sold || false, fixed: item.fixed || false,
+                                in_watchlist: true,
                                 updated_at: now, updated_by: 'main'
                             })
                             .eq('date', date).eq('stock', item.stock.trim());
@@ -8989,8 +8943,6 @@
                 renderDuiban();
                 if (typeof renderEtf === 'function') renderEtf();
                 updateCloudSyncUI('synced');
-                // 预加载对比日曲线数据（非阻塞，完成后刷新竞价看板）
-                preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
             } catch (e) {
@@ -10968,10 +10920,6 @@
         function renderAuction() {
             // 保存滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
             var _savedScrollY = window.scrollY;
-            // 懒加载：如果对比日数据缓存为空，异步触发加载（非阻塞，完成后刷新）
-            if (Object.keys(_scraperRawDataCache).length === 0) {
-                preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
-            }
             // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
             ensureObservationStocks(currentDate);
             // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
@@ -11208,15 +11156,6 @@
             const jingYestHighlightSet = jingYestStocksToday
                 ? new Set([...jingYestStocksToday].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name))
                 : null;
-            // 主列表高亮/排序专用集合：只要求"平行达标 + 位数差≤1"，不再要求差值>0
-            // （"差值>0"这个条件只保留给上面的 jingYestHighlightSet，供"竞/昨数"统计和观察组继承使用，两者互不影响）
-            const allRatioDiffInfoForListHighlight = getRatioDiffInfoForDate(currentDate);
-            const jingYestListHighlightSet = new Set(
-                [...parallelStocksToday].filter(name => {
-                    const info = allRatioDiffInfoForListHighlight.get(name);
-                    return info && info.digitGap <= 1;
-                })
-            );
             // 若"竞/昨"开启，且计算结果里一个高光都没有（Tier0本就为空，或Tier0里全部位数差≥2），则弹一次黄色警示Toast，提示"全部没有，谨慎出手"
             if (jingYestToggleChecked && jingYestHighlightSet && jingYestHighlightSet.size === 0) {
                 maybeShowJingYestEmptyToast();
@@ -11315,22 +11254,29 @@
                     .map(x => x.idx);
             } else if (sortByParallelEnabled) {
                 if (sortByJingYestEnabled) {
-                    // "竞/昨"开启时，排序与纯"平行"保持一致（不再区分"差值是否>0"）：
-                    //   1. 平行达标：按"位数差"(|竞价量位数-昨日成交量位数|)从小到大排，位数差相同再按"差值"(今/昨比-昨/前比)从高到低排（差值可正可负，都参与排序）
-                    //   2. 平行不达标：保持原相对顺序，垫底
-                    // 注："差值>0"这个条件不再影响排序，只用于"竞/昨数"统计和观察组继承（见 getJingYestStocksForDate）
+                    // "竞/昨"是"平行"的加强筛选，排序需三层：
+                    //   1. 竞/昨达标：先按"位数差"(|竞价量位数-昨日成交量位数|)从小到大排，位数差相同再按"差值"(今/昨比-昨/前比)从高到低排
+                    //   2. 平行达标但竞/昨未达标：同样按"位数差"从小到大、"差值"从高到低排（差值此时不要求>0，能算出来就参与）
+                    //   3. 平行也不达标：保持原相对顺序，垫底
+                    const jingYestDiffMap = getJingYestStocksForDate(currentDate);
                     const parallelStockNamesForSort = getParallelStocksForDate(currentDate);
                     const allRatioDiffInfo = getRatioDiffInfoForDate(currentDate);
                     renderOrder = renderOrder
                         .map((idx, pos) => {
                             const stockName = auctionList[idx] && auctionList[idx].stock ? auctionList[idx].stock.trim() : '';
-                            const qualifies = stockName && parallelStockNamesForSort.has(stockName);
-                            const info = qualifies ? allRatioDiffInfo.get(stockName) : null;
-                            return { idx, pos, qualifies, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null };
+                            const info = jingYestDiffMap.has(stockName) ? jingYestDiffMap.get(stockName) : null;
+                            const isParallel = parallelStockNamesForSort.has(stockName);
+                            // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
+                            const tier = info !== null ? 0 : (isParallel ? 1 : 2);
+                            // tier1时，从"全量差值/位数差信息"里取该股票的数据（不要求diff>0）
+                            const fallbackInfo = tier === 1 ? allRatioDiffInfo.get(stockName) : null;
+                            const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
+                            const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
+                            return { idx, pos, diff, digitGap, tier };
                         })
                         .sort((a, b) => {
-                            if (a.qualifies !== b.qualifies) return a.qualifies ? -1 : 1;
-                            if (a.qualifies) {
+                            if (a.tier !== b.tier) return a.tier - b.tier;
+                            if (a.tier === 0 || a.tier === 1) {
                                 // 无法算出diff/digitGap的，排在同档位内能算出来的后面，仍保持原相对顺序
                                 if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
                                 if (a.digitGap === null) return 1;
@@ -11338,7 +11284,7 @@
                                 if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
                                 return b.diff - a.diff; // 位数差相同时，差值从高到低
                             }
-                            return a.pos - b.pos; // 不达标：保持原相对顺序
+                            return a.pos - b.pos; // tier2：保持原相对顺序
                         })
                         .map(x => x.idx);
                 } else {
@@ -11457,7 +11403,7 @@
                 // 竞放量高光（今日竞价量/昨日竞价量 >= 1.5）：仅在"环比"开关打开时才显示
                 // 平行高光（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：仅在"平行"开关打开且"竞/昨"未开启时才显示，优先于竞放量高光
                 // 竞/昨高光（平行基础上，今/昨比 > 昨/前比）：仅在"竞/昨"开关打开时才显示，优先于平行高光；开启后不再叠加平行高光，避免混淆
-                const isJingYestMatch = jingYestToggleChecked && item.stock && jingYestListHighlightSet.has(item.stock.trim());
+                const isJingYestMatch = jingYestToggleChecked && jingYestHighlightSet && item.stock && jingYestHighlightSet.has(item.stock.trim());
                 const isParallelMatch = sortByParallelEnabled && !jingYestToggleChecked && item.stock && parallelStocksToday.has(item.stock.trim());
                 const isHighRatioMatch = sortByRatioEnabled && item.stock && highRatioToday.stockNames.has(item.stock.trim());
                 if (isJingYestMatch) {
@@ -12163,16 +12109,6 @@
             const jingYestHighlightSet2 = jingYestStockNames2
                 ? new Set([...jingYestStockNames2].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name))
                 : null;
-            // 主列表高亮/排序专用集合（第二页）：只要求"平行达标 + 位数差≤1"，不再要求差值>0
-            // （"差值>0"只保留给上面的 jingYestHighlightSet2，供"竞/昨数"统计和观察组继承使用）
-            const jingYestListHighlightSet2 = (function() {
-                if (!sortByJingYestEnabled2 || !parallelStockNames2) return new Set();
-                const ratioDiffInfo2 = getRatioDiffInfoForDate(currentDate);
-                return new Set([...parallelStockNames2].filter(name => {
-                    const info = ratioDiffInfo2.get(name);
-                    return info && info.digitGap <= 1;
-                }));
-            })();
             // 若"竞/昨"（第二页）开启且高光子集为空，弹一次警示Toast；用同一个防抖标记避免与第一页同一时刻重复弹出
             if (sortByJingYestEnabled2 && jingYestHighlightSet2 && jingYestHighlightSet2.size === 0) {
                 maybeShowJingYestEmptyToast();
@@ -12356,28 +12292,33 @@
                         .map(x => x.s);
                 } else if (sortByParallelEnabled2 && parallelStockNames2) {
                     if (sortByJingYestEnabled2 && jingYestStockNames2) {
-                        // "竞/昨"开启时，排序与纯"平行"保持一致（不再区分"差值是否>0"）：
-                        //   1. 平行达标：按位数差从小到大排，位数差相同再按差值(今/昨比 - 昨/前比)从高到低排（差值可正可负，都参与排序）
-                        //   2. 平行不达标：保持原相对顺序，垫底
-                        // 注："差值>0"这个条件不再影响排序，只用于"竞/昨数"统计和观察组继承（见 jingYestStockNames2）
+                        // "竞/昨"是"平行"的加强筛选，排序需三层：
+                        //   1. 竞/昨达标：先按"位数差"从小到大排，位数差相同再按差值(今/昨比 - 昨/前比)从高到低排
+                        //   2. 平行达标但竞/昨未达标：同样按位数差/差值排序（差值不要求>0，能算出来就参与）
+                        //   3. 平行也不达标：保持原相对顺序，垫底
                         const allRatioDiffInfo2 = getRatioDiffInfoForDate(currentDate);
                         stocksToRender = group.stocks
                             .map((s, pos) => {
                                 const name = s.stock ? s.stock.trim() : '';
-                                const qualifies = name && parallelStockNames2.has(name);
-                                const info = qualifies ? allRatioDiffInfo2.get(name) : null;
-                                return { s, pos, qualifies, diff: info ? info.diff : null, digitGap: info ? info.digitGap : null };
+                                const info = jingYestStockNames2.has(name) ? jingYestStockNames2.get(name) : null;
+                                const isParallel = parallelStockNames2.has(name);
+                                // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
+                                const tier = info !== null ? 0 : (isParallel ? 1 : 2);
+                                const fallbackInfo = tier === 1 ? allRatioDiffInfo2.get(name) : null;
+                                const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
+                                const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
+                                return { s, pos, diff, digitGap, tier };
                             })
                             .sort((a, b) => {
-                                if (a.qualifies !== b.qualifies) return a.qualifies ? -1 : 1;
-                                if (a.qualifies) {
+                                if (a.tier !== b.tier) return a.tier - b.tier;
+                                if (a.tier === 0 || a.tier === 1) {
                                     if (a.digitGap === null && b.digitGap === null) return a.pos - b.pos;
                                     if (a.digitGap === null) return 1;
                                     if (b.digitGap === null) return -1;
                                     if (a.digitGap !== b.digitGap) return a.digitGap - b.digitGap; // 位数差从小到大
                                     return b.diff - a.diff; // 位数差相同时，差值从高到低
                                 }
-                                return a.pos - b.pos; // 不达标：保持原相对顺序
+                                return a.pos - b.pos; // tier2：保持原相对顺序
                             })
                             .map(x => x.s);
                     } else {
@@ -12478,7 +12419,7 @@
                     }
                     // 竞放量高光：仅在"环比"开关打开时才显示；平行高光：仅在"平行"开关打开且"竞/昨"未开启时才显示，优先于竞放量高光
                     // 竞/昨高光：仅在"竞/昨"开关打开时才显示，优先于平行高光；开启后不再叠加平行高光，避免混淆
-                    const isJingYestMatch2 = sortByJingYestEnabled2 && stock.stock && jingYestListHighlightSet2.has(stock.stock.trim());
+                    const isJingYestMatch2 = sortByJingYestEnabled2 && jingYestHighlightSet2 && stock.stock && jingYestHighlightSet2.has(stock.stock.trim());
                     const isParallelMatch2 = sortByParallelEnabled2 && !sortByJingYestEnabled2 && parallelStockNames2 && stock.stock && parallelStockNames2.has(stock.stock.trim());
                     const isHighRatioMatch2 = sortByRatioEnabled2 && stock.stock && highRatioInfo2.stockNames.has(stock.stock.trim());
                     if (isJingYestMatch2) {
@@ -15030,11 +14971,10 @@
                 // T的yestVolume字段 = T-1交易日自身的总成交量
                 const t1OwnVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
 
-                // T-1交易日竞价量、T-1记录的yestVolume(=T-2成交量)：
-                // 优先查 auction_data 名单表，查不到（例如该股票T-1那天未被加入名单）时回退到 scraper_raw_data 快照，
-                // 与趋势图 getStockHistoryValue 的数据源口径保持一致，避免"新加入名单的股票"因T-1无名单记录而被误判为不满足
-                const t1Volume = t1Date ? getStockHistoryValue(t1Date, name, 'volume') : null;
-                const t2OwnVolume = t1Date ? getStockHistoryValue(t1Date, name, 'yestVolume') : null;
+                // T-1 竞价量、T-2 成交量 从全量快照缓存查询（含非自选股）
+                const t1Volume = getStockHistoryValue(t1Date, name, 'volume');
+                // T-1的yestVolume字段 = T-2交易日自身的总成交量
+                const t2OwnVolume = getStockHistoryValue(t1Date, name, 'yestVolume');
 
                 // 条件1：今日竞价量 > T-1交易日竞价量
                 if (todayVolume === null || t1Volume === null) return;
@@ -15073,16 +15013,14 @@
             todayList.forEach(item => {
                 if (!item || !item.stock) return;
                 const name = item.stock.trim();
-                if (!t1Date) return;
 
-                // 今/昨比：今日竞价量 / T-1竞价量
-                // T-1竞价量：优先查 auction_data 名单表，查不到时回退到 scraper_raw_data 快照（与趋势图口径一致）
+                // 今/昨比：今日竞价量 / T-1竞价量（T-1数据从全量快照缓存查询，含非自选股）
                 const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
                 const t1Volume = getStockHistoryValue(t1Date, name, 'volume');
                 if (todayVolume === null || t1Volume === null || t1Volume === 0) return;
                 const jingRatio = todayVolume / t1Volume;
 
-                // 昨/前比：昨日成交量(今天记录的yestVolume) / 前日成交量(T-1记录的yestVolume，同样支持回退)
+                // 昨/前比：昨日成交量(今天记录的yestVolume) / 前日成交量(T-1记录的yestVolume)
                 const yestVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
                 const prevVolume = getStockHistoryValue(t1Date, name, 'yestVolume');
                 if (yestVolume === null || prevVolume === null || prevVolume === 0) return;
@@ -24722,8 +24660,6 @@
             currentDate = newDate;
             allData = null;
             setFilter('all');
-            // 切日期后主动加载对比日数据（非阻塞，完成后刷新竞价看板）
-            preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             // 使用 requestAnimationFrame 延迟渲染，提高翻页响应速度
             requestAnimationFrame(() => {
                 renderList();
@@ -24749,8 +24685,6 @@
             currentDate = date;
             allData = null;
             setFilter('all');
-            // 切日期后主动加载对比日数据（非阻塞，完成后刷新竞价看板）
-            preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             requestAnimationFrame(() => {
                 renderList();
                 autoCalculateRecentMultiScore();
@@ -24776,8 +24710,6 @@
             currentDate = today;
             allData = null;
             setFilter('all');
-            // 切日期后主动加载对比日数据（非阻塞，完成后刷新竞价看板）
-            preloadScraperRawData(currentDate, 5).then(function() { renderAuction(); }).catch(function() {});
             requestAnimationFrame(() => {
                 renderList();
                 autoCalculateRecentMultiScore();
@@ -27249,182 +27181,6 @@
       closeAiVisionModal();
     }
     </script>
-
-    <!-- ============================================================ -->
-    <!-- 临时诊断工具：独立悬浮按钮，不依赖/不修改任何主页面逻辑 -->
-    <!-- 排查完问题后，删除下面这一整段（从这条注释到对应的结束注释）即可 -->
-    <!-- ============================================================ -->
-    <div id="debugFloatBtn" style="position:fixed;bottom:20px;right:20px;z-index:99999;background:#7c3aed;color:#fff;padding:10px 16px;border-radius:24px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,0.3);">诊断</div>
-    <div id="debugPanel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100000;background:#fff;overflow-y:auto;padding:16px;">
-        <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
-            <button id="debugCopyBtn" style="background:#2563eb;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-size:14px;">复制日志</button>
-            <button id="debugCloseBtn" style="background:#94a3b8;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-size:14px;">关闭</button>
-        </div>
-        <textarea id="debugOutput" style="width:100%;height:80vh;font-family:monospace;font-size:12px;box-sizing:border-box;padding:8px;" readonly></textarea>
-    </div>
-    <script>
-    (function() {
-        function runDiagnosis(targetName) {
-            const lines = [];
-            function log(s) { lines.push(s); }
-
-            let dateToUse = (typeof currentDate !== 'undefined' && currentDate) ? currentDate : null;
-            log('=== 诊断股票: ' + targetName + ' ===');
-            log('当前页面日期 currentDate: ' + dateToUse);
-
-            if (!dateToUse) {
-                log('❌ 找不到 currentDate 变量，可能页面结构变化，无法继续诊断');
-                return lines.join('\n');
-            }
-
-            let auctionData;
-            try {
-                auctionData = getAuctionData();
-            } catch (e) {
-                log('❌ 调用 getAuctionData() 失败: ' + e.message);
-                return lines.join('\n');
-            }
-
-            const allDates = Object.keys(auctionData).sort();
-            log('auctionData 里总共有 ' + allDates.length + ' 个日期，最近5个: ' + allDates.slice(-5).join(', '));
-
-            let t1Date;
-            try {
-                t1Date = getPreviousTradingDay(dateToUse);
-            } catch (e) {
-                log('❌ 调用 getPreviousTradingDay 失败: ' + e.message);
-                return lines.join('\n');
-            }
-            log('getPreviousTradingDay(' + dateToUse + ') 算出的T-1: ' + t1Date);
-
-            const todayList = auctionData[dateToUse] || [];
-            const t1List = t1Date ? (auctionData[t1Date] || []) : [];
-            log('今日(' + dateToUse + ')列表股票数: ' + todayList.length);
-            log('T-1(' + t1Date + ')列表股票数: ' + t1List.length);
-
-            const todayItem = todayList.find(p => p.stock && p.stock.trim() === targetName);
-            const t1Item = t1List.find(p => p.stock && p.stock.trim() === targetName);
-
-            if (!todayItem) {
-                log('❌ 今日列表里没有精确匹配"' + targetName + '"');
-                todayList.forEach(p => {
-                    if (p.stock && p.stock.indexOf(targetName.slice(-2)) >= 0) {
-                        log('  相近: [' + p.stock + '] 长度=' + p.stock.length);
-                    }
-                });
-            } else {
-                log('✓ 今日记录: ' + JSON.stringify(todayItem));
-            }
-
-            if (!t1Item) {
-                log('❌ T-1(' + t1Date + ')列表里没有精确匹配"' + targetName + '"');
-                t1List.forEach(p => {
-                    if (p.stock && p.stock.indexOf(targetName.slice(-2)) >= 0) {
-                        log('  相近: [' + p.stock + '] 长度=' + p.stock.length);
-                    }
-                });
-            } else {
-                log('✓ T-1记录: ' + JSON.stringify(t1Item));
-            }
-
-            if (todayItem && t1Item) {
-                const todayVolume = todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
-                const t1OwnVolume = todayItem.yestVolume !== '' && todayItem.yestVolume != null ? parseFloat(todayItem.yestVolume) : null;
-                const t1Volume = t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
-                const t2OwnVolume = t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
-
-                log('');
-                log('todayVolume(今日竞价量)=' + todayVolume);
-                log('t1Volume(T-1竞价量)=' + t1Volume);
-                log('t1OwnVolume(今日记录yestVolume,即T-1成交量)=' + t1OwnVolume);
-                log('t2OwnVolume(T-1记录yestVolume,即T-2成交量)=' + t2OwnVolume);
-                log('条件1(今日竞价量>T-1竞价量): ' + (todayVolume > t1Volume));
-                log('条件2(T-1成交量>T-2成交量): ' + (t1OwnVolume > t2OwnVolume));
-            }
-
-            log('');
-            try {
-                const parallelSet = getParallelStocksForDate(dateToUse);
-                log('getParallelStocksForDate 结果集大小: ' + parallelSet.size);
-                log('"' + targetName + '" 是否在"平行"集合里: ' + parallelSet.has(targetName));
-                log('"平行"集合完整名单: ' + [...parallelSet].join('、'));
-            } catch (e) {
-                log('❌ 调用 getParallelStocksForDate 失败: ' + e.message);
-            }
-
-            log('');
-            try {
-                const ratioDiffInfo = getRatioDiffInfoForDate(dateToUse);
-                const info = ratioDiffInfo.get(targetName);
-                log('getRatioDiffInfoForDate 里 "' + targetName + '" 的信息: ' + (info ? JSON.stringify(info) : '不存在（说明比值算不出来）'));
-            } catch (e) {
-                log('❌ 调用 getRatioDiffInfoForDate 失败: ' + e.message);
-            }
-
-            log('');
-            log('=== 三个排序/高亮开关的当前状态 ===');
-            ['auctionSortByDataToggle', 'auctionSortByRatioToggle', 'auctionSortByParallelToggle', 'auctionSortByJingYestToggle'].forEach(id => {
-                const el = document.getElementById(id);
-                log(id + ' = ' + (el ? el.checked : '(找不到该元素)'));
-            });
-
-            log('');
-            log('=== 该股票在 auctionList (当前渲染用的原始数组) 里的原始数据 ===');
-            try {
-                if (typeof auctionList !== 'undefined') {
-                    const item = auctionList.find(p => p.stock && p.stock.trim() === targetName);
-                    log(item ? JSON.stringify(item) : '在 auctionList 里没找到');
-                } else {
-                    log('auctionList 变量不存在（可能变量名不同或作用域限制）');
-                }
-            } catch (e) {
-                log('读取 auctionList 出错: ' + e.message);
-            }
-
-            return lines.join('\n');
-        }
-
-        document.getElementById('debugFloatBtn').addEventListener('click', function() {
-            const name = prompt('请输入要诊断的股票名称（例如：山东墨龙）', '山东墨龙');
-            if (!name) return;
-            let result;
-            try {
-                result = runDiagnosis(name.trim());
-            } catch (e) {
-                result = '诊断脚本本身报错: ' + e.message + '\n' + e.stack;
-            }
-            document.getElementById('debugOutput').value = result;
-            document.getElementById('debugPanel').style.display = 'block';
-        });
-
-        document.getElementById('debugCloseBtn').addEventListener('click', function() {
-            document.getElementById('debugPanel').style.display = 'none';
-        });
-
-        document.getElementById('debugCopyBtn').addEventListener('click', function() {
-            const ta = document.getElementById('debugOutput');
-            ta.select();
-            ta.setSelectionRange(0, 999999);
-            try {
-                document.execCommand('copy');
-                alert('已复制到剪贴板');
-            } catch (e) {
-                if (navigator.clipboard) {
-                    navigator.clipboard.writeText(ta.value).then(function() {
-                        alert('已复制到剪贴板');
-                    }).catch(function() {
-                        alert('复制失败，请长按文本框手动选择复制');
-                    });
-                } else {
-                    alert('复制失败，请长按文本框手动选择复制');
-                }
-            }
-        });
-    })();
-    </script>
-    <!-- ============================================================ -->
-    <!-- 诊断工具结束 -->
-    <!-- ============================================================ -->
 </body>
 </html>    [ ↻ ]      ← 旋转按钮（红色）
 [ ← ] [ ↓ ] [ → ]  ← 左移、加速下落（青色）、右移
