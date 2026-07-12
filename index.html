@@ -15072,7 +15072,7 @@
             // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
             const obsStocks = getJingYestHighlightSetForDate(prevDay);
             if (!obsStocks || obsStocks.size === 0) {
-                localStorage.setItem('obsEnsured_' + date, '1');
+                // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionFullRowCache 会有值）
                 return;
             }
 
