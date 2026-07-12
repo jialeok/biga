@@ -27250,6 +27250,182 @@
       closeAiVisionModal();
     }
     </script>
+
+    <!-- ============================================================ -->
+    <!-- 临时诊断工具：独立悬浮按钮，不依赖/不修改任何主页面逻辑 -->
+    <!-- 排查完问题后，删除下面这一整段（从这条注释到对应的结束注释）即可 -->
+    <!-- ============================================================ -->
+    <div id="debugFloatBtn" style="position:fixed;bottom:20px;right:20px;z-index:99999;background:#7c3aed;color:#fff;padding:10px 16px;border-radius:24px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,0.3);">诊断</div>
+    <div id="debugPanel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:100000;background:#fff;overflow-y:auto;padding:16px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
+            <button id="debugCopyBtn" style="background:#2563eb;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-size:14px;">复制日志</button>
+            <button id="debugCloseBtn" style="background:#94a3b8;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-size:14px;">关闭</button>
+        </div>
+        <textarea id="debugOutput" style="width:100%;height:80vh;font-family:monospace;font-size:12px;box-sizing:border-box;padding:8px;" readonly></textarea>
+    </div>
+    <script>
+    (function() {
+        function runDiagnosis(targetName) {
+            const lines = [];
+            function log(s) { lines.push(s); }
+
+            let dateToUse = (typeof currentDate !== 'undefined' && currentDate) ? currentDate : null;
+            log('=== 诊断股票: ' + targetName + ' ===');
+            log('当前页面日期 currentDate: ' + dateToUse);
+
+            if (!dateToUse) {
+                log('❌ 找不到 currentDate 变量，可能页面结构变化，无法继续诊断');
+                return lines.join('\n');
+            }
+
+            let auctionData;
+            try {
+                auctionData = getAuctionData();
+            } catch (e) {
+                log('❌ 调用 getAuctionData() 失败: ' + e.message);
+                return lines.join('\n');
+            }
+
+            const allDates = Object.keys(auctionData).sort();
+            log('auctionData 里总共有 ' + allDates.length + ' 个日期，最近5个: ' + allDates.slice(-5).join(', '));
+
+            let t1Date;
+            try {
+                t1Date = getPreviousTradingDay(dateToUse);
+            } catch (e) {
+                log('❌ 调用 getPreviousTradingDay 失败: ' + e.message);
+                return lines.join('\n');
+            }
+            log('getPreviousTradingDay(' + dateToUse + ') 算出的T-1: ' + t1Date);
+
+            const todayList = auctionData[dateToUse] || [];
+            const t1List = t1Date ? (auctionData[t1Date] || []) : [];
+            log('今日(' + dateToUse + ')列表股票数: ' + todayList.length);
+            log('T-1(' + t1Date + ')列表股票数: ' + t1List.length);
+
+            const todayItem = todayList.find(p => p.stock && p.stock.trim() === targetName);
+            const t1Item = t1List.find(p => p.stock && p.stock.trim() === targetName);
+
+            if (!todayItem) {
+                log('❌ 今日列表里没有精确匹配"' + targetName + '"');
+                todayList.forEach(p => {
+                    if (p.stock && p.stock.indexOf(targetName.slice(-2)) >= 0) {
+                        log('  相近: [' + p.stock + '] 长度=' + p.stock.length);
+                    }
+                });
+            } else {
+                log('✓ 今日记录: ' + JSON.stringify(todayItem));
+            }
+
+            if (!t1Item) {
+                log('❌ T-1(' + t1Date + ')列表里没有精确匹配"' + targetName + '"');
+                t1List.forEach(p => {
+                    if (p.stock && p.stock.indexOf(targetName.slice(-2)) >= 0) {
+                        log('  相近: [' + p.stock + '] 长度=' + p.stock.length);
+                    }
+                });
+            } else {
+                log('✓ T-1记录: ' + JSON.stringify(t1Item));
+            }
+
+            if (todayItem && t1Item) {
+                const todayVolume = todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
+                const t1OwnVolume = todayItem.yestVolume !== '' && todayItem.yestVolume != null ? parseFloat(todayItem.yestVolume) : null;
+                const t1Volume = t1Item.volume !== '' && t1Item.volume != null ? parseFloat(t1Item.volume) : null;
+                const t2OwnVolume = t1Item.yestVolume !== '' && t1Item.yestVolume != null ? parseFloat(t1Item.yestVolume) : null;
+
+                log('');
+                log('todayVolume(今日竞价量)=' + todayVolume);
+                log('t1Volume(T-1竞价量)=' + t1Volume);
+                log('t1OwnVolume(今日记录yestVolume,即T-1成交量)=' + t1OwnVolume);
+                log('t2OwnVolume(T-1记录yestVolume,即T-2成交量)=' + t2OwnVolume);
+                log('条件1(今日竞价量>T-1竞价量): ' + (todayVolume > t1Volume));
+                log('条件2(T-1成交量>T-2成交量): ' + (t1OwnVolume > t2OwnVolume));
+            }
+
+            log('');
+            try {
+                const parallelSet = getParallelStocksForDate(dateToUse);
+                log('getParallelStocksForDate 结果集大小: ' + parallelSet.size);
+                log('"' + targetName + '" 是否在"平行"集合里: ' + parallelSet.has(targetName));
+                log('"平行"集合完整名单: ' + [...parallelSet].join('、'));
+            } catch (e) {
+                log('❌ 调用 getParallelStocksForDate 失败: ' + e.message);
+            }
+
+            log('');
+            try {
+                const ratioDiffInfo = getRatioDiffInfoForDate(dateToUse);
+                const info = ratioDiffInfo.get(targetName);
+                log('getRatioDiffInfoForDate 里 "' + targetName + '" 的信息: ' + (info ? JSON.stringify(info) : '不存在（说明比值算不出来）'));
+            } catch (e) {
+                log('❌ 调用 getRatioDiffInfoForDate 失败: ' + e.message);
+            }
+
+            log('');
+            log('=== 三个排序/高亮开关的当前状态 ===');
+            ['auctionSortByDataToggle', 'auctionSortByRatioToggle', 'auctionSortByParallelToggle', 'auctionSortByJingYestToggle'].forEach(id => {
+                const el = document.getElementById(id);
+                log(id + ' = ' + (el ? el.checked : '(找不到该元素)'));
+            });
+
+            log('');
+            log('=== 该股票在 auctionList (当前渲染用的原始数组) 里的原始数据 ===');
+            try {
+                if (typeof auctionList !== 'undefined') {
+                    const item = auctionList.find(p => p.stock && p.stock.trim() === targetName);
+                    log(item ? JSON.stringify(item) : '在 auctionList 里没找到');
+                } else {
+                    log('auctionList 变量不存在（可能变量名不同或作用域限制）');
+                }
+            } catch (e) {
+                log('读取 auctionList 出错: ' + e.message);
+            }
+
+            return lines.join('\n');
+        }
+
+        document.getElementById('debugFloatBtn').addEventListener('click', function() {
+            const name = prompt('请输入要诊断的股票名称（例如：山东墨龙）', '山东墨龙');
+            if (!name) return;
+            let result;
+            try {
+                result = runDiagnosis(name.trim());
+            } catch (e) {
+                result = '诊断脚本本身报错: ' + e.message + '\n' + e.stack;
+            }
+            document.getElementById('debugOutput').value = result;
+            document.getElementById('debugPanel').style.display = 'block';
+        });
+
+        document.getElementById('debugCloseBtn').addEventListener('click', function() {
+            document.getElementById('debugPanel').style.display = 'none';
+        });
+
+        document.getElementById('debugCopyBtn').addEventListener('click', function() {
+            const ta = document.getElementById('debugOutput');
+            ta.select();
+            ta.setSelectionRange(0, 999999);
+            try {
+                document.execCommand('copy');
+                alert('已复制到剪贴板');
+            } catch (e) {
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(ta.value).then(function() {
+                        alert('已复制到剪贴板');
+                    }).catch(function() {
+                        alert('复制失败，请长按文本框手动选择复制');
+                    });
+                } else {
+                    alert('复制失败，请长按文本框手动选择复制');
+                }
+            }
+        });
+    })();
+    </script>
+    <!-- ============================================================ -->
+    <!-- 诊断工具结束 -->
+    <!-- ============================================================ -->
 </body>
 </html>    [ ↻ ]      ← 旋转按钮（红色）
 [ ← ] [ ↓ ] [ → ]  ← 左移、加速下落（青色）、右移
