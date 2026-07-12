@@ -7953,6 +7953,11 @@
         let _justPushedAuction = false; // 刚推送 auction_data，忽略自己触发的 Realtime 通知
         let _auctionRealtimeChannel = null;
         let _auctionFullRowCache = {}; // 合表后全量快照缓存 {date: [all rows]}，供历史行情查询
+        let _dailyHighlightsCache = {}; // {date: Set(stockNames)} 预计算的竞/昨高光
+        let _highlightsTableAvailable = false;
+        let _highlightsPushTimer = null;
+        let _highlightsChannel = null; // daily_highlights 表的 Realtime 订阅
+        let _highlightsReloadTimer = null;
         let _stockTopicsChannel = null; // stock_topics 表的 Realtime 订阅
         let _cloudTopicsCache = null; // 从 stock_topics 表加载的题材缓存 {stock: Set(topics)}
         let _biddingTableAvailable = false; // bidding_data 表是否可用
@@ -7983,6 +7988,7 @@
             startAuctionRealtime(); // 同时启动 auction_data 表的 Realtime 订阅
             startStockTopicsRealtime(); // 同时启动 stock_topics 表的 Realtime 订阅（题材库）
             startBiddingRealtime(); // 同时启动 bidding_data 表的 Realtime 订阅（竞价变化看板）
+            startHighlightsRealtime(); // 同时启动 daily_highlights 表的 Realtime 订阅（竞/昨高光）
             try {
                 const sb = getSupabase();
                 _realtimeChannel = sb
@@ -8029,6 +8035,7 @@
             stopAuctionRealtime();
             stopStockTopicsRealtime();
             stopBiddingRealtime();
+            stopHighlightsRealtime();
         }
 
         // 启动 auction_data 表的 Realtime 订阅（抓取程序同步后自动刷新行情数据）
@@ -8508,6 +8515,9 @@
             // 初始化应用
             initApp();
 
+            // 后台加载 daily_highlights 缓存（启用后 renderAuction 可推送高光到表，供刷新时秒级加载）
+            pullDailyHighlights().then(function() { renderAuction(); }).catch(function(e) { console.warn('daily_highlights 加载失败:', e.message); });
+
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
         }
@@ -8574,6 +8584,110 @@
             }
             _auctionTableAvailable = true;
             return result;
+        }
+
+        // ===== daily_highlights 表操作（预计算竞/昨高光，加速加载）=====
+
+        // 从 daily_highlights 表加载所有预计算高光（小表，快）
+        async function pullDailyHighlights() {
+            const sb = getSupabase();
+            const result = {};
+            let offset = 0;
+            const pageSize = 1000;
+            while (true) {
+                const { data, error } = await sb.from('daily_highlights')
+                    .select('date,stock,jing_yest_highlight')
+                    .eq('jing_yest_highlight', true)
+                    .range(offset, offset + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                data.forEach(function(row) {
+                    if (!row.date || !row.stock) return;
+                    if (!result[row.date]) result[row.date] = new Set();
+                    result[row.date].add(row.stock.trim());
+                });
+                if (data.length < pageSize) break;
+                offset += pageSize;
+            }
+            _dailyHighlightsCache = result;
+            _highlightsTableAvailable = true;
+            console.log('daily_highlights 加载完成:', Object.keys(result).length, '个日期');
+        }
+
+        // 推送某日期的高光到 daily_highlights 表（debounced）
+        function schedulePushDailyHighlights(date, highlightSet) {
+            if (!_highlightsTableAvailable) return;
+            if (_highlightsPushTimer) clearTimeout(_highlightsPushTimer);
+            _highlightsPushTimer = setTimeout(function() {
+                _highlightsPushTimer = null;
+                pushDailyHighlights(date, highlightSet);
+            }, 2000);
+        }
+
+        async function pushDailyHighlights(date, highlightSet) {
+            const sb = getSupabase();
+            const now = new Date().toISOString();
+            const stockNames = highlightSet ? [...highlightSet] : [];
+
+            // 1. 先把该日期所有行标记为 false（清除旧高光）
+            const { error: updErr } = await sb.from('daily_highlights')
+                .update({ jing_yest_highlight: false, updated_at: now })
+                .eq('date', date);
+            if (updErr) console.warn('daily_highlights 清除旧高光失败:', updErr.message);
+
+            // 2. 再把达标股票标记为 true（upsert）
+            if (stockNames.length > 0) {
+                const rows = stockNames.map(function(name) {
+                    return { date: date, stock: name, jing_yest_highlight: true, updated_at: now };
+                });
+                const batchSize = 25;
+                for (let i = 0; i < rows.length; i += batchSize) {
+                    const { error: upErr } = await sb.from('daily_highlights')
+                        .upsert(rows.slice(i, i + batchSize), { onConflict: 'date,stock' });
+                    if (upErr) console.warn('daily_highlights upsert 失败:', upErr.message);
+                }
+            }
+
+            // 更新本地缓存
+            _dailyHighlightsCache[date] = new Set(stockNames);
+        }
+
+        // 从缓存获取某日期的高光集合（无缓存返回 null，触发回退计算）
+        function getDailyHighlightsForDate(date) {
+            if (!_highlightsTableAvailable) return null;
+            return _dailyHighlightsCache[date] || null;
+        }
+
+        // daily_highlights 表 Realtime 订阅
+        function startHighlightsRealtime() {
+            stopHighlightsRealtime();
+            try {
+                const sb = getSupabase();
+                _highlightsChannel = sb
+                    .channel('daily_highlights_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'daily_highlights'
+                    }, function(payload) {
+                        var row = payload.new || payload.old;
+                        if (!row || !row.date) return;
+                        // 防抖：收到变更后重新加载 highlights 缓存并刷新
+                        if (_highlightsReloadTimer) clearTimeout(_highlightsReloadTimer);
+                        _highlightsReloadTimer = setTimeout(function() {
+                            pullDailyHighlights().then(function() {
+                                renderAuction();
+                            }).catch(function(e) { console.warn('highlights Realtime 重载失败:', e); });
+                        }, 800);
+                    })
+                    .subscribe();
+                console.log('daily_highlights Realtime 订阅已启动');
+            } catch (e) { console.error('highlights Realtime 订阅失败:', e); }
+        }
+
+        function stopHighlightsRealtime() {
+            if (_highlightsChannel) {
+                try { _highlightsChannel.unsubscribe(); } catch(e) {}
+                _highlightsChannel = null;
+            }
         }
 
         // 批量更新某日期所有股票的状态列（主程序拥有：selected/bought/sold/fixed）
@@ -11153,9 +11267,18 @@
             // "竞/昨"高光新规则：Tier0（平行达标+差值>0）里，只有位数差≤1（同位数或相差一位）才允许高光；
             // 位数差≥2的股票仍属于Tier0、排序位置不变，只是不显示浅蓝色高光。
             // jingYestHighlightSet 就是"实际允许高光"的子集，专供高光判断使用；排序逻辑继续用 jingYestStocksToday，不受影响。
-            const jingYestHighlightSet = jingYestStocksToday
+            // 实时计算竞/昨高光（依赖 _auctionFullRowCache，刷新时可能为空）
+            let jingYestHighlightSet = (jingYestStocksToday && jingYestStocksToday.size > 0)
                 ? new Set([...jingYestStocksToday].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name))
                 : null;
+            // 数据未就绪（_auctionFullRowCache 为空，刷新场景）→ 用 daily_highlights 预计算缓存兜底
+            if (!jingYestHighlightSet && Object.keys(_auctionFullRowCache).length === 0) {
+                const cached = getDailyHighlightsForDate(currentDate);
+                if (cached) jingYestHighlightSet = cached;
+            } else if (jingYestStocksToday && jingYestStocksToday.size > 0) {
+                // 实时计算成功 → 推送到 daily_highlights 表（debounced，非阻塞）
+                schedulePushDailyHighlights(currentDate, jingYestHighlightSet || new Set());
+            }
             // 若"竞/昨"开启，且计算结果里一个高光都没有（Tier0本就为空，或Tier0里全部位数差≥2），则弹一次黄色警示Toast，提示"全部没有，谨慎出手"
             if (jingYestToggleChecked && jingYestHighlightSet && jingYestHighlightSet.size === 0) {
                 maybeShowJingYestEmptyToast();
@@ -15054,6 +15177,10 @@
         // 观察组继承等下游逻辑必须复用这个过滤后的集合，而不能直接用 getJingYestStocksForDate 的原始 Tier0 结果，
         // 否则会把"满足平行+差值>0但位数差过大、并未显示蓝色高光"的股票也错误地纳入观察组。
         function getJingYestHighlightSetForDate(dateStr) {
+            // 优先用预计算缓存（快速路径，不依赖 _auctionFullRowCache）
+            const cached = getDailyHighlightsForDate(dateStr);
+            if (cached) return cached;
+            // 回退到实时计算（慢路径，需要 _auctionFullRowCache 有数据）
             const stockDiffMap = getJingYestStocksForDate(dateStr);
             return new Set([...stockDiffMap].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name));
         }
@@ -26916,6 +27043,18 @@
                 }
                 document.getElementById('passwordOverlay').style.display = 'none';
                 _appInit();
+                // 刷新场景：先快速加载 highlights 缓存（小表，秒开），立即刷新竞/昨显示
+                pullDailyHighlights().then(function() {
+                    renderAuction();
+                }).catch(function(e) { console.warn('daily_highlights 加载失败:', e.message); });
+                // 后台拉取全量数据（慢），完成后刷新所有页面
+                pullFromCloud().then(function() {
+                    allData = null; loadAllData();
+                    renderList(); renderJiwang(); renderRank(); renderAuction();
+                    renderMulti(); renderHotspot(); renderPattern(); renderBidding();
+                    renderDuiban();
+                    if (typeof renderEtf === 'function') renderEtf();
+                }).catch(function(e) { console.warn('后台 pullFromCloud 失败:', e.message); });
             } else {
                 // 未解锁：显示密码框，自动聚焦
                 setTimeout(function() {
