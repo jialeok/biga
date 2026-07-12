@@ -8841,6 +8841,27 @@
             const { error } = await sb.from('auction_data')
                 .upsert(rows, { onConflict: 'date,stock' });
             if (error) throw error;
+
+            // 推送成功后，直接把这批数据合并进本地全量快照缓存，
+            // 避免趋势图因 _justPushedAuction 屏蔽了 Realtime 回显而读不到当天刚导入/编辑的数据
+            if (!_auctionFullRowCache[date]) _auctionFullRowCache[date] = [];
+            rows.forEach(function(row) {
+                var idx = _auctionFullRowCache[date].findIndex(function(r) { return r.stock === row.stock; });
+                var existing = idx >= 0 ? _auctionFullRowCache[date][idx] : null;
+                var mergedRow = {
+                    stock: row.stock, code: row.code,
+                    volume: row.volume, yest_volume: row.yest_volume, note: row.note,
+                    change_pct: row.change_pct, topics: row.topics,
+                    in_watchlist: existing ? existing.in_watchlist : true, // 推送的行本身就是当前观察列表，默认 true
+                    selected: row.selected, bought: row.bought, sold: row.sold, fixed: row.fixed
+                };
+                if (idx >= 0) {
+                    _auctionFullRowCache[date][idx] = mergedRow;
+                } else {
+                    _auctionFullRowCache[date].push(mergedRow);
+                }
+            });
+
             // 更新状态签名（导入后状态可能变了）
             if (date === currentDate) {
                 _lastPushedAuctionStatus = JSON.stringify((getAuctionData()[currentDate] || []).map(function(s) {
@@ -11034,6 +11055,8 @@
         function renderAuction() {
             // 保存滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
             var _savedScrollY = window.scrollY;
+            // 确保题材历史缓存可用（内部有幂等保护，重复调用不会重复扫描）
+            buildTopicCache();
             // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
             ensureObservationStocks(currentDate);
             // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
@@ -11543,7 +11566,7 @@
                     ratioClass = 'auction-ratio highlight-light auction-ratio-clickable';
                 }
                 
-                const displayNote = getDisplayNote(item);
+                const displayNote = getDisplayNoteWithHistory(item);
                 const noteAttr = displayNote ? ` data-note="${displayNote.replace(/"/g, '&quot;')}"` : '';
                 
                 const volumeDisplay = item.volume ? Math.round(parseFloat(item.volume)) : '-';
@@ -14192,7 +14215,12 @@
                     auctionList[index].note = normalizedNote;
                     auctionData[currentDate] = auctionList;
                     saveData();
-                    
+
+                    // 同步推送到 auction_data 云表，避免下次 pullFromCloud 时被云端旧数据覆盖丢失
+                    pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
+                        console.warn('pushAuctionDataToCloud 失败（openAuctionNoteEditFromPage2）:', e);
+                    });
+
                     // 同步更新已添加股票的收盘涨幅
                     syncStockCloseFromAuction(stockName, normalizedNote);
                     
@@ -14254,6 +14282,19 @@
                 return buildNoteFromFields(item.changePct, item.topics);
             }
             return item.note || '';
+        }
+
+        // 仅用于第一页展示：当天字段为空时，回退到历史/云端题材缓存
+        // 注意：编辑框预填等场景请继续使用 getDisplayNote，不要用这个函数，
+        // 避免把历史题材误存成"今天的注释"
+        function getDisplayNoteWithHistory(item) {
+            const todayNote = getDisplayNote(item);
+            if (todayNote) return todayNote;
+            if (item && item.stock) {
+                const historyNote = getStockHistoryTopics(item.stock);
+                if (historyNote) return historyNote;
+            }
+            return '';
         }
 
         // 提取涨幅显示值（优先用 changePct 字段，回退到 note 解析）
@@ -15456,7 +15497,12 @@
                 auctionList[index].topics = parsed.topics;
                 saveData();
                 renderAuction();
-                
+
+                // 同步推送到 auction_data 云表，避免下次 pullFromCloud 时被云端旧数据覆盖丢失
+                pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
+                    console.warn('pushAuctionDataToCloud 失败（showAuctionNoteInput）:', e);
+                });
+
                 // 同步更新已添加股票的收盘涨幅
                 const stockName = auctionList[index].stock;
                 syncStockCloseFromAuction(stockName, normalizedNote);
