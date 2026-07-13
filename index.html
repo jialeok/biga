@@ -8757,6 +8757,7 @@
                         in_watchlist: true,
                         selected: s.selected || false, bought: s.bought || false,
                         sold: s.sold || false, fixed: s.fixed || false,
+                        obs_auto_added: !!s.obsAutoAdded,
                         updated_at: now, updated_by: 'main'
                     };
                 });
@@ -15280,7 +15281,7 @@
             obsStocks.forEach(function(name) {
                 if (!existingNames.has(name)) {
                     // 不在当日列表中 → 自动添加
-                    dayList.push({ stock: name, volume: '', yestVolume: '', note: '' });
+                    dayList.push({ stock: name, volume: '', yestVolume: '', note: '', obsAutoAdded: true });
                     autoAddedSet.add(name);
                     hasNew = true;
                 }
