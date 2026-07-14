@@ -11403,23 +11403,25 @@
             } else if (sortByParallelEnabled) {
                 if (sortByJingYestEnabled) {
                     // "竞/昨"是"平行"的加强筛选，排序需三层：
-                    //   1. 竞/昨达标：先按"位数差"(|竞价量位数-昨日成交量位数|)从小到大排，位数差相同再按"差值"(今/昨比-昨/前比)从高到低排
-                    //   2. 平行达标但竞/昨未达标：同样按"位数差"从小到大、"差值"从高到低排（差值此时不要求>0，能算出来就参与）
+                    //   1. 竞/昨真正达标（高光条件：平行 + 差值>0 + 位数差<=1）：按"位数差"从小到大排，位数差相同再按"差值"从高到低排
+                    //   2. 平行达标但不满足高光条件（差值<=0，或差值>0但位数差>1）：同样按"位数差"从小到大、"差值"从高到低排（差值不要求>0，能算出来就参与）
                     //   3. 平行也不达标：保持原相对顺序，垫底
-                    const jingYestDiffMap = getJingYestStocksForDate(currentDate);
+                    // 注意：tier0 必须与"实际显示蓝色高光"的口径完全一致（即 getJingYestHighlightSetForDate，已过滤 digitGap<=1），
+                    // 不能直接用 getJingYestStocksForDate（只过滤了 diff>0，未过滤位数差），否则会出现"位数差=2的股票排在位数差=1的股票前面"的错误。
+                    const jingYestHighlightSet = getJingYestHighlightSetForDate(currentDate);
                     const parallelStockNamesForSort = getParallelStocksForDate(currentDate);
                     const allRatioDiffInfo = getRatioDiffInfoForDate(currentDate);
                     renderOrder = renderOrder
                         .map((idx, pos) => {
                             const stockName = auctionList[idx] && auctionList[idx].stock ? auctionList[idx].stock.trim() : '';
-                            const info = jingYestDiffMap.has(stockName) ? jingYestDiffMap.get(stockName) : null;
                             const isParallel = parallelStockNamesForSort.has(stockName);
-                            // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
-                            const tier = info !== null ? 0 : (isParallel ? 1 : 2);
-                            // tier1时，从"全量差值/位数差信息"里取该股票的数据（不要求diff>0）
-                            const fallbackInfo = tier === 1 ? allRatioDiffInfo.get(stockName) : null;
-                            const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
-                            const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
+                            const isHighlight = stockName && jingYestHighlightSet.has(stockName);
+                            // tier: 0 = 竞/昨真正达标（高光），1 = 仅平行达标（含差值>0但位数差>1的情况），2 = 都不达标
+                            const tier = isHighlight ? 0 : (isParallel ? 1 : 2);
+                            // tier0/tier1 都从"全量差值/位数差信息"里取该股票的数据（不要求diff>0）
+                            const fallbackInfo = (tier === 0 || tier === 1) ? allRatioDiffInfo.get(stockName) : null;
+                            const diff = fallbackInfo ? fallbackInfo.diff : null;
+                            const digitGap = fallbackInfo ? fallbackInfo.digitGap : null;
                             return { idx, pos, diff, digitGap, tier };
                         })
                         .sort((a, b) => {
@@ -12255,8 +12257,9 @@
             // 是否开启"竞/昨"（在平行基础上，进一步要求 今/昨比 > 昨/前比）；集合本身不依赖开关，随时计算以便"竞/昨数"常驻显示
             const sortByJingYestEnabled2 = document.getElementById('auctionSortByJingYestToggle2')?.checked;
             const jingYestStockNames2 = getJingYestStocksForDate(currentDate);
-            // "竞/昨"高光新规则（与第一页一致）：Tier0里只有位数差≤1才允许高光，位数差≥2的仍属于Tier0、排序不变，只是不高光
-            // 排序逻辑（上面第11031行 jingYestStockNames2）不受影响，此子集只供高光判断使用
+            // "竞/昨"高光新规则（与第一页一致）：真正的高光（以及排序tier0）要求 位数差≤1 且 差值>0；
+            // 位数差≥2的股票虽然满足"平行+差值>0"，但不算真正达标，既不显示高光，排序上也归入tier1（仅平行达标），
+            // 与"位数差≤1但差值<=0"的股票同层，按位数差从小到大排序，确保位数差更小的股票排在前面。
             const jingYestHighlightSet2 = jingYestStockNames2
                 ? new Set([...jingYestStockNames2].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name))
                 : null;
@@ -12444,20 +12447,21 @@
                 } else if (sortByParallelEnabled2 && parallelStockNames2) {
                     if (sortByJingYestEnabled2 && jingYestStockNames2) {
                         // "竞/昨"是"平行"的加强筛选，排序需三层：
-                        //   1. 竞/昨达标：先按"位数差"从小到大排，位数差相同再按差值(今/昨比 - 昨/前比)从高到低排
-                        //   2. 平行达标但竞/昨未达标：同样按位数差/差值排序（差值不要求>0，能算出来就参与）
+                        //   1. 竞/昨真正达标（高光条件：平行 + 差值>0 + 位数差<=1）：按"位数差"从小到大排，位数差相同再按差值从高到低排
+                        //   2. 平行达标但不满足高光条件（差值<=0，或差值>0但位数差>1）：同样按位数差/差值排序（差值不要求>0，能算出来就参与）
                         //   3. 平行也不达标：保持原相对顺序，垫底
+                        // tier0 用 jingYestHighlightSet2（已过滤 digitGap<=1），与实际高光显示口径保持一致
                         const allRatioDiffInfo2 = getRatioDiffInfoForDate(currentDate);
                         stocksToRender = group.stocks
                             .map((s, pos) => {
                                 const name = s.stock ? s.stock.trim() : '';
-                                const info = jingYestStockNames2.has(name) ? jingYestStockNames2.get(name) : null;
                                 const isParallel = parallelStockNames2.has(name);
-                                // tier: 0 = 竞/昨达标，1 = 仅平行达标，2 = 都不达标
-                                const tier = info !== null ? 0 : (isParallel ? 1 : 2);
-                                const fallbackInfo = tier === 1 ? allRatioDiffInfo2.get(name) : null;
-                                const diff = info ? info.diff : (fallbackInfo ? fallbackInfo.diff : null);
-                                const digitGap = info ? info.digitGap : (fallbackInfo ? fallbackInfo.digitGap : null);
+                                const isHighlight = name && jingYestHighlightSet2 && jingYestHighlightSet2.has(name);
+                                // tier: 0 = 竞/昨真正达标（高光），1 = 仅平行达标（含差值>0但位数差>1的情况），2 = 都不达标
+                                const tier = isHighlight ? 0 : (isParallel ? 1 : 2);
+                                const fallbackInfo = (tier === 0 || tier === 1) ? allRatioDiffInfo2.get(name) : null;
+                                const diff = fallbackInfo ? fallbackInfo.diff : null;
+                                const digitGap = fallbackInfo ? fallbackInfo.digitGap : null;
                                 return { s, pos, diff, digitGap, tier };
                             })
                             .sort((a, b) => {
