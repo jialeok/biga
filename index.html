@@ -7163,8 +7163,28 @@
                 <span id="hotImportStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
             </div>
 
-            <!-- 股票代码映射：方案 3.3 明确保持共享，不拆分。
-                 用户需在早盘竞价弹窗里操作"导入代码映射"，热门股票弹窗不重复放置（避免 id 冲突）。 -->
+            <!-- 股票代码映射（热门股票独立版本：元素 id 加 _hot 后缀避免冲突，stockCodeMap 数据本身共享） -->
+            <div id="stockCodeMapArea_hot" style="margin-bottom: 16px; padding: 10px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 13px; color: #15803d; font-weight: 600;">股票代码映射（供抓取程序读取）</span>
+                    <label class="auction-toggle-switch">
+                        <input type="checkbox" id="stockCodeMapToggle_hot" onchange="onStockCodeMapToggleChangeHot()">
+                        <span class="auction-toggle-slider"></span>
+                    </label>
+                </div>
+                <div id="stockCodeMapBody_hot" style="display: none; margin-top: 8px;">
+                    <div style="font-size: 11px; color: #166534; margin-bottom: 8px; line-height: 1.5;">
+                        两列：股票名称[TAB]股票代码（如 贵州茅台[TAB]600519）。<br>
+                        存为「名称→代码」映射（全局共享），同名覆盖。导入时会把股票加入今日热门股票列表。
+                    </div>
+                    <textarea id="stockCodeMapInput_hot" placeholder="贵州茅台&#9;600519&#10;平安银行&#9;000001&#10;..." style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bbf7d0; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+                        <button type="button" onclick="importStockCodeMapHot()" style="padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #10b981, #059669); color: #fff; border: none; border-radius: 4px; cursor: pointer;">导入代码映射</button>
+                        <button type="button" onclick="clearStockCodeMapHot()" style="padding: 6px 12px; font-size: 12px; background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; cursor: pointer;">清空映射</button>
+                        <span id="stockCodeMapStatus_hot" style="font-size: 12px; color: #059669;"></span>
+                    </div>
+                </div>
+            </div>
 
             <!-- 历史数据补录（热门股票独立版本） -->
             <div id="hotHistoryFillArea" style="margin-bottom: 16px; padding: 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;">
@@ -9165,12 +9185,15 @@
             // 重新渲染当前分组的数据
             renderAuction(g);
 
-            // 切换 Tab 后滚动到看板顶部（延迟执行，覆盖 renderAuction 内部的滚动位置恢复）
+            // 切换 Tab 后滚动到标题栏位置（延迟执行，覆盖 renderAuction 内部的滚动位置恢复）
+            // 减去 .date-nav 高度，确保紫色标题栏和 Tab 栏在日期栏下方可见
             setTimeout(function() {
-                const board = document.getElementById('auctionBoard');
-                if (board) {
-                    const rect = board.getBoundingClientRect();
-                    window.scrollTo({ top: rect.top + window.scrollY - 10 });
+                const header = document.getElementById('auctionHeader') || document.getElementById('groupTabBar');
+                if (header) {
+                    const dateNav = document.querySelector('.date-nav');
+                    const dateNavH = dateNav ? dateNav.offsetHeight : 0;
+                    const rect = header.getBoundingClientRect();
+                    window.scrollTo({ top: rect.top + window.scrollY - dateNavH - 4 });
                 }
             }, 60);
         }
@@ -11287,6 +11310,89 @@
             document.getElementById('aiVisionResult').value = '';
             document.getElementById('aiVisionStatus').textContent = '';
             document.getElementById('aiVisionModal').style.display = 'block';
+        }
+
+        // 股票代码映射 toggle（热门股票独立版本，stockCodeMap 数据本身共享）
+        function onStockCodeMapToggleChangeHot() {
+            const on = document.getElementById('stockCodeMapToggle_hot').checked;
+            document.getElementById('stockCodeMapBody_hot').style.display = on ? 'block' : 'none';
+            if (on) {
+                const map = loadAllData().stockCodeMap || {};
+                const cnt = Object.keys(map).length;
+                setStockCodeMapStatusHot(cnt > 0 ? `当前映射已有 ${cnt} 只` : '当前映射为空', false);
+            }
+        }
+        function setStockCodeMapStatusHot(msg, isErr) {
+            const el = document.getElementById('stockCodeMapStatus_hot');
+            if (!el) return;
+            el.textContent = msg;
+            el.style.color = isErr ? '#dc2626' : '#059669';
+        }
+        // 导入代码映射（热门股票独立版本：写入共享 stockCodeMap + 把股票加到 _hotAuctionData[currentDate]）
+        function importStockCodeMapHot() {
+            const ta = document.getElementById('stockCodeMapInput_hot');
+            if (!ta) return;
+            const raw = ta.value.trim();
+            if (!raw) { setStockCodeMapStatusHot('请先粘贴数据', true); ta.focus(); return; }
+            const map = loadAllData().stockCodeMap || {};
+            const newNames = [];
+            let count = 0;
+            raw.split(/\r?\n/).forEach(line => {
+                line = line.trim();
+                if (!line) return;
+                if (!/\d{6}/.test(line) && /股票名称|股票代码|名称|代码/.test(line)) return;
+                let cells;
+                if (line.includes('|')) cells = line.split('|').map(s => s.trim()).filter(s => s.length > 0);
+                else if (line.includes('\t')) cells = line.split('\t').map(s => s.trim()).filter(s => s.length > 0);
+                else cells = line.split(/\s{2,}|\s+/).map(s => s.trim()).filter(Boolean);
+                if (cells.length < 2) return;
+                let name = '', code = '';
+                const c0 = cells[0].replace(/^SH\.|^SZ\./i, '').trim();
+                const c1 = cells[1].replace(/^SH\.|^SZ\./i, '').trim();
+                if (/^\d{6}$/.test(c0)) { code = c0; name = cells[1].trim(); }
+                else if (/^\d{6}$/.test(c1)) { name = cells[0].trim(); code = c1; }
+                else { name = cells[0].trim(); code = cells[1].trim(); }
+                if (!name) return;
+                map[name] = code;
+                newNames.push(name);
+                count++;
+            });
+            allData.stockCodeMap = map;
+            saveModule('stockCodeMap');
+            scheduleCloudPush();
+
+            // 同步到今日热门股票列表：将导入的名称追加到 _hotAuctionData[currentDate]（已存在的不重复添加）
+            let addedToHot = 0;
+            if (newNames.length > 0) {
+                const hotList = getHotAuctionData()[currentDate] || [];
+                newNames.forEach(name => {
+                    const exists = hotList.some(item => item && item.stock && item.stock.trim() === name);
+                    if (!exists) {
+                        hotList.push({ stock: name, volume: '', yestVolume: '', note: '', changePct: '', topics: '', selected: false, bought: false, sold: false, fixed: false });
+                        addedToHot++;
+                    }
+                });
+                getHotAuctionData()[currentDate] = hotList;
+                invalidateTopicCache();
+                syncHotStocksListForDate(currentDate).catch(function(err) {
+                    console.error('importStockCodeMapHot syncHotStocksListForDate 失败:', err);
+                });
+                renderHotForm();
+                renderAuction('hot');
+            }
+
+            ta.value = '';
+            setStockCodeMapStatusHot(`✅ 已导入 ${count} 条映射，${addedToHot} 只已加入今日热门股票列表`, false);
+        }
+        // 清空映射（热门股票独立版本：清空共享 stockCodeMap + 清空 textarea）
+        function clearStockCodeMapHot() {
+            if (!confirm('确定清空股票代码映射？清空后抓取程序将读不到代码。')) return;
+            allData.stockCodeMap = {};
+            saveModule('stockCodeMap');
+            scheduleCloudPush();
+            const ta = document.getElementById('stockCodeMapInput_hot');
+            if (ta) ta.value = '';
+            setStockCodeMapStatusHot('已清空股票代码映射', false);
         }
 
         // ============ 股票代码映射（stockCodeMap）============
