@@ -9201,6 +9201,72 @@
             }
         }
 
+        // 热门股票脏日期全量同步（照抄 syncAuctionListForDate，改表名 hot_stocks、数据源 getGroupData('hot')）
+        async function syncHotStocksListForDate(date) {
+            const sb = getSupabase();
+            const localList = (getGroupData('hot')[date] || []).filter(function(s) { return s && s.stock; });
+            const localStocks = new Set(localList.map(function(s) { return s.stock.trim(); }));
+
+            const { data: cloudRows, error: readErr } = await sb.from('hot_stocks')
+                .select('stock').eq('date', date);
+            if (readErr) throw readErr;
+            const cloudStocks = new Set((cloudRows || []).map(function(r) { return (r.stock || '').trim(); }));
+
+            const now = new Date().toISOString();
+            const scMap = loadAllData().stockCodeMap || {};
+
+            // 1. 云端有但本地无的股票：置 in_watchlist=false
+            const toRemove = [];
+            cloudStocks.forEach(function(s) { if (!localStocks.has(s)) toRemove.push(s); });
+            if (toRemove.length > 0) {
+                await Promise.all(toRemove.map(function(stock) {
+                    return sb.from('hot_stocks')
+                        .update({ in_watchlist: false, updated_at: now, updated_by: 'main' })
+                        .eq('date', date).eq('stock', stock);
+                }));
+            }
+
+            // 2. 插入本地新增的股票（云端无的）
+            const newStocks = localList.filter(function(s) { return !cloudStocks.has(s.stock.trim()); });
+            if (newStocks.length > 0) {
+                const newRows = newStocks.map(function(s) {
+                    return {
+                        date: date, stock: s.stock.trim(),
+                        code: scMap[s.stock.trim()] || '',
+                        volume: s.volume || '', yest_volume: s.yestVolume || '', note: s.note || '',
+                        change_pct: s.changePct || '', topics: s.topics || '',
+                        in_watchlist: true,
+                        selected: s.selected || false, bought: s.bought || false,
+                        sold: s.sold || false, fixed: s.fixed || false,
+                        obs_auto_added: !!s.obsAutoAdded,
+                        updated_at: now, updated_by: 'main'
+                    };
+                });
+                const { error: insErr } = await sb.from('hot_stocks')
+                    .upsert(newRows, { onConflict: 'date,stock', ignoreDuplicates: true });
+                if (insErr) throw insErr;
+            }
+
+            // 3. 更新现有股票的状态列
+            const existingStocks = localList.filter(function(s) { return cloudStocks.has(s.stock.trim()); });
+            if (existingStocks.length > 0) {
+                const batchSize = 25;
+                for (let i = 0; i < existingStocks.length; i += batchSize) {
+                    const batch = existingStocks.slice(i, i + batchSize);
+                    await Promise.all(batch.map(function(item) {
+                        return sb.from('hot_stocks')
+                            .update({
+                                selected: item.selected || false, bought: item.bought || false,
+                                sold: item.sold || false, fixed: item.fixed || false,
+                                in_watchlist: true,
+                                updated_at: now, updated_by: 'main'
+                            })
+                            .eq('date', date).eq('stock', item.stock.trim());
+                    }));
+                }
+            }
+        }
+
         // pushToCloud 中调用：同步 auction 数据到新表
         async function pushAuctionToCloud() {
             if (!_auctionTableAvailable) return; // 表不可用时跳过，回退到 user_data
@@ -10295,7 +10361,7 @@
 
         // 打开早盘竞价编辑
         function openAuctionEdit() {
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             const formContainer = document.getElementById('auctionFormContainer');
             
             let html = '';
@@ -11345,7 +11411,7 @@
 
         // 渲染早盘竞价表单
         function renderAuctionForm() {
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             const formContainer = document.getElementById('auctionFormContainer');
 
             if (auctionList.length === 0) {
@@ -11380,16 +11446,16 @@
         // 保存早盘竞价数据
         function saveAuction(e) {
             e.preventDefault();
-            
+
             // 保存前备份（用于撤回）
             backupAuctionData('save');
 
             // 预建题材缓存：避免下面循环里对每只无注释的股票单独扫描最近66天历史数据（股票多时会明显卡顿）
             buildTopicCache();
-            
+
             const formContainer = document.getElementById('auctionFormContainer');
             const rows = formContainer.querySelectorAll('.auction-form-row');
-            const existingList = getTodayAuction();
+            const existingList = getTodayGroupList(currentGroup);
             const auctionList = [];
             
             rows.forEach((row, index) => {
@@ -11436,11 +11502,26 @@
                 return ratioB - ratioA;
             });
             
-            getAuctionData()[currentDate] = auctionList;
+            getGroupData(currentGroup)[currentDate] = auctionList;
+
+            if (currentGroup === 'hot') {
+                // 热门股票：不写 localStorage，不触发早盘竞价专用同步；直接同步 hot_stocks 表
+                invalidateTopicCache();
+                renderAuction('hot');
+                const board = document.getElementById('auctionBoard');
+                if (board) board.classList.remove('collapsed');
+                syncHotStocksListForDate(currentDate).catch(function(err) {
+                    console.error('syncHotStocksListForDate 失败:', err);
+                });
+                closeAuctionModal();
+                return;
+            }
+
+            // 早盘竞价：原有逻辑
             saveData();
             invalidateTopicCache();
             renderAuction();
-            
+
             // 同步更新股票列表中的题材，统一保存
             syncStockTopicsFromAuction();
             saveModule('stocks');
@@ -11448,17 +11529,17 @@
 
             // 涨跌幅数据可能已变化，重新统计"最近多板"的总数量和跌涨比
             recalcDuibanFromAuction();
-            
+
             const board = document.getElementById('auctionBoard');
             if (board) {
                 board.classList.remove('collapsed');
             }
-            
+
             // 标记当前日期为脏，触发 syncAuctionListForDate 全量增删同步
             // （处理股票名称修改：删除云端旧名称行，插入新名称行）
             markAuctionDirty(currentDate);
             scheduleCloudPush();
-            
+
             closeAuctionModal();
         }
 
