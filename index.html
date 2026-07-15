@@ -13105,7 +13105,7 @@
                         <div class="auction-yest auction-yest-note${yestColorClass}" data-index="${index}"${noteAttr}>${yestVolumeDisplay}</div>
                         <div class="${ratioClass}" data-index="${index}">${ratio}${ratioArrow}</div>
                     </div>
-                    <div class="auction-trend-panel" id="auctionTrendPanel-${index}" data-index="${index}" style="display:none;"></div>
+                    <div class="auction-trend-panel" id="${_p}TrendPanel-${index}" data-index="${index}" style="display:none;"></div>
                 `;
             }
 
@@ -14075,7 +14075,7 @@
                         </div>
                     `;
                     if (topicAllowsExpand) {
-                        html += `<div class="auction-trend-panel" id="auctionTrendPanelP2-${rowKey}" data-stock="${stock.stock || ''}" style="display:none;"></div>`;
+                        html += `<div class="auction-trend-panel" id="${_p}TrendPanelP2-${rowKey}" data-stock="${stock.stock || ''}" style="display:none;"></div>`;
                     }
                 });
                 
@@ -14089,7 +14089,7 @@
             bindAuctionTopicEdit();
 
             // 绑定第二页"点击行展开/收起趋势图"事件
-            document.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
+            auctionContent2.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
                 rowEl.style.cursor = 'pointer';
                 rowEl.addEventListener('click', function(e) {
                     e.stopPropagation();
@@ -16265,7 +16265,8 @@
         // 切换行选中状态
         // 展开某一行的趋势面板（供"全部展开"复用，不做toggle判断，直接展开）
         function expandAuctionTrendPanel(index) {
-            const panel = document.getElementById('auctionTrendPanel-' + index);
+            const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
+            const panel = document.getElementById(_tp + 'TrendPanel-' + index);
             if (!panel) return;
             const auctionList = getTodayGroupList(currentGroup);
             const item = auctionList[index];
@@ -16286,7 +16287,9 @@
 
         // 收起当前列表所有行的趋势面板
         function collapseAllAuctionTrendPanels() {
-            document.querySelectorAll('.auction-trend-panel').forEach(panel => {
+            const _contentEl = document.getElementById((currentGroup === 'hot' ? 'hot' : 'auction') + 'Content');
+            const _scope = _contentEl || document;
+            _scope.querySelectorAll('.auction-trend-panel').forEach(panel => {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
             });
@@ -16308,7 +16311,8 @@
 
         // 展开/收起第二页某一行的趋势面板（rowKey 用于定位具体行，因为同一股票可能在多个题材下重复出现）
         function toggleAuctionTrendPanelP2(rowKey, stockName) {
-            const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+            const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
+            const panel = document.getElementById(_tp + 'TrendPanelP2-' + rowKey);
             if (!panel) return;
 
             const isOpen = panel.style.display !== 'none';
@@ -16327,12 +16331,14 @@
         // 展开第二页所有允许展开的行（排除"其它"和"并购重组"分组）
         // 每个题材分组内部的所有个股都独立展开，即使同一只股票在多个分组下会重复展开好几次（用户明确需要按题材分组做完整对比）
         function expandAllAuctionTrendPanelsP2() {
-            document.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
+            const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
+            const _content2El = document.getElementById(_tp + 'Content2');
+            (_content2El || document).querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
                 const stockName = (rowEl.dataset.stock || '').trim();
                 const rowKey = rowEl.dataset.rowkey;
                 if (!stockName || !rowKey) return;
 
-                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                const panel = document.getElementById(_tp + 'TrendPanelP2-' + rowKey);
                 if (!panel) return;
 
                 const history = getAuctionStockHistory(stockName, currentDate, 5, currentGroup);
@@ -16340,26 +16346,31 @@
                 panel.style.display = 'block';
             });
             // 同步所有题材标题栏的箭头方向为"展开"
-            document.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
+            (_content2El || document).querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
                 arrowEl.classList.add('expanded');
             });
         }
 
         // 收起第二页所有趋势面板
         function collapseAllAuctionTrendPanelsP2() {
-            document.querySelectorAll('[id^="auctionTrendPanelP2-"]').forEach(panel => {
+            const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
+            const _content2El = document.getElementById(_tp + 'Content2');
+            const _scope2 = _content2El || document;
+            _scope2.querySelectorAll(`[id^="${_tp}TrendPanelP2-"]`).forEach(panel => {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
             });
             // 同步所有题材标题栏的箭头方向为"收起"
-            document.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
+            _scope2.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
                 arrowEl.classList.remove('expanded');
             });
         }
 
         // 单独展开/收起某一个题材分组下所有个股的趋势图，与"全部展开"总开关互不影响
         function toggleTopicGroupTrendPanels(topic) {
-            const groupEl = document.querySelector(`.auction-topic-group[data-topic-group="${CSS.escape(topic)}"]`);
+            const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
+            const _content2El = document.getElementById(_tp + 'Content2');
+            const groupEl = (_content2El || document).querySelector(`.auction-topic-group[data-topic-group="${CSS.escape(topic)}"]`);
             if (!groupEl) return;
 
             const rows = groupEl.querySelectorAll('.auction-trend-trigger-p2');
@@ -16369,7 +16380,7 @@
             let anyExpanded = false;
             rows.forEach(rowEl => {
                 const rowKey = rowEl.dataset.rowkey;
-                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                const panel = document.getElementById(_tp + 'TrendPanelP2-' + rowKey);
                 if (panel && panel.style.display !== 'none' && panel.innerHTML.trim() !== '') {
                     anyExpanded = true;
                 }
@@ -16379,7 +16390,7 @@
                 const stockName = (rowEl.dataset.stock || '').trim();
                 const rowKey = rowEl.dataset.rowkey;
                 if (!stockName || !rowKey) return;
-                const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
+                const panel = document.getElementById(_tp + 'TrendPanelP2-' + rowKey);
                 if (!panel) return;
 
                 if (anyExpanded) {
@@ -16700,7 +16711,8 @@
 
         // 展开/收起某只股票的5日竞价量+昨日成交量趋势图
         function toggleAuctionTrendPanel(index) {
-            const panel = document.getElementById('auctionTrendPanel-' + index);
+            const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
+            const panel = document.getElementById(_tp + 'TrendPanel-' + index);
             if (!panel) return;
 
             const auctionList = getTodayGroupList(currentGroup);
