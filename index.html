@@ -7147,6 +7147,69 @@
     </div>
 
     <!-- 最近多板早盘竞价编辑模态框 -->
+    <!-- 热门股票独立编辑弹窗（与 #auctionModal 完全分离，不共享任何 DOM/函数） -->
+    <div class="modal" id="hotEditModal" onclick="if(event.target===this)closeHotEditModal()">
+        <div class="modal-content modal-content-rank">
+            <div class="modal-header" style="padding: 0 0 16px 0; margin-bottom: 0;">
+                <div style="font-weight:600;color:#1f2937">编辑热门股票</div>
+                <button class="close-btn" onclick="closeHotEditModal()">×</button>
+            </div>
+
+            <div id="hotPasteArea" style="margin-bottom: 16px;">
+                <textarea id="hotPasteInput" placeholder="从 Excel 复制后直接粘贴到这里&#10;格式1：股票名称[TAB]竞价量[TAB]昨日成交量&#10;格式2：股票名称[TAB]涨幅[TAB]概念（注释叠加）&#10;格式3：股票名称[TAB]涨幅 或 概念&#10;格式4：股票名称 涨幅%" style="width: 100%; height: 100px; padding: 8px; font-size: 12px; border: 1px solid #e2e8f0; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                <button type="button" onclick="importHotFromPaste()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; border: none; border-radius: 4px; cursor: pointer;">导入数据</button>
+                <button type="button" onclick="replaceHotConceptFromPaste()" style="margin-top: 8px; margin-left: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: #fff; border: none; border-radius: 4px; cursor: pointer;">替换概念</button>
+                <button type="button" onclick="openHotAiVisionModal()" style="margin-top: 8px; margin-left: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer;">📷 AI识图</button>
+                <span id="hotImportStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
+            </div>
+
+            <!-- 股票代码映射：方案 3.3 明确保持共享，不拆分。
+                 用户需在早盘竞价弹窗里操作"导入代码映射"，热门股票弹窗不重复放置（避免 id 冲突）。 -->
+
+            <!-- 历史数据补录（热门股票独立版本） -->
+            <div id="hotHistoryFillArea" style="margin-bottom: 16px; padding: 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 13px; color: #1d4ed8; font-weight: 600;">历史数据补录模式</span>
+                    <label class="auction-toggle-switch">
+                        <input type="checkbox" id="hotHistoryFillToggle" onchange="onHotHistoryFillToggleChange()">
+                        <span class="auction-toggle-slider"></span>
+                    </label>
+                </div>
+                <div id="hotHistoryFillBody" style="display: none; margin-top: 8px;">
+                    <div style="font-size: 11px; color: #1e40af; margin-bottom: 8px;">
+                        只补空值；股票需在当前列表中存在才会补录（不允许导入无关股票）；三列自动补两项，两列按右侧类型补一项
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
+                        <input type="date" id="hotHistoryFillDate" style="padding: 4px 6px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px;">
+                        <label style="font-size: 12px; color: #374151; display:flex; align-items:center; gap:4px;">
+                            <input type="radio" name="hotHistoryFillColType" value="volume" checked> 竞价量
+                        </label>
+                        <label style="font-size: 12px; color: #374151; display:flex; align-items:center; gap:4px;">
+                            <input type="radio" name="hotHistoryFillColType" value="yestVolume"> 昨日成交量
+                        </label>
+                    </div>
+                    <textarea id="hotHistoryFillInput" placeholder="三列：股票名称[TAB]竞价量[TAB]昨日成交量&#10;两列：股票名称[TAB]数字（按上方选择类型补录）" style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <button type="button" onclick="importHotHistoryFill()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; border: none; border-radius: 4px; cursor: pointer;">补录历史数据</button>
+                    <span id="hotHistoryFillStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
+                </div>
+            </div>
+
+            <form onsubmit="saveHotStocks(event)" id="hotForm">
+                <div class="rank-form-scroll-container">
+                    <div id="hotFormContainer">
+                    </div>
+                </div>
+                <button type="button" class="add-rank-btn" onclick="addHotRow()">+ 添加新行</button>
+                <button type="submit" class="submit-btn" style="margin-top: 16px">保存</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #3b82f6, #2563eb);" onclick="rollbackHotStocksData()">撤回</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #ef4444, #dc2626);" onclick="clearAllHotConcepts()">清除题材</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #f97316, #ea580c);" onclick="clearAllHotText()">清除文字</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #6b7280, #4b5563);" onclick="clearAllHotNotes()">清除注释</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #7f1d1d, #991b1b);" onclick="clearAllHotRows()">清空所有行</button>
+            </form>
+        </div>
+    </div>
+
     <div class="modal" id="auctionModal" onclick="if(event.target===this)closeAuctionModal()">
         <div class="modal-content modal-content-rank">
             <div class="modal-header" style="padding: 0 0 16px 0; margin-bottom: 0;">
@@ -10421,9 +10484,809 @@
             document.getElementById('auctionModal').classList.remove('active');
         }
 
-        // 打开热门股票编辑（复用早盘竞价的编辑弹窗）
+        // ============================================================
+        // 热门股票独立函数集合（与早盘竞价完全分离，只读写 _hotAuctionData + hot_stocks 表）
+        // 方案 3.2：复制原函数 → 改名 → 改数据源 → 改云端同步
+        // ============================================================
+
+        // 热门股票专用数据源（不共用 getGroupData，避免任何耦合）
+        function getHotAuctionData() { return _hotAuctionData || (_hotAuctionData = {}); }
+
+        // 打开热门股票编辑弹窗（独立 DOM #hotEditModal）
         function openHotEdit() {
-            openAuctionEdit();
+            openHotEditModal();
+        }
+        function openHotEditModal() {
+            const hotList = getHotAuctionData()[currentDate] || [];
+            const formContainer = document.getElementById('hotFormContainer');
+            if (!formContainer) return;
+            let html = '';
+            if (hotList.length === 0) {
+                html = `
+                    <div class="auction-form-row" id="hot-row-0">
+                        <div class="rank-form-number">1</div>
+                        <input type="text" class="form-input auction-form-stock-input" name="hot-stock-0" placeholder="股票名称">
+                        <input type="text" class="form-input auction-form-volume-input" name="hot-volume-0" placeholder="竞价量">
+                        <input type="text" class="form-input auction-form-yest-input" name="hot-yest-0" placeholder="昨日成交量">
+                        <button type="button" class="remove-rank-btn" onclick="removeHotRow(0)">×</button>
+                    </div>
+                `;
+            } else {
+                hotList.forEach((item, index) => {
+                    html += `
+                        <div class="auction-form-row" id="hot-row-${index}">
+                            <div class="rank-form-number">${index + 1}</div>
+                            <input type="text" class="form-input auction-form-stock-input" name="hot-stock-${index}" value="${item.stock || ''}" placeholder="股票名称">
+                            <input type="text" class="form-input auction-form-volume-input" name="hot-volume-${index}" value="${item.volume || ''}" placeholder="竞价量">
+                            <input type="text" class="form-input auction-form-yest-input" name="hot-yest-${index}" value="${item.yestVolume || ''}" placeholder="昨日成交量">
+                            <button type="button" class="remove-rank-btn" onclick="removeHotRow(${index})">×</button>
+                        </div>
+                    `;
+                });
+            }
+            formContainer.innerHTML = html;
+            // 重置历史补录开关
+            const hfToggle = document.getElementById('hotHistoryFillToggle');
+            const hfBody = document.getElementById('hotHistoryFillBody');
+            const hfDate = document.getElementById('hotHistoryFillDate');
+            if (hfToggle) hfToggle.checked = false;
+            if (hfBody) hfBody.style.display = 'none';
+            if (hfDate) hfDate.value = '';
+            setTimeout(() => {
+                const modal = document.getElementById('hotEditModal');
+                if (modal) modal.classList.add('active');
+            }, 50);
+        }
+
+        function closeHotEditModal() {
+            const modal = document.getElementById('hotEditModal');
+            if (modal) modal.classList.remove('active');
+        }
+
+        // 渲染热门股票表单
+        function renderHotForm() {
+            const hotList = getHotAuctionData()[currentDate] || [];
+            const formContainer = document.getElementById('hotFormContainer');
+            if (!formContainer) return;
+            if (hotList.length === 0) {
+                formContainer.innerHTML = `
+                    <div class="auction-form-row" id="hot-row-0">
+                        <div class="rank-form-number">1</div>
+                        <input type="text" class="form-input auction-form-stock-input" name="hot-stock-0" placeholder="股票名称">
+                        <input type="text" class="form-input auction-form-volume-input" name="hot-volume-0" placeholder="竞价量">
+                        <input type="text" class="form-input auction-form-yest-input" name="hot-yest-0" placeholder="昨日成交量">
+                        <button type="button" class="remove-rank-btn" onclick="removeHotRow(0)">×</button>
+                    </div>
+                `;
+                return;
+            }
+            let html = '';
+            hotList.forEach((item, index) => {
+                html += `
+                    <div class="auction-form-row" id="hot-row-${index}">
+                        <div class="rank-form-number">${index + 1}</div>
+                        <input type="text" class="form-input auction-form-stock-input" name="hot-stock-${index}" value="${item.stock || ''}" placeholder="股票名称">
+                        <input type="text" class="form-input auction-form-volume-input" name="hot-volume-${index}" value="${item.volume || ''}" placeholder="竞价量">
+                        <input type="text" class="form-input auction-form-yest-input" name="hot-yest-${index}" value="${item.yestVolume || ''}" placeholder="昨日成交量">
+                        <button type="button" class="remove-rank-btn" onclick="removeHotRow(${index})">×</button>
+                    </div>
+                `;
+            });
+            formContainer.innerHTML = html;
+        }
+
+        // 删除热门股票行
+        function removeHotRow(index) {
+            const row = document.getElementById(`hot-row-${index}`);
+            const container = document.getElementById('hotFormContainer');
+            if (row && container.children.length > 1) {
+                row.remove();
+                reindexHotRows();
+            } else if (row) {
+                row.querySelector('.auction-form-stock-input').value = '';
+                row.querySelector('.auction-form-volume-input').value = '';
+                row.querySelector('.auction-form-yest-input').value = '';
+            }
+        }
+        function reindexHotRows() {
+            const container = document.getElementById('hotFormContainer');
+            if (!container) return;
+            const rows = container.querySelectorAll('.auction-form-row');
+            rows.forEach((row, idx) => {
+                row.id = `hot-row-${idx}`;
+                row.querySelector('.rank-form-number').textContent = idx + 1;
+                row.querySelector('.auction-form-stock-input').name = `hot-stock-${idx}`;
+                row.querySelector('.auction-form-volume-input').name = `hot-volume-${idx}`;
+                row.querySelector('.auction-form-yest-input').name = `hot-yest-${idx}`;
+                row.querySelector('.remove-rank-btn').onclick = () => removeHotRow(idx);
+            });
+        }
+
+        // 添加热门股票行
+        function addHotRow() {
+            const formContainer = document.getElementById('hotFormContainer');
+            if (!formContainer) return;
+            const rowCount = formContainer.querySelectorAll('.auction-form-row').length;
+            const newRow = document.createElement('div');
+            newRow.className = 'auction-form-row';
+            newRow.id = `hot-row-${rowCount}`;
+            newRow.innerHTML = `
+                <div class="rank-form-number">${rowCount + 1}</div>
+                <input type="text" class="form-input auction-form-stock-input" name="hot-stock-${rowCount}" placeholder="股票名称">
+                <input type="text" class="form-input auction-form-volume-input" name="hot-volume-${rowCount}" placeholder="竞价量">
+                <input type="text" class="form-input auction-form-yest-input" name="hot-yest-${rowCount}" placeholder="昨日成交量">
+                <button type="button" class="remove-rank-btn" onclick="removeHotRow(${rowCount})">×</button>
+            `;
+            formContainer.appendChild(newRow);
+        }
+
+        // 备份热门股票数据（用于撤回，独立 localStorage key）
+        function backupHotStocksData(type, date) {
+            try {
+                const targetDate = date || currentDate;
+                const hotData = getHotAuctionData();
+                const backupKey = type === 'import' ? 'hotStocksData_import_backup' : 'hotStocksData_save_backup';
+                const dayBackup = { date: targetDate, data: hotData[targetDate] || null };
+                localStorage.setItem(backupKey, JSON.stringify(dayBackup));
+                localStorage.setItem(backupKey + '_time', new Date().toISOString());
+            } catch (e) {
+                console.warn('热门股票备份失败:', e);
+            }
+            return true;
+        }
+
+        // 撤回热门股票数据（独立 localStorage key，恢复到 _hotAuctionData，同步到 hot_stocks 表）
+        function rollbackHotStocksData() {
+            const importDataStr = localStorage.getItem('hotStocksData_import_backup');
+            const importTime = localStorage.getItem('hotStocksData_import_backup_time');
+            const saveDataStr = localStorage.getItem('hotStocksData_save_backup');
+            const saveTime = localStorage.getItem('hotStocksData_save_backup_time');
+            let backupDataStr = null, backupTime = null, backupType = '';
+            if (importDataStr && saveDataStr) {
+                if (importTime && saveTime && new Date(importTime) >= new Date(saveTime)) {
+                    backupDataStr = importDataStr; backupTime = importTime; backupType = '导入';
+                } else {
+                    backupDataStr = saveDataStr; backupTime = saveTime; backupType = '保存';
+                }
+            } else if (importDataStr) {
+                backupDataStr = importDataStr; backupTime = importTime; backupType = '导入';
+            } else if (saveDataStr) {
+                backupDataStr = saveDataStr; backupTime = saveTime; backupType = '保存';
+            }
+            if (!backupDataStr) { alert('没有可撤回的热门股票数据'); return false; }
+            let backupPayload;
+            try { backupPayload = JSON.parse(backupDataStr); }
+            catch (e) { alert('备份数据已损坏，无法撤回'); return false; }
+            if (!backupPayload || typeof backupPayload !== 'object' || !('date' in backupPayload)) {
+                alert('检测到旧版本的撤回备份，已自动清除，无法撤回。');
+                localStorage.removeItem('hotStocksData_import_backup');
+                localStorage.removeItem('hotStocksData_import_backup_time');
+                localStorage.removeItem('hotStocksData_save_backup');
+                localStorage.removeItem('hotStocksData_save_backup_time');
+                return false;
+            }
+            const backupDate = backupPayload.date;
+            const backupDayData = backupPayload.data;
+            let timeInfo = '';
+            if (backupTime) {
+                const dt = new Date(backupTime);
+                timeInfo = `（${backupType}备份时间：${dt.toLocaleString()}，仅恢复 ${backupDate} 这一天）`;
+            }
+            if (!confirm(`确定要撤回热门股票数据吗？${timeInfo}`)) return false;
+            // 恢复到 _hotAuctionData
+            if (backupDayData === null) {
+                delete getHotAuctionData()[backupDate];
+            } else {
+                getHotAuctionData()[backupDate] = backupDayData;
+            }
+            // 同步到 hot_stocks 表（全量 diff）
+            syncHotStocksListForDate(backupDate).catch(function(err) {
+                console.error('rollback syncHotStocksListForDate 失败:', err);
+            });
+            localStorage.removeItem('hotStocksData_import_backup');
+            localStorage.removeItem('hotStocksData_import_backup_time');
+            localStorage.removeItem('hotStocksData_save_backup');
+            localStorage.removeItem('hotStocksData_save_backup_time');
+            renderAuction('hot');
+            renderHotForm();
+            showHint('已撤回热门股票数据');
+            return true;
+        }
+
+        // 保存热门股票（独立函数，不与 saveAuction 耦合）
+        function saveHotStocks(e) {
+            e.preventDefault();
+            backupHotStocksData('save');
+            buildTopicCache();
+            const formContainer = document.getElementById('hotFormContainer');
+            const rows = formContainer.querySelectorAll('.auction-form-row');
+            const existingList = getHotAuctionData()[currentDate] || [];
+            const hotList = [];
+            rows.forEach((row, index) => {
+                const stockInput = row.querySelector(`[name="hot-stock-${index}"]`);
+                const volumeInput = row.querySelector(`[name="hot-volume-${index}"]`);
+                const yestInput = row.querySelector(`[name="hot-yest-${index}"]`);
+                const stock = stockInput ? stockInput.value.trim() : '';
+                const volume = volumeInput ? volumeInput.value.trim() : '';
+                const yestVolume = yestInput ? yestInput.value.trim() : '';
+                if (stock) {
+                    const existingItem = existingList.find(item => item.stock && item.stock.trim() === stock);
+                    var note = existingItem ? (existingItem.note || '') : '';
+                    var changePct = existingItem ? (existingItem.changePct || '') : '';
+                    var topics = existingItem ? (existingItem.topics || '') : '';
+                    if (!note && !changePct && !topics) {
+                        note = getStockHistoryTopics(stock);
+                        var parsed = parseNoteToFields(note);
+                        changePct = parsed.changePct;
+                        topics = parsed.topics;
+                    }
+                    hotList.push({
+                        stock, volume, yestVolume,
+                        note: note, changePct: changePct, topics: topics,
+                        selected: existingItem ? existingItem.selected : false,
+                        bought: existingItem ? existingItem.bought : false,
+                        sold: existingItem ? existingItem.sold : false,
+                        fixed: existingItem ? existingItem.fixed : false
+                    });
+                }
+            });
+            hotList.sort((a, b) => {
+                const ratioA = parseFloat(a.volume) / parseFloat(a.yestVolume) || 0;
+                const ratioB = parseFloat(b.volume) / parseFloat(b.yestVolume) || 0;
+                return ratioB - ratioA;
+            });
+            getHotAuctionData()[currentDate] = hotList;
+            invalidateTopicCache();
+            renderAuction('hot');
+            const board = document.getElementById('auctionBoard');
+            if (board) board.classList.remove('collapsed');
+            syncHotStocksListForDate(currentDate).catch(function(err) {
+                console.error('saveHotStocks syncHotStocksListForDate 失败:', err);
+            });
+            closeHotEditModal();
+        }
+
+        // 从粘贴导入热门股票数据（本次问题的根因：原 importAuctionFromPaste 写死操作 auction）
+        function importHotFromPaste() {
+            const textarea = document.getElementById('hotPasteInput');
+            const rawText = textarea ? textarea.value : '';
+            const pasteText = rawText.trim();
+            if (!pasteText) {
+                const status = document.getElementById('hotImportStatus');
+                status.textContent = '请先粘贴数据！';
+                status.style.color = '#dc2626';
+                textarea && textarea.focus();
+                return;
+            }
+            backupHotStocksData('import');
+            buildTopicCache();
+            const lines = pasteText.split(/\r?\n/);
+            const hotData = getHotAuctionData();
+            const existingList = hotData[currentDate] || [];
+            let fullDataList = [];
+            let noteList = [];
+            let hasFullData = false;
+
+            lines.forEach((line, index) => {
+                if (!line.trim()) return;
+                if (index === 0 && (line.includes('股票名称') || line.includes('竞价量') || line.includes('涨幅') || line.includes('概念'))) return;
+                const cells = line.split('\t');
+                if (cells.length >= 3) {
+                    const stock = cells[0] ? cells[0].trim() : '';
+                    const col2 = cells[1] ? cells[1].trim() : '';
+                    const col3 = cells[2] ? cells[2].trim() : '';
+                    if (!stock) return;
+                    const col2IsNum = /^-?\d+\.?\d*$/.test(col2) || /^-?\d+\.?\d*%$/.test(col2);
+                    const col3IsNum = /^-?\d+\.?\d*$/.test(col3) || /^-?\d+\.?\d*%$/.test(col3);
+                    const col2HasPercent = col2.includes('%');
+                    if (col2IsNum && !col2HasPercent && col3IsNum) {
+                        hasFullData = true;
+                        const existingItem = existingList.find(item => item.stock && item.stock.trim() === stock);
+                        fullDataList.push({
+                            stock, volume: col2, yestVolume: col3,
+                            note: existingItem ? existingItem.note : '',
+                            changePct: existingItem ? (existingItem.changePct || '') : '',
+                            topics: existingItem ? (existingItem.topics || '') : '',
+                            selected: existingItem ? existingItem.selected : false,
+                            bought: existingItem ? existingItem.bought : false,
+                            sold: existingItem ? existingItem.sold : false,
+                            fixed: existingItem ? existingItem.fixed : false
+                        });
+                    } else {
+                        let noteParts = [];
+                        let conceptPart = '';
+                        if (col2) {
+                            if (col2HasPercent || col2IsNum) noteParts.push(col2);
+                            else conceptPart = col2;
+                        }
+                        if (col3) {
+                            if (conceptPart) conceptPart += col3;
+                            else {
+                                const col3HasPercent = col3.includes('%');
+                                const col3IsNum2 = /^-?\d+\.?\d*$/.test(col3) || /^-?\d+\.?\d*%$/.test(col3);
+                                if (col3HasPercent || col3IsNum2) noteParts.push(col3);
+                                else conceptPart = col3;
+                            }
+                        }
+                        var changePctStr = noteParts.join('');
+                        var topicsStr = conceptPart ? conceptPart.replace(/[，、;；]/g, ',') : '';
+                        var note = buildNoteFromFields(changePctStr, topicsStr);
+                        noteList.push({ stock: stock, note: note, changePct: changePctStr, topics: topicsStr });
+                    }
+                } else if (cells.length === 2) {
+                    const stock = cells[0] ? cells[0].trim() : '';
+                    const col2 = cells[1] ? cells[1].trim() : '';
+                    if (!stock || !col2) return;
+                    if (col2 === '-') return;
+                    const col2HasPercent = col2.includes('%');
+                    const col2IsNum = /^[+-]?\d+\.?\d*$/.test(col2) || /^[+-]?\d+\.?\d*%$/.test(col2);
+                    var changePctStr = '';
+                    var topicsStr = '';
+                    if (col2HasPercent || col2IsNum) changePctStr = col2;
+                    else topicsStr = col2.replace(/[，、;；]/g, ',');
+                    var note = buildNoteFromFields(changePctStr, topicsStr);
+                    noteList.push({ stock: stock, note: note, changePct: changePctStr, topics: topicsStr });
+                } else {
+                    const trimmedLine = line.trim();
+                    const percentMatch = trimmedLine.match(/^(.+?)\s+([+-]?\d+\.?\d*)%$/);
+                    const spaceMatch = trimmedLine.match(/^(.+?)\s+([+-]?\d+\.?\d*)$/);
+                    const conceptMatch = trimmedLine.match(/^(.+?)\s+([^\d].+)$/);
+                    let stock = '';
+                    var changePctStr = '';
+                    var topicsStr = '';
+                    if (percentMatch) { stock = percentMatch[1].trim(); changePctStr = percentMatch[2] + '%'; }
+                    else if (spaceMatch) { stock = spaceMatch[1].trim(); changePctStr = spaceMatch[2] + '%'; }
+                    else if (conceptMatch) { stock = conceptMatch[1].trim(); topicsStr = conceptMatch[2].trim().replace(/[，、;；]/g, ','); }
+                    else return;
+                    if (stock) {
+                        var note = buildNoteFromFields(changePctStr, topicsStr);
+                        noteList.push({ stock: stock, note: note, changePct: changePctStr, topics: topicsStr });
+                    }
+                }
+            });
+
+            if (fullDataList.length === 0 && noteList.length === 0) {
+                const status = document.getElementById('hotImportStatus');
+                status.textContent = '未能解析到有效数据！';
+                status.style.color = '#dc2626';
+                return;
+            }
+
+            let hotList = [...existingList];
+            let fullDataCount = 0, fullDataUpdateCount = 0, noteUpdateCount = 0, noteNewCount = 0;
+
+            fullDataList.forEach(dataItem => {
+                const existingIndex = hotList.findIndex(item => item.stock && item.stock.trim() === dataItem.stock);
+                if (existingIndex >= 0) {
+                    var existingNote = hotList[existingIndex].note || '';
+                    var existingChangePct = hotList[existingIndex].changePct || '';
+                    var existingTopics = hotList[existingIndex].topics || '';
+                    if (!existingNote && !existingChangePct && !existingTopics) {
+                        const historyTopics = getStockHistoryTopics(dataItem.stock);
+                        existingNote = historyTopics;
+                        var parsed = parseNoteToFields(historyTopics);
+                        existingChangePct = parsed.changePct;
+                        existingTopics = parsed.topics;
+                    }
+                    const existingBought = hotList[existingIndex].bought;
+                    const existingSelected = hotList[existingIndex].selected;
+                    const existingSold = hotList[existingIndex].sold;
+                    const existingFixed = hotList[existingIndex].fixed;
+                    hotList[existingIndex] = {
+                        ...hotList[existingIndex],
+                        volume: dataItem.volume, yestVolume: dataItem.yestVolume,
+                        note: existingNote, changePct: existingChangePct, topics: existingTopics,
+                        bought: existingBought, selected: existingSelected, sold: existingSold, fixed: existingFixed
+                    };
+                    fullDataUpdateCount++;
+                } else {
+                    const historyTopics = getStockHistoryTopics(dataItem.stock);
+                    var parsedHist = parseNoteToFields(historyTopics);
+                    hotList.push({
+                        ...dataItem,
+                        note: historyTopics,
+                        changePct: dataItem.changePct || parsedHist.changePct,
+                        topics: dataItem.topics || parsedHist.topics
+                    });
+                    fullDataCount++;
+                }
+            });
+
+            noteList.forEach(noteItem => {
+                const existingIndex = hotList.findIndex(item => item.stock && item.stock.trim() === noteItem.stock);
+                const historyTopics = getStockHistoryTopics(noteItem.stock);
+                var historyParsed = parseNoteToFields(historyTopics);
+                var newChangePct = noteItem.changePct || '';
+                var newTopics = noteItem.topics || '';
+                if (existingIndex >= 0) {
+                    var existingChangePct = hotList[existingIndex].changePct || '';
+                    var existingTopics = hotList[existingIndex].topics || '';
+                    if (!existingChangePct && !existingTopics && hotList[existingIndex].note) {
+                        var exParsed = parseNoteToFields(hotList[existingIndex].note);
+                        existingChangePct = exParsed.changePct;
+                        existingTopics = exParsed.topics;
+                    }
+                    if (newChangePct) {
+                        hotList[existingIndex].changePct = newChangePct;
+                        if (!existingTopics && historyParsed.topics) existingTopics = historyParsed.topics;
+                        hotList[existingIndex].topics = existingTopics;
+                    } else if (newTopics) {
+                        var allTopics = new Set();
+                        if (existingTopics) existingTopics.split(/[,，、;；]/).forEach(function(t) { t = t.trim(); if (t) allTopics.add(t); });
+                        if (historyParsed.topics) historyParsed.topics.split(/[,，、;；]/).forEach(function(t) { t = t.trim(); if (t) allTopics.add(t); });
+                        newTopics.split(/[,，、;；]/).forEach(function(t) { t = t.trim(); if (t) allTopics.add(t); });
+                        hotList[existingIndex].topics = Array.from(allTopics).join(',');
+                        hotList[existingIndex].changePct = existingChangePct || historyParsed.changePct;
+                    } else {
+                        hotList[existingIndex].changePct = existingChangePct || historyParsed.changePct;
+                        hotList[existingIndex].topics = existingTopics || historyParsed.topics;
+                    }
+                    hotList[existingIndex].note = buildNoteFromFields(hotList[existingIndex].changePct, hotList[existingIndex].topics);
+                    noteUpdateCount++;
+                } else {
+                    var finalChangePct = newChangePct || historyParsed.changePct;
+                    var finalTopics = noteItem.topics || '';
+                    if (historyParsed.topics && !finalTopics) finalTopics = historyParsed.topics;
+                    else if (historyParsed.topics && finalTopics) {
+                        var allTopics2 = new Set();
+                        finalTopics.split(/[,，、;；]/).forEach(function(t) { t = t.trim(); if (t) allTopics2.add(t); });
+                        historyParsed.topics.split(/[,，、;；]/).forEach(function(t) { t = t.trim(); if (t) allTopics2.add(t); });
+                        finalTopics = Array.from(allTopics2).join(',');
+                    }
+                    hotList.push({
+                        stock: noteItem.stock, volume: '', yestVolume: '',
+                        note: buildNoteFromFields(finalChangePct, finalTopics),
+                        changePct: finalChangePct, topics: finalTopics, selected: false
+                    });
+                    noteNewCount++;
+                }
+            });
+
+            if (fullDataList.length > 0) {
+                hotList.sort((a, b) => {
+                    const ratioA = parseFloat(a.volume) / parseFloat(a.yestVolume) || 0;
+                    const ratioB = parseFloat(b.volume) / parseFloat(b.yestVolume) || 0;
+                    return ratioB - ratioA;
+                });
+            }
+
+            // 写入 _hotAuctionData（不写 localStorage，不调 saveModule/saveData）
+            getHotAuctionData()[currentDate] = hotList;
+            invalidateTopicCache();
+            // 同步到 hot_stocks 表（不调 pushAuctionDataToCloud）
+            syncHotStocksListForDate(currentDate).catch(function(err) {
+                console.error('importHotFromPaste syncHotStocksListForDate 失败:', err);
+            });
+            const pasteInput = document.getElementById('hotPasteInput');
+            if (pasteInput) pasteInput.value = '';
+            const statusEl = document.getElementById('hotImportStatus');
+            let statusMsg = '✅ ';
+            if (fullDataCount > 0) statusMsg += `新增${fullDataCount}条`;
+            if (fullDataUpdateCount > 0) statusMsg += ` 更新${fullDataUpdateCount}条`;
+            if (noteUpdateCount > 0) statusMsg += ` 更新注释${noteUpdateCount}条`;
+            if (noteNewCount > 0) statusMsg += ` 新增注释${noteNewCount}条`;
+            statusEl.textContent = statusMsg;
+            statusEl.style.color = '#059669';
+            // 刷新表单和前台（不调 renderList/recalcDuibanFromAuction/syncCloseChunk）
+            setTimeout(() => renderHotForm(), 0);
+            setTimeout(() => renderAuction('hot'), 20);
+            const submitBtn = document.querySelector('#hotForm .submit-btn');
+            if (submitBtn) submitBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        // 替换概念（热门股票独立版本）
+        function replaceHotConceptFromPaste() {
+            const textarea = document.getElementById('hotPasteInput');
+            const rawText = textarea ? textarea.value : '';
+            const pasteText = rawText.trim();
+            if (!pasteText) {
+                const status = document.getElementById('hotImportStatus');
+                status.textContent = '请先粘贴数据！';
+                status.style.color = '#dc2626';
+                textarea && textarea.focus();
+                return;
+            }
+            const lines = pasteText.split(/\r?\n/);
+            const hotData = getHotAuctionData();
+            const existingList = hotData[currentDate] || [];
+            let replaceCount = 0, notFoundCount = 0;
+            const notFoundStocks = [];
+            lines.forEach(line => {
+                if (!line.trim()) return;
+                const cells = line.split('\t');
+                let stock = '', newConcept = '';
+                if (cells.length >= 2) {
+                    stock = cells[0] ? cells[0].trim() : '';
+                    newConcept = cells[1] ? cells[1].trim() : '';
+                } else if (cells.length === 1) {
+                    const parts = cells[0].trim().split(/\s+/);
+                    if (parts.length >= 2) { stock = parts[0]; newConcept = parts.slice(1).join(''); }
+                }
+                if (!stock || !newConcept) return;
+                const existingIndex = existingList.findIndex(item => item.stock && item.stock.trim() === stock);
+                if (existingIndex >= 0) {
+                    const existingNote = existingList[existingIndex].note || '';
+                    let newNote = '';
+                    const bracketPattern = /(涨停|跌停|-?\d+\.?\d*%?)\(([^)]+)\)/g;
+                    const matches = [...existingNote.matchAll(bracketPattern)];
+                    if (matches.length > 0) {
+                        const lastMatch = matches[matches.length - 1];
+                        const fullMatch = lastMatch[0];
+                        const prefix = lastMatch[1];
+                        const beforeLastMatch = existingNote.substring(0, lastMatch.index);
+                        const afterLastMatch = existingNote.substring(lastMatch.index + fullMatch.length);
+                        newNote = beforeLastMatch + prefix + '(' + newConcept + ')' + afterLastMatch;
+                    } else {
+                        const percentPattern = /(-?\d+\.?\d*%)/g;
+                        const percentMatches = [...existingNote.matchAll(percentPattern)];
+                        if (percentMatches.length > 0) {
+                            const lastPercentMatch = percentMatches[percentMatches.length - 1];
+                            const beforeLastPercent = existingNote.substring(0, lastPercentMatch.index + lastPercentMatch[0].length);
+                            const afterLastPercent = existingNote.substring(lastPercentMatch.index + lastPercentMatch[0].length);
+                            newNote = beforeLastPercent + '(' + newConcept + ')' + afterLastPercent;
+                        } else if (existingNote.includes('涨停')) {
+                            newNote = existingNote.replace(/涨停/, '涨停(' + newConcept + ')');
+                        } else if (existingNote.includes('跌停')) {
+                            newNote = existingNote.replace(/跌停/, '跌停(' + newConcept + ')');
+                        } else {
+                            newNote = existingNote + '(' + newConcept + ')';
+                        }
+                    }
+                    existingList[existingIndex].note = newNote;
+                    var parsed = parseNoteToFields(newNote);
+                    existingList[existingIndex].changePct = parsed.changePct;
+                    existingList[existingIndex].topics = parsed.topics;
+                    replaceCount++;
+                } else {
+                    notFoundCount++;
+                    notFoundStocks.push(stock);
+                }
+            });
+            if (replaceCount > 0) {
+                getHotAuctionData()[currentDate] = existingList;
+                invalidateTopicCache();
+                syncHotStocksListForDate(currentDate).catch(function(err) {
+                    console.error('replaceHotConceptFromPaste syncHotStocksListForDate 失败:', err);
+                });
+                renderHotForm();
+                renderAuction('hot');
+            }
+            const pasteInput = document.getElementById('hotPasteInput');
+            if (pasteInput) pasteInput.value = '';
+            const statusEl = document.getElementById('hotImportStatus');
+            let statusMsg = '✅ 替换了 ' + replaceCount + ' 条概念';
+            if (notFoundCount > 0) statusMsg += '，未找到: ' + notFoundStocks.slice(0, 3).join(', ') + (notFoundCount > 3 ? '...' : '');
+            statusEl.textContent = statusMsg;
+            statusEl.style.color = replaceCount > 0 ? '#059669' : '#dc2626';
+            const submitBtn = document.querySelector('#hotForm .submit-btn');
+            if (submitBtn) submitBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        // 历史数据补录开关
+        function onHotHistoryFillToggleChange() {
+            const checked = document.getElementById('hotHistoryFillToggle').checked;
+            const body = document.getElementById('hotHistoryFillBody');
+            if (body) body.style.display = checked ? 'block' : 'none';
+            if (checked) {
+                const dateInput = document.getElementById('hotHistoryFillDate');
+                if (dateInput && !dateInput.value) dateInput.value = currentDate;
+            }
+        }
+
+        // 历史数据补录（热门股票独立版本）
+        function importHotHistoryFill() {
+            const textarea = document.getElementById('hotHistoryFillInput');
+            const rawText = textarea ? textarea.value : '';
+            const pasteText = rawText.trim();
+            const statusEl = document.getElementById('hotHistoryFillStatus');
+            const dateInput = document.getElementById('hotHistoryFillDate');
+            const targetDate = dateInput ? dateInput.value : '';
+            if (!targetDate) {
+                if (statusEl) { statusEl.textContent = '请先选择目标日期！'; statusEl.style.color = '#dc2626'; }
+                return;
+            }
+            if (!pasteText) {
+                if (statusEl) { statusEl.textContent = '请先粘贴数据！'; statusEl.style.color = '#dc2626'; }
+                textarea && textarea.focus();
+                return;
+            }
+            const colTypeRadio = document.querySelector('input[name="hotHistoryFillColType"]:checked');
+            const twoColField = colTypeRadio ? colTypeRadio.value : 'volume';
+            backupHotStocksData('import', targetDate);
+            const lines = pasteText.split(/\r?\n/);
+            const hotData = getHotAuctionData();
+            const targetList = [...(hotData[targetDate] || [])];
+            const currentStockSet = new Set((hotData[currentDate] || []).map(item => item.stock && item.stock.trim()).filter(Boolean));
+            let filledCount = 0, addedCount = 0, skippedHasValue = 0, skippedNotInCurrent = 0, invalidCount = 0;
+
+            lines.forEach((line, index) => {
+                if (!line.trim()) return;
+                if (index === 0 && (line.includes('股票名称') || line.includes('竞价量') || line.includes('昨日成交量'))) return;
+                const rawCells = line.split('\t');
+                const stock = rawCells[0] ? rawCells[0].trim() : '';
+                if (!stock) { invalidCount++; return; }
+                if (!currentStockSet.has(stock)) { skippedNotInCurrent++; return; }
+                let existingIndex = targetList.findIndex(item => item.stock && item.stock.trim() === stock);
+                let isNewRecord = false;
+                if (existingIndex < 0) {
+                    targetList.push({ stock, volume: '', yestVolume: '', note: '', changePct: '', topics: '', selected: false, bought: false, sold: false, fixed: false });
+                    existingIndex = targetList.length - 1;
+                    isNewRecord = true;
+                }
+                const nonEmptyCells = rawCells.slice(1).map(c => c.trim()).filter(c => c !== '');
+                if (nonEmptyCells.length >= 2) {
+                    const volumeText = rawCells[1] ? rawCells[1].trim() : '';
+                    const yestText = rawCells[2] ? rawCells[2].trim() : '';
+                    const parsedVolume = parseVolumeOnlyText(volumeText);
+                    const parsedYest = parseVolumeOnlyText(yestText);
+                    if (parsedVolume === null && parsedYest === null) {
+                        invalidCount++;
+                        if (isNewRecord) targetList.pop();
+                        return;
+                    }
+                    const item = targetList[existingIndex];
+                    let didFill = false;
+                    if (parsedVolume !== null) {
+                        const isEmpty = item.volume === '' || item.volume == null;
+                        if (isEmpty) { item.volume = parsedVolume; filledCount++; didFill = true; }
+                        else skippedHasValue++;
+                    }
+                    if (parsedYest !== null) {
+                        const isEmpty = item.yestVolume === '' || item.yestVolume == null;
+                        if (isEmpty) { item.yestVolume = parsedYest; filledCount++; didFill = true; }
+                        else skippedHasValue++;
+                    }
+                    if (didFill) { targetList[existingIndex] = { ...item }; if (isNewRecord) addedCount++; }
+                    else if (isNewRecord) targetList.pop();
+                } else if (nonEmptyCells.length === 1) {
+                    const valueText = nonEmptyCells[0];
+                    const parsedValue = parseVolumeOnlyText(valueText);
+                    if (parsedValue === null) { invalidCount++; if (isNewRecord) targetList.pop(); return; }
+                    const item = targetList[existingIndex];
+                    const existingFieldValue = item[twoColField];
+                    const isEmpty = existingFieldValue === '' || existingFieldValue == null;
+                    if (isEmpty) { targetList[existingIndex] = { ...item, [twoColField]: parsedValue }; filledCount++; if (isNewRecord) addedCount++; }
+                    else { skippedHasValue++; if (isNewRecord) targetList.pop(); }
+                } else { invalidCount++; if (isNewRecord) targetList.pop(); }
+            });
+
+            if (filledCount === 0) {
+                if (statusEl) {
+                    let msg = '未补录任何数据';
+                    const parts = [];
+                    if (skippedNotInCurrent > 0) parts.push(`${skippedNotInCurrent}条不在当前股票列表中`);
+                    if (skippedHasValue > 0) parts.push(`${skippedHasValue}个字段已有值`);
+                    if (invalidCount > 0) parts.push(`${invalidCount}行无法识别`);
+                    if (parts.length) msg += `（${parts.join('，')}）`;
+                    statusEl.textContent = msg;
+                    statusEl.style.color = '#dc2626';
+                }
+                return;
+            }
+            getHotAuctionData()[targetDate] = targetList;
+            invalidateTopicCache();
+            syncHotStocksListForDate(targetDate).catch(function(err) {
+                console.error('importHotHistoryFill syncHotStocksListForDate 失败:', err);
+            });
+            if (textarea) textarea.value = '';
+            let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
+            if (addedCount > 0) statusMsg += ` 新增${addedCount}条数据记录`;
+            if (skippedNotInCurrent > 0) statusMsg += ` 跳过${skippedNotInCurrent}条(不在当前股票列表中)`;
+            if (skippedHasValue > 0) statusMsg += ` 跳过${skippedHasValue}个(已有值)`;
+            if (invalidCount > 0) statusMsg += ` 无法识别${invalidCount}行`;
+            if (statusEl) { statusEl.textContent = statusMsg; statusEl.style.color = '#059669'; }
+            if (targetDate === currentDate) {
+                setTimeout(() => renderHotForm(), 0);
+                setTimeout(() => renderAuction('hot'), 20);
+            }
+        }
+
+        // 清除题材（热门股票独立版本）
+        function clearAllHotConcepts() {
+            const hotData = getHotAuctionData();
+            const existingList = hotData[currentDate] || [];
+            if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
+            let clearCount = 0;
+            existingList.forEach(item => {
+                if ((item.note && item.note.includes('(')) || item.topics) {
+                    let newNote = item.note || '';
+                    newNote = newNote.replace(/\(([^)]+)\)/g, '');
+                    item.note = newNote;
+                    item.topics = '';
+                    var parsed = parseNoteToFields(newNote);
+                    item.changePct = parsed.changePct;
+                    clearCount++;
+                }
+            });
+            if (clearCount > 0) {
+                getHotAuctionData()[currentDate] = existingList;
+                invalidateTopicCache();
+                syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotConcepts syncHotStocksListForDate 失败:', err); });
+                renderHotForm();
+                renderAuction('hot');
+                alert('✅ 已清除 ' + clearCount + ' 条题材数据');
+            } else {
+                alert('没有找到需要清除的题材数据');
+            }
+        }
+
+        // 清除文字（热门股票独立版本）
+        function clearAllHotText() {
+            const hotData = getHotAuctionData();
+            const existingList = hotData[currentDate] || [];
+            if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
+            let clearCount = 0;
+            existingList.forEach(item => {
+                if (item.note) {
+                    const percentMatches = item.note.match(/-?\d+\.?\d*%/g) || [];
+                    const bracketMatches = item.note.match(/\([^)]+\)/g) || [];
+                    const ztDtMatches = item.note.match(/涨停|跌停/g) || [];
+                    const uniqueZtDt = [...new Set(ztDtMatches)];
+                    const newNote = percentMatches.join('') + uniqueZtDt.join('') + bracketMatches.join('');
+                    if (newNote !== item.note) {
+                        item.note = newNote;
+                        var parsed = parseNoteToFields(newNote);
+                        item.changePct = parsed.changePct;
+                        item.topics = parsed.topics;
+                        clearCount++;
+                    }
+                }
+            });
+            if (clearCount > 0) {
+                getHotAuctionData()[currentDate] = existingList;
+                invalidateTopicCache();
+                syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotText syncHotStocksListForDate 失败:', err); });
+                renderHotForm();
+                renderAuction('hot');
+                alert('✅ 已清除 ' + clearCount + ' 条文字数据');
+            } else {
+                alert('没有找到需要清除的文字数据');
+            }
+        }
+
+        // 清除注释（热门股票独立版本）
+        function clearAllHotNotes() {
+            const hotData = getHotAuctionData();
+            const existingList = hotData[currentDate] || [];
+            if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
+            let clearCount = 0;
+            existingList.forEach(item => {
+                if (item.note) { item.note = ''; clearCount++; }
+            });
+            if (clearCount > 0) {
+                getHotAuctionData()[currentDate] = existingList;
+                invalidateTopicCache();
+                syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotNotes syncHotStocksListForDate 失败:', err); });
+                renderHotForm();
+                renderAuction('hot');
+                alert('✅ 已清除 ' + clearCount + ' 条注释数据');
+            } else {
+                alert('没有找到需要清除的注释数据');
+            }
+        }
+
+        // 清空所有行（热门股票独立版本）
+        function clearAllHotRows() {
+            const hotData = getHotAuctionData();
+            const existingList = hotData[currentDate] || [];
+            if (existingList.length === 0) { alert('当前没有数据！'); return; }
+            if (!confirm(`确定要清空当前 ${existingList.length} 条热门股票数据？此操作不可撤回。`)) return;
+            getHotAuctionData()[currentDate] = [];
+            invalidateTopicCache();
+            syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotRows syncHotStocksListForDate 失败:', err); });
+            renderHotForm();
+            renderAuction('hot');
+            alert('✅ 已清空所有热门股票行');
+        }
+
+        // AI识图（热门股票独立版本）：打开后写入 hotPasteInput，调用 importHotFromPaste
+        function openHotAiVisionModal() {
+            _aiVisionTarget = 'hot';
+            _aiVisionImages = [];
+            document.getElementById('aiVisionThumbs').innerHTML = '';
+            document.getElementById('aiVisionResult').value = '';
+            document.getElementById('aiVisionStatus').textContent = '';
+            document.getElementById('aiVisionModal').style.display = 'block';
         }
 
         // ============ 股票代码映射（stockCodeMap）============
@@ -11516,19 +12379,6 @@
             });
             
             getGroupData(currentGroup)[currentDate] = auctionList;
-
-            if (currentGroup === 'hot') {
-                // 热门股票：不写 localStorage，不触发早盘竞价专用同步；直接同步 hot_stocks 表
-                invalidateTopicCache();
-                renderAuction('hot');
-                const board = document.getElementById('auctionBoard');
-                if (board) board.classList.remove('collapsed');
-                syncHotStocksListForDate(currentDate).catch(function(err) {
-                    console.error('syncHotStocksListForDate 失败:', err);
-                });
-                closeAuctionModal();
-                return;
-            }
 
             // 早盘竞价：原有逻辑
             saveData();
@@ -27872,6 +28722,7 @@
     const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvbnFmZ2V5eG5ud2ljam9wc2huIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg2NjY3NzEsImV4cCI6MjA5NDI0Mjc3MX0.el-W10JIjr9iQXEKNxV7nLNdhZfOQp6waTY7ZSH27Jg';
 
     let _aiVisionImages = []; // [{name, base64}]
+    let _aiVisionTarget = null; // 'auction' | 'hot'，标记 AI 识图来源弹窗
 
     const AI_VISION_PROMPTS = [
       // 0 - 占比
@@ -27888,6 +28739,7 @@
     ];
 
     function openAiVisionModal() {
+      _aiVisionTarget = 'auction';
       _aiVisionImages = [];
       document.getElementById('aiVisionThumbs').innerHTML = '';
       document.getElementById('aiVisionResult').value = '';
@@ -28030,18 +28882,21 @@
         document.getElementById('aiVisionStatus').style.color = '#dc2626';
         return;
       }
-      // 写入 auctionModal 的 textarea
-      const textarea = document.getElementById('auctionPasteInput');
-      if (!textarea) { alert('找不到竞价输入框'); return; }
+      // 根据来源弹窗决定写入哪个 textarea、调用哪组函数
+      const isHot = _aiVisionTarget === 'hot';
+      const textareaId = isHot ? 'hotPasteInput' : 'auctionPasteInput';
+      const textarea = document.getElementById(textareaId);
+      if (!textarea) { alert('找不到输入框'); return; }
       textarea.value = result;
 
       // 根据写入方式调用对应函数
       const action = document.querySelector('input[name="aiVisionAction"]:checked').value;
       if (action === 'import') {
-        importAuctionFromPaste();
+        if (isHot) importHotFromPaste(); else importAuctionFromPaste();
       } else {
-        replaceConceptFromPaste();
+        if (isHot) replaceHotConceptFromPaste(); else replaceConceptFromPaste();
       }
+      _aiVisionTarget = null; // 用完重置
       closeAiVisionModal();
     }
     </script>
