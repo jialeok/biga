@@ -12946,7 +12946,7 @@
             }
 
             // 观察组：上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与"竞/昨数"统计保持一致
-            const _obsStocks = getJingYestHighlightSetForDate(getPreviousTradingDay(currentDate));
+            const _obsStocks = getJingYestHighlightSetForDate(getPreviousTradingDay(currentDate), dataSource);
             const _autoAddedSet = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + currentDate) || '[]'));
 
             // 拆分渲染顺序：观察组 + 常规组
@@ -15683,7 +15683,7 @@
         }
 
         function openAuctionNoteEditFromPage2(stockName) {
-            const auctionData = getAuctionData();
+            const auctionData = getGroupData(currentGroup);
             const auctionList = auctionData[currentDate] || [];
             const item = auctionList.find(a => a.stock === stockName);
             if (!item) {
@@ -15701,12 +15701,18 @@
                 if (index !== -1) {
                     auctionList[index].note = normalizedNote;
                     auctionData[currentDate] = auctionList;
-                    saveData();
 
-                    // 同步推送到 auction_data 云表，避免下次 pullFromCloud 时被云端旧数据覆盖丢失
-                    pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
-                        console.warn('pushAuctionDataToCloud 失败（openAuctionNoteEditFromPage2）:', e);
-                    });
+                    if (currentGroup === 'hot') {
+                        syncHotStocksListForDate(currentDate).catch(function(e) {
+                            console.warn('syncHotStocksListForDate 失败（openAuctionNoteEditFromPage2）:', e);
+                        });
+                    } else {
+                        saveData();
+                        // 同步推送到 auction_data 云表，避免下次 pullFromCloud 时被云端旧数据覆盖丢失
+                        pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
+                            console.warn('pushAuctionDataToCloud 失败（openAuctionNoteEditFromPage2）:', e);
+                        });
+                    }
 
                     // 同步更新已添加股票的收盘涨幅
                     syncStockCloseFromAuction(stockName, normalizedNote);
@@ -15715,7 +15721,7 @@
                     syncStockTopicsFromAuction();
                     saveModule('stocks');
                     
-                    renderAuction();
+                    renderAuction(currentGroup);
                     renderList();
                 }
             }
@@ -16181,7 +16187,7 @@
             
             // 获取题材：先从当前 note 中提取，如果没有则从历史记录查找
             let xgcaiti = '';
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             const currentStock = auctionList.find(s => s.stock && s.stock.trim() === stockName.trim());
             
             if (currentStock && currentStock.note) {
@@ -16244,13 +16250,13 @@
 
             // 将竞价看板中对应的行设为选中状态
             // 注意：需要先重新加载 allData，因为 saveData() 可能会更新 allData 引用
-            const freshAuctionList = getTodayAuction();
+            const freshAuctionList = getTodayGroupList(currentGroup);
             const auctionIndex = freshAuctionList.findIndex(s => s.stock && s.stock.trim() === stockName.trim());
             if (auctionIndex >= 0) {
                 freshAuctionList[auctionIndex].bought = true; // 标记为买入状态，显示浅红色
                 freshAuctionList[auctionIndex].fixed = true; // 标记为固定状态
-                saveData();
-                renderAuction();
+                if (currentGroup === 'hot') { syncHotStocksListForDate(currentDate).catch(function(){}); } else { saveData(); }
+                renderAuction(currentGroup);
             }
 
             showToast(`✅ 已添加 "${stockName}" 到股票列表`);
@@ -16261,10 +16267,10 @@
         function expandAuctionTrendPanel(index) {
             const panel = document.getElementById('auctionTrendPanel-' + index);
             if (!panel) return;
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             const item = auctionList[index];
             if (!item || !item.stock) return;
-            const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5);
+            const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5, currentGroup);
             panel.innerHTML = renderAuctionTrendHtml(history);
             panel.style.display = 'block';
         }
@@ -16312,7 +16318,7 @@
                 return;
             }
 
-            const history = getAuctionStockHistory(stockName.trim(), currentDate, 5);
+            const history = getAuctionStockHistory(stockName.trim(), currentDate, 5, currentGroup);
             panel.innerHTML = renderAuctionTrendHtml(history);
             panel.style.display = 'block';
         }
@@ -16329,7 +16335,7 @@
                 const panel = document.getElementById('auctionTrendPanelP2-' + rowKey);
                 if (!panel) return;
 
-                const history = getAuctionStockHistory(stockName, currentDate, 5);
+                const history = getAuctionStockHistory(stockName, currentDate, 5, currentGroup);
                 panel.innerHTML = renderAuctionTrendHtml(history);
                 panel.style.display = 'block';
             });
@@ -16380,7 +16386,7 @@
                     panel.style.display = 'none';
                     panel.innerHTML = '';
                 } else {
-                    const history = getAuctionStockHistory(stockName, currentDate, 5);
+                    const history = getAuctionStockHistory(stockName, currentDate, 5, currentGroup);
                     panel.innerHTML = renderAuctionTrendHtml(history);
                     panel.style.display = 'block';
                 }
@@ -16697,7 +16703,7 @@
             const panel = document.getElementById('auctionTrendPanel-' + index);
             if (!panel) return;
 
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             const item = auctionList[index];
             const stockKey = item && item.stock ? item.stock.trim() : null;
 
@@ -17054,7 +17060,7 @@
         }
 
         function toggleAuctionRowSelect(index) {
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             if (auctionList[index]) {
                 // 如果是固定状态（来自买入/持有/卖出标签），不能取消，直接返回
                 if (auctionList[index].fixed === true) {
@@ -17083,7 +17089,7 @@
         // 清除所有行的选中状态
         function clearAllAuctionSelections() {
             // 清除数据中的 selected 状态
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             let hasSelection = false;
             auctionList.forEach(item => {
                 if (item.selected) {
@@ -17111,7 +17117,7 @@
 
         // 显示注释输入框
         function showAuctionNoteInput(index, element) {
-            const auctionList = getTodayAuction();
+            const auctionList = getTodayGroupList(currentGroup);
             const currentNote = getDisplayNote(auctionList[index]);
             const note = prompt('请输入注释（如涨幅）：', currentNote);
             if (note !== null) {
@@ -19881,7 +19887,7 @@
             
             // 五、早盘竞价第一页占比≥4.5%股票数量
             try {
-                const todayAuction = getTodayAuction();
+                const todayAuction = getTodayGroupList(currentGroup);
                 if (todayAuction && todayAuction.length > 0) {
                     let ratio45Count = 0;
                     todayAuction.forEach(item => {
@@ -19908,9 +19914,9 @@
             
             // 六、有星题材（第三页）
             try {
-                const todayAuction = getTodayAuction();
+                const todayAuction = getTodayGroupList(currentGroup);
                 const yesterdayDate = getYesterdayDate(currentDate);
-                const yesterdayAuction = yesterdayDate ? getAuctionData()[yesterdayDate] : [];
+                const yesterdayAuction = yesterdayDate ? getGroupData(currentGroup)[yesterdayDate] : [];
                 const todayGroups = getTopicGroups(todayAuction || []);
                 const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
                 
@@ -19997,10 +20003,10 @@
             // 七、强度分（需要用到昨天数据）
             let yesterdayAuction = [];
             try {
-                yesterdayAuction = getYesterdayDate(currentDate) ? getAuctionData()[getYesterdayDate(currentDate)] : [];
+                yesterdayAuction = getYesterdayDate(currentDate) ? getGroupData(currentGroup)[getYesterdayDate(currentDate)] : [];
             } catch(e) { yesterdayAuction = []; }
-            
-            const auctionData = getAuctionData();
+
+            const auctionData = getGroupData(currentGroup);
             const auctionList = auctionData[currentDate] || [];
             if (auctionList.length > 0) {
                 let strongCount = 0;
@@ -20186,7 +20192,7 @@
             
             // 五、早盘竞价第一页占比≥4.5%股票数量
             try {
-                const todayAuction = getTodayAuction();
+                const todayAuction = getTodayGroupList(currentGroup);
                 if (todayAuction && todayAuction.length > 0) {
                     let ratio45Count = 0;
                     todayAuction.forEach(item => {
@@ -20213,9 +20219,9 @@
             
             // 六、有星题材（第三页）
             try {
-                const todayAuction = getTodayAuction();
+                const todayAuction = getTodayGroupList(currentGroup);
                 const yesterdayDate = getYesterdayDate(currentDate);
-                const yesterdayAuction = yesterdayDate ? getAuctionData()[yesterdayDate] : [];
+                const yesterdayAuction = yesterdayDate ? getGroupData(currentGroup)[yesterdayDate] : [];
                 const todayGroups = getTopicGroups(todayAuction || []);
                 const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
                 
@@ -20302,10 +20308,10 @@
             // 七、强度分（需要用到昨天数据）
             let yesterdayAuction = [];
             try {
-                yesterdayAuction = getYesterdayDate(currentDate) ? getAuctionData()[getYesterdayDate(currentDate)] : [];
+                yesterdayAuction = getYesterdayDate(currentDate) ? getGroupData(currentGroup)[getYesterdayDate(currentDate)] : [];
             } catch(e) { yesterdayAuction = []; }
-            
-            const auctionData = getAuctionData();
+
+            const auctionData = getGroupData(currentGroup);
             const auctionList = auctionData[currentDate] || [];
             if (auctionList.length > 0) {
                 let strongCount = 0;
@@ -20473,7 +20479,7 @@
             
             // 五、早盘竞价第一页占比≥4.5%股票数量
             try {
-                const todayAuction = getTodayAuction();
+                const todayAuction = getTodayGroupList(currentGroup);
                 if (todayAuction && todayAuction.length > 0) {
                     let ratio45Count = 0;
                     todayAuction.forEach(item => {
@@ -20500,9 +20506,9 @@
             
             // 六、有星题材（第三页）
             try {
-                const todayAuction = getTodayAuction();
+                const todayAuction = getTodayGroupList(currentGroup);
                 const yesterdayDate = getYesterdayDate(currentDate);
-                const yesterdayAuction = yesterdayDate ? getAuctionData()[yesterdayDate] : [];
+                const yesterdayAuction = yesterdayDate ? getGroupData(currentGroup)[yesterdayDate] : [];
                 const todayGroups = getTopicGroups(todayAuction || []);
                 const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
                 
@@ -20589,10 +20595,10 @@
             // 七、强度分（需要用到昨天数据）
             let yesterdayAuction = [];
             try {
-                yesterdayAuction = getYesterdayDate(currentDate) ? getAuctionData()[getYesterdayDate(currentDate)] : [];
+                yesterdayAuction = getYesterdayDate(currentDate) ? getGroupData(currentGroup)[getYesterdayDate(currentDate)] : [];
             } catch(e) { yesterdayAuction = []; }
-            
-            const auctionData = getAuctionData();
+
+            const auctionData = getGroupData(currentGroup);
             const auctionList = auctionData[currentDate] || [];
             if (auctionList.length > 0) {
                 let strongCount = 0;
