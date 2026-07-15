@@ -8865,6 +8865,8 @@
         // 从 hot_stocks 表全量读取，组装成 {date: [items]} 结构
         // 同时构建 _hotFullRowCache 全量快照缓存（含 in_watchlist=false 行），供历史行情查询
         async function loadHotStocksFromCloud() {
+            // 若刚推送了本地修改（saveAuction 的 hot 分支），跳过重新加载，防止云端空数据覆盖本地修改
+            if (_justPushedHotAuction) return;
             const sb = getSupabase();
             const result = {};
             _hotFullRowCache = {};
@@ -9099,6 +9101,15 @@
 
             // 重新渲染当前分组的数据
             renderAuction(g);
+
+            // 切换 Tab 后滚动到看板顶部（延迟执行，覆盖 renderAuction 内部的滚动位置恢复）
+            setTimeout(function() {
+                const board = document.getElementById('auctionBoard');
+                if (board) {
+                    const rect = board.getBoundingClientRect();
+                    window.scrollTo({ top: rect.top + window.scrollY - 10 });
+                }
+            }, 60);
         }
 
         // 热门股票渲染：复用 renderAuction 底层逻辑，dataSource='hot'
@@ -9203,6 +9214,8 @@
 
         // 热门股票脏日期全量同步（照抄 syncAuctionListForDate，改表名 hot_stocks、数据源 getGroupData('hot')）
         async function syncHotStocksListForDate(date) {
+            _justPushedHotAuction = true; // 标记刚推送，5秒内忽略自己触发的 Realtime 通知
+            setTimeout(function() { _justPushedHotAuction = false; }, 5000);
             const sb = getSupabase();
             const localList = (getGroupData('hot')[date] || []).filter(function(s) { return s && s.stock; });
             const localStocks = new Set(localList.map(function(s) { return s.stock.trim(); }));
