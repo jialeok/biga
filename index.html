@@ -7197,7 +7197,7 @@
                 </div>
                 <div id="hotHistoryFillBody" style="display: none; margin-top: 8px;">
                     <div style="font-size: 11px; color: #1e40af; margin-bottom: 8px;">
-                        只补空值；股票需在当前列表中存在才会补录（不允许导入无关股票）；三列自动补两项，两列按右侧类型补一项
+                        只补空值；股票需在当前列表中存在才会补录（不允许导入无关股票）；三列自动补两项，两列按右侧类型补一项；支持空格或TAB分隔手写录入
                     </div>
                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
                         <input type="date" id="hotHistoryFillDate" style="padding: 4px 6px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px;">
@@ -7208,7 +7208,7 @@
                             <input type="radio" name="hotHistoryFillColType" value="yestVolume"> 昨日成交量
                         </label>
                     </div>
-                    <textarea id="hotHistoryFillInput" placeholder="三列：股票名称[TAB]竞价量[TAB]昨日成交量&#10;两列：股票名称[TAB]数字（按上方选择类型补录）" style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <textarea id="hotHistoryFillInput" placeholder="三列：股票名称 竞价量 昨日成交量&#10;两列：股票名称 数字（按上方选择类型补录）&#10;空格或TAB分隔均可" style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
                     <button type="button" onclick="importHotHistoryFill()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; border: none; border-radius: 4px; cursor: pointer;">补录历史数据</button>
                     <span id="hotHistoryFillStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
                 </div>
@@ -7281,7 +7281,7 @@
                 </div>
                 <div id="auctionHistoryFillBody" style="display: none; margin-top: 8px;">
                     <div style="font-size: 11px; color: #1e40af; margin-bottom: 8px;">
-                        只补空值；股票需在当前列表中存在才会补录（不允许导入无关股票）；三列自动补两项，两列按右侧类型补一项
+                        只补空值；股票需在当前列表中存在才会补录（不允许导入无关股票）；三列自动补两项，两列按右侧类型补一项；支持空格或TAB分隔手写录入
                     </div>
                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
                         <input type="date" id="auctionHistoryFillDate" style="padding: 4px 6px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px;">
@@ -7292,7 +7292,7 @@
                             <input type="radio" name="auctionHistoryFillColType" value="yestVolume"> 昨日成交量
                         </label>
                     </div>
-                    <textarea id="auctionHistoryFillInput" placeholder="三列：股票名称[TAB]竞价量[TAB]昨日成交量&#10;两列：股票名称[TAB]数字（按上方选择类型补录）" style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
+                    <textarea id="auctionHistoryFillInput" placeholder="三列：股票名称 竞价量 昨日成交量&#10;两列：股票名称 数字（按上方选择类型补录）&#10;空格或TAB分隔均可" style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bfdbfe; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
                     <button type="button" onclick="importAuctionHistoryFill()" style="margin-top: 8px; padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; border: none; border-radius: 4px; cursor: pointer;">补录历史数据</button>
                     <span id="auctionHistoryFillStatus" style="margin-left: 8px; font-size: 12px; color: #059669;"></span>
                 </div>
@@ -11125,7 +11125,7 @@
             lines.forEach((line, index) => {
                 if (!line.trim()) return;
                 if (index === 0 && (line.includes('股票名称') || line.includes('竞价量') || line.includes('昨日成交量'))) return;
-                const rawCells = line.split('\t');
+                const rawCells = splitHistoryFillLine(line);
                 const stock = rawCells[0] ? rawCells[0].trim() : '';
                 if (!stock) { invalidCount++; return; }
                 if (!currentStockSet.has(stock)) { skippedNotInCurrent++; return; }
@@ -11916,6 +11916,36 @@
             return match ? trimmed : null;
         }
 
+        // 历史数据补录：把一行文本切成单元格数组。
+        // 优先按 TAB 分割（Excel 粘贴场景）；如果没有 TAB，则按"股票名称 + 空格分隔的数字"处理，
+        // 方便手写录入：股票名称 竞价量 昨日成交量 / 股票名称 数字。
+        // 按"从右往左，最多取2个纯数字/带万字的token"识别数值列，剩下的部分整体作为股票名称。
+        function splitHistoryFillLine(line) {
+            if (line.indexOf('\t') !== -1) {
+                return line.split('\t');
+            }
+            const tokens = line.trim().split(/\s+/).filter(Boolean);
+            if (tokens.length <= 1) {
+                return [line.trim()];
+            }
+            const isNumToken = (t) => parseVolumeOnlyText(t) !== null;
+            let splitAt = tokens.length; // 数值列的起始下标
+            for (let i = tokens.length - 1; i >= Math.max(1, tokens.length - 2); i--) {
+                if (isNumToken(tokens[i])) {
+                    splitAt = i;
+                } else {
+                    break;
+                }
+            }
+            if (splitAt === tokens.length) {
+                // 没有识别到末尾的数字 token，整行当作股票名称
+                return [line.trim()];
+            }
+            const stockName = tokens.slice(0, splitAt).join(' ');
+            const numCells = tokens.slice(splitAt);
+            return [stockName, ...numCells];
+        }
+
         // "历史数据补录"开关变化时的处理：控制专用输入区域的显示/隐藏，并默认把日期选择器设为当前日历日期
         function onAuctionHistoryFillToggleChange() {
             const checked = document.getElementById('auctionHistoryFillToggle').checked;
@@ -11988,8 +12018,7 @@
                 if (!line.trim()) return;
                 if (index === 0 && (line.includes('股票名称') || line.includes('竞价量') || line.includes('昨日成交量'))) return;
 
-                const cells = line.split('\t').map(c => c.trim()).filter((c, i) => i === 0 || c !== '');
-                const rawCells = line.split('\t');
+                const rawCells = splitHistoryFillLine(line);
                 const stock = rawCells[0] ? rawCells[0].trim() : '';
 
                 if (!stock) {
