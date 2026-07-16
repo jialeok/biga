@@ -8368,14 +8368,15 @@
             });
             const mergedList = cloudWatchlist.map(function(row) {
                 var local = localMap[(row.stock || '').trim()];
+                // note/changePct/topics：云端有值才覆盖，否则保留本地（避免抓取程序空字段覆盖主程序手动编辑的备注）
                 return {
                     stock: row.stock,
-                    code: row.code || '',
+                    code: row.code || (local ? (local.code || '') : ''),
                     volume: row.volume || '',
                     yestVolume: row.yest_volume || '',
-                    note: row.note || '',
-                    changePct: row.change_pct || '',
-                    topics: row.topics || '',
+                    note: (row.note && row.note.trim()) ? row.note : (local ? (local.note || '') : ''),
+                    changePct: (row.change_pct && String(row.change_pct).trim()) ? row.change_pct : (local ? (local.changePct || '') : ''),
+                    topics: (row.topics && row.topics.trim()) ? row.topics : (local ? (local.topics || '') : ''),
                     selected: local ? (local.selected || false) : (row.selected || false),
                     bought: local ? (local.bought || false) : (row.bought || false),
                     sold: local ? (local.sold || false) : (row.sold || false),
@@ -8959,6 +8960,8 @@
             const sb = getSupabase();
             const result = {};
             _hotFullRowCache = {};
+            // 保存旧的本地数据，用于合并 note/changePct/topics（云端有值才覆盖，避免抓取程序空字段覆盖主程序编辑）
+            const oldLocalData = _hotAuctionData || {};
             let offset = 0;
             const pageSize = 1000;
             while (true) {
@@ -8987,18 +8990,21 @@
                     // 返回值只含 in_watchlist=true 行（供渲染）
                     if (row.in_watchlist) {
                         if (!result[row.date]) result[row.date] = [];
+                        // 查找本地旧数据，合并 note/changePct/topics（云端有值才覆盖）
+                        const localList = oldLocalData[row.date] || [];
+                        const local = localList.find(s => s && s.stock && s.stock.trim() === (row.stock || '').trim());
                         result[row.date].push({
                             stock: row.stock,
-                            code: row.code || '',
+                            code: row.code || (local ? (local.code || '') : ''),
                             volume: row.volume || '',
                             yestVolume: row.yest_volume || '',
-                            note: row.note || '',
-                            changePct: row.change_pct || '',
-                            topics: row.topics || '',
-                            selected: row.selected || false,
-                            bought: row.bought || false,
-                            sold: row.sold || false,
-                            fixed: row.fixed || false
+                            note: (row.note && row.note.trim()) ? row.note : (local ? (local.note || '') : ''),
+                            changePct: (row.change_pct && String(row.change_pct).trim()) ? row.change_pct : (local ? (local.changePct || '') : ''),
+                            topics: (row.topics && row.topics.trim()) ? row.topics : (local ? (local.topics || '') : ''),
+                            selected: local ? (local.selected || false) : (row.selected || false),
+                            bought: local ? (local.bought || false) : (row.bought || false),
+                            sold: local ? (local.sold || false) : (row.sold || false),
+                            fixed: local ? (local.fixed || false) : (row.fixed || false)
                         });
                     }
                 });
