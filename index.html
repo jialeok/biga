@@ -8394,10 +8394,7 @@
             if (!rows) return null;
             const rawField = field === 'volume' ? 'volume' : 'yest_volume';
             const found = rows.find(function(p) { return p && p.stock && p.stock.trim() === stockName; });
-            if (found) {
-                const val = found[rawField];
-                if (val !== '' && val != null) return parseFloat(val);
-            }
+            if (found) return getNumericVolume(found[rawField]);
             return null;
         }
 
@@ -11150,12 +11147,12 @@
                     const item = targetList[existingIndex];
                     let didFill = false;
                     if (parsedVolume !== null) {
-                        const isEmpty = item.volume === '' || item.volume == null;
+                        const isEmpty = getNumericVolume(item.volume) === null;
                         if (isEmpty) { item.volume = parsedVolume; filledCount++; didFill = true; }
                         else skippedHasValue++;
                     }
                     if (parsedYest !== null) {
-                        const isEmpty = item.yestVolume === '' || item.yestVolume == null;
+                        const isEmpty = getNumericVolume(item.yestVolume) === null;
                         if (isEmpty) { item.yestVolume = parsedYest; filledCount++; didFill = true; }
                         else skippedHasValue++;
                     }
@@ -11167,7 +11164,7 @@
                     if (parsedValue === null) { invalidCount++; if (isNewRecord) targetList.pop(); return; }
                     const item = targetList[existingIndex];
                     const existingFieldValue = item[twoColField];
-                    const isEmpty = existingFieldValue === '' || existingFieldValue == null;
+                    const isEmpty = getNumericVolume(existingFieldValue) === null;
                     if (isEmpty) { targetList[existingIndex] = { ...item, [twoColField]: parsedValue }; filledCount++; if (isNewRecord) addedCount++; }
                     else { skippedHasValue++; if (isNewRecord) targetList.pop(); }
                 } else { invalidCount++; if (isNewRecord) targetList.pop(); }
@@ -11905,6 +11902,16 @@
 
         // 解析"258.5万"或"3528"这类竞价量文本，统一返回数字字符串（不做单位换算）
         // 带"万"字：提取"万"字前面的数字；不带"万"字：直接使用这个数字
+        // 统一的"竞价量/成交量取值"帮助函数：把字面量 0（无论是数字0还是字符串"0"）也当作"无数据"处理，
+        // 和主列表里"0 显示为 - "的约定保持一致（外部抓取程序偶尔会在没抓到数据时写入0，而不是留空）。
+        // 返回：有效数值时返回 Number，否则返回 null（用于图表断点、补录判断、比值计算等所有场景）。
+        function getNumericVolume(val) {
+            if (val === '' || val === null || val === undefined) return null;
+            const n = parseFloat(val);
+            if (isNaN(n) || n === 0) return null;
+            return n;
+        }
+
         function parseVolumeOnlyText(text) {
             if (!text) return null;
             const trimmed = text.trim();
@@ -12060,7 +12067,7 @@
                     let didFill = false;
 
                     if (parsedVolume !== null) {
-                        const isEmpty = item.volume === '' || item.volume === null || item.volume === undefined;
+                        const isEmpty = getNumericVolume(item.volume) === null;
                         if (isEmpty) {
                             item.volume = parsedVolume;
                             filledCount++;
@@ -12070,7 +12077,7 @@
                         }
                     }
                     if (parsedYest !== null) {
-                        const isEmpty = item.yestVolume === '' || item.yestVolume === null || item.yestVolume === undefined;
+                        const isEmpty = getNumericVolume(item.yestVolume) === null;
                         if (isEmpty) {
                             item.yestVolume = parsedYest;
                             filledCount++;
@@ -12097,7 +12104,7 @@
 
                     const item = targetList[existingIndex];
                     const existingFieldValue = item[twoColField];
-                    const isEmpty = existingFieldValue === '' || existingFieldValue === null || existingFieldValue === undefined;
+                    const isEmpty = getNumericVolume(existingFieldValue) === null;
                     if (isEmpty) {
                         targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
                         filledCount++;
@@ -12883,12 +12890,12 @@
                     .map((idx, pos) => {
                         const it = auctionList[idx];
                         const stockName = it && it.stock ? it.stock.trim() : '';
-                        const todayVolume = it && it.volume !== '' && it.volume != null ? parseFloat(it.volume) : null;
-                        const yestVolume = it && it.yestVolume !== '' && it.yestVolume != null ? parseFloat(it.yestVolume) : null;
+                        const todayVolume = it ? getNumericVolume(it.volume) : null;
+                        const yestVolume = it ? getNumericVolume(it.yestVolume) : null;
                         let ratio = null;
                         if (todayVolume !== null && todayVolume !== 0) {
                             const prevItem = prevDayList.find(p => p.stock && p.stock.trim() === stockName);
-                            const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                            const prevVolume = prevItem ? getNumericVolume(prevItem.volume) : null;
                             if (prevVolume !== null && prevVolume !== 0) {
                                 ratio = todayVolume / prevVolume;
                             }
@@ -13920,12 +13927,12 @@
                             const stockName = s.stock ? s.stock.trim() : '';
                             if (!stockName) return { s, pos, ratio: null, digitGap: null, tier: 2 };
                             const todayItem = auctionList.find(item => item.stock && item.stock.trim() === stockName);
-                            const todayVolume = todayItem && todayItem.volume !== '' && todayItem.volume != null ? parseFloat(todayItem.volume) : null;
-                            const yestVolume = todayItem && todayItem.yestVolume !== '' && todayItem.yestVolume != null ? parseFloat(todayItem.yestVolume) : null;
+                            const todayVolume = todayItem ? getNumericVolume(todayItem.volume) : null;
+                            const yestVolume = todayItem ? getNumericVolume(todayItem.yestVolume) : null;
                             let ratio = null;
                             if (todayVolume !== null && todayVolume !== 0) {
                                 const prevItem = prevAuctionListForSort.find(p => p.stock && p.stock.trim() === stockName);
-                                const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                                const prevVolume = prevItem ? getNumericVolume(prevItem.volume) : null;
                                 if (prevVolume !== null && prevVolume !== 0) {
                                     ratio = todayVolume / prevVolume;
                                 }
@@ -16774,10 +16781,10 @@
             const stockNames = new Set();
             todayList.forEach(item => {
                 if (!item || !item.stock) return;
-                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
+                const todayVolume = getNumericVolume(item.volume);
                 if (todayVolume === null || todayVolume === 0) return;
                 const prevItem = prevList.find(p => p.stock && p.stock.trim() === item.stock.trim());
-                const prevVolume = prevItem && prevItem.volume !== '' && prevItem.volume != null ? parseFloat(prevItem.volume) : null;
+                const prevVolume = prevItem ? getNumericVolume(prevItem.volume) : null;
                 if (prevVolume === null || prevVolume === 0) return;
                 const ratio = todayVolume / prevVolume;
                 const roundedRatio = Math.round(ratio * 10) / 10; // 四舍五入到一位小数，与表格显示的"今/昨比"保持一致
@@ -16804,9 +16811,9 @@
                 if (!item || !item.stock) return;
                 const name = item.stock.trim();
 
-                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
+                const todayVolume = getNumericVolume(item.volume);
                 // T的yestVolume字段 = T-1交易日自身的总成交量
-                const t1OwnVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
+                const t1OwnVolume = getNumericVolume(item.yestVolume);
 
                 // T-1 竞价量、T-2 成交量 从全量快照缓存查询（含非自选股）
                 const t1Volume = getStockHistoryValue(t1Date, name, 'volume', dataSource);
@@ -16852,13 +16859,13 @@
                 const name = item.stock.trim();
 
                 // 今/昨比：今日竞价量 / T-1竞价量（T-1数据从全量快照缓存查询，含非自选股）
-                const todayVolume = item.volume !== '' && item.volume != null ? parseFloat(item.volume) : null;
+                const todayVolume = getNumericVolume(item.volume);
                 const t1Volume = getStockHistoryValue(t1Date, name, 'volume', dataSource);
                 if (todayVolume === null || t1Volume === null || t1Volume === 0) return;
                 const jingRatio = todayVolume / t1Volume;
 
                 // 昨/前比：昨日成交量(今天记录的yestVolume) / 前日成交量(T-1记录的yestVolume)
-                const yestVolume = item.yestVolume !== '' && item.yestVolume != null ? parseFloat(item.yestVolume) : null;
+                const yestVolume = getNumericVolume(item.yestVolume);
                 const prevVolume = getStockHistoryValue(t1Date, name, 'yestVolume', dataSource);
                 if (yestVolume === null || prevVolume === null || prevVolume === 0) return;
                 const yestRatio = yestVolume / prevVolume;
