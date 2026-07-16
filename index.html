@@ -11117,7 +11117,7 @@
             const hotData = getHotAuctionData();
             const targetList = [...(hotData[targetDate] || [])];
             const currentStockSet = new Set((hotData[currentDate] || []).map(item => item.stock && item.stock.trim()).filter(Boolean));
-            let filledCount = 0, addedCount = 0, skippedHasValue = 0, skippedNotInCurrent = 0, invalidCount = 0;
+            let filledCount = 0, addedCount = 0, overwritedCount = 0, skippedNotInCurrent = 0, invalidCount = 0;
 
             lines.forEach((line, index) => {
                 if (!line.trim()) return;
@@ -11148,13 +11148,15 @@
                     let didFill = false;
                     if (parsedVolume !== null) {
                         const isEmpty = getNumericVolume(item.volume) === null;
-                        if (isEmpty) { item.volume = parsedVolume; filledCount++; didFill = true; }
-                        else skippedHasValue++;
+                        item.volume = parsedVolume;
+                        if (isEmpty) { filledCount++; } else { overwritedCount++; }
+                        didFill = true;
                     }
                     if (parsedYest !== null) {
                         const isEmpty = getNumericVolume(item.yestVolume) === null;
-                        if (isEmpty) { item.yestVolume = parsedYest; filledCount++; didFill = true; }
-                        else skippedHasValue++;
+                        item.yestVolume = parsedYest;
+                        if (isEmpty) { filledCount++; } else { overwritedCount++; }
+                        didFill = true;
                     }
                     if (didFill) { targetList[existingIndex] = { ...item }; if (isNewRecord) addedCount++; }
                     else if (isNewRecord) targetList.pop();
@@ -11165,17 +11167,17 @@
                     const item = targetList[existingIndex];
                     const existingFieldValue = item[twoColField];
                     const isEmpty = getNumericVolume(existingFieldValue) === null;
-                    if (isEmpty) { targetList[existingIndex] = { ...item, [twoColField]: parsedValue }; filledCount++; if (isNewRecord) addedCount++; }
-                    else { skippedHasValue++; if (isNewRecord) targetList.pop(); }
+                    targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
+                    if (isEmpty) { filledCount++; } else { overwritedCount++; }
+                    if (isNewRecord) addedCount++;
                 } else { invalidCount++; if (isNewRecord) targetList.pop(); }
             });
 
-            if (filledCount === 0) {
+            if (filledCount === 0 && overwritedCount === 0) {
                 if (statusEl) {
                     let msg = '未补录任何数据';
                     const parts = [];
                     if (skippedNotInCurrent > 0) parts.push(`${skippedNotInCurrent}条不在当前股票列表中`);
-                    if (skippedHasValue > 0) parts.push(`${skippedHasValue}个字段已有值`);
                     if (invalidCount > 0) parts.push(`${invalidCount}行无法识别`);
                     if (parts.length) msg += `（${parts.join('，')}）`;
                     statusEl.textContent = msg;
@@ -11190,9 +11192,9 @@
             });
             if (textarea) textarea.value = '';
             let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
+            if (overwritedCount > 0) statusMsg += ` 覆盖${overwritedCount}个字段`;
             if (addedCount > 0) statusMsg += ` 新增${addedCount}条数据记录`;
             if (skippedNotInCurrent > 0) statusMsg += ` 跳过${skippedNotInCurrent}条(不在当前股票列表中)`;
-            if (skippedHasValue > 0) statusMsg += ` 跳过${skippedHasValue}个(已有值)`;
             if (invalidCount > 0) statusMsg += ` 无法识别${invalidCount}行`;
             if (statusEl) { statusEl.textContent = statusMsg; statusEl.style.color = '#059669'; }
             if (targetDate === currentDate) {
@@ -12017,7 +12019,7 @@
 
             let filledCount = 0;     // 成功补齐的字段数（三列格式里补两个字段算两次）
             let addedCount = 0;      // 目标日期记录里原本没有该股票的数据记录，新增了一条
-            let skippedHasValue = 0; // 股票存在但字段已有值，跳过
+            let overwritedCount = 0; // 股票存在且字段已有值，本次覆盖（用户要求手动粘贴可覆盖旧错误数据）
             let skippedNotInCurrent = 0; // 当前列表里不存在该股票，跳过（不允许导入无关股票）
             let invalidCount = 0;    // 无法解析的行数
 
@@ -12068,23 +12070,15 @@
 
                     if (parsedVolume !== null) {
                         const isEmpty = getNumericVolume(item.volume) === null;
-                        if (isEmpty) {
-                            item.volume = parsedVolume;
-                            filledCount++;
-                            didFill = true;
-                        } else {
-                            skippedHasValue++;
-                        }
+                        item.volume = parsedVolume;
+                        if (isEmpty) { filledCount++; } else { overwritedCount++; }
+                        didFill = true;
                     }
                     if (parsedYest !== null) {
                         const isEmpty = getNumericVolume(item.yestVolume) === null;
-                        if (isEmpty) {
-                            item.yestVolume = parsedYest;
-                            filledCount++;
-                            didFill = true;
-                        } else {
-                            skippedHasValue++;
-                        }
+                        item.yestVolume = parsedYest;
+                        if (isEmpty) { filledCount++; } else { overwritedCount++; }
+                        didFill = true;
                     }
                     if (didFill) {
                         targetList[existingIndex] = { ...item };
@@ -12105,27 +12099,21 @@
                     const item = targetList[existingIndex];
                     const existingFieldValue = item[twoColField];
                     const isEmpty = getNumericVolume(existingFieldValue) === null;
-                    if (isEmpty) {
-                        targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
-                        filledCount++;
-                        if (isNewRecord) addedCount++;
-                    } else {
-                        skippedHasValue++;
-                        if (isNewRecord) targetList.pop();
-                    }
+                    targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
+                    if (isEmpty) { filledCount++; } else { overwritedCount++; }
+                    if (isNewRecord) addedCount++;
                 } else {
                     invalidCount++;
                     if (isNewRecord) targetList.pop();
                 }
             });
 
-            if (filledCount === 0) {
+            if (filledCount === 0 && overwritedCount === 0) {
 
                 if (statusEl) {
                     let msg = '未补录任何数据';
                     const parts = [];
                     if (skippedNotInCurrent > 0) parts.push(`${skippedNotInCurrent}条不在当前股票列表中`);
-                    if (skippedHasValue > 0) parts.push(`${skippedHasValue}个字段已有值`);
                     if (invalidCount > 0) parts.push(`${invalidCount}行无法识别`);
                     if (parts.length) msg += `（${parts.join('，')}）`;
                     statusEl.textContent = msg;
@@ -12142,9 +12130,9 @@
 
             textarea.value = '';
             let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
+            if (overwritedCount > 0) statusMsg += ` 覆盖${overwritedCount}个字段`;
             if (addedCount > 0) statusMsg += ` 新增${addedCount}条数据记录`;
             if (skippedNotInCurrent > 0) statusMsg += ` 跳过${skippedNotInCurrent}条(不在当前股票列表中)`;
-            if (skippedHasValue > 0) statusMsg += ` 跳过${skippedHasValue}个(已有值)`;
             if (invalidCount > 0) statusMsg += ` 无法识别${invalidCount}行`;
             if (statusEl) {
                 statusEl.textContent = statusMsg;
@@ -16899,12 +16887,17 @@
         // 否则会把"满足平行+差值>0但位数差过大、并未显示蓝色高光"的股票也错误地纳入观察组。
         // 排序 tier0 判定与高光显示口径必须统一调用本函数（同一份返回结果），杜绝分叉。
         function getJingYestHighlightSetForDate(dateStr, dataSource='auction') {
-            // 优先用预计算缓存（快速路径，不依赖 _auctionFullRowCache / _hotFullRowCache）
+            // 优先实时计算（与抓取程序口径一致：本地 rawData + 全量快照缓存 _auctionFullRowCache / _hotFullRowCache）
+            // 修复历史 Bug：原先优先用云端 daily_highlights 缓存，可能存的是旧的/错误的高光集合，
+            // 导致本地数据更新后高光仍显示旧结果（与抓取程序不一致），且推送有 2s debounce + Realtime 延迟 → 延迟感。
+            const stockDiffMap = getJingYestStocksForDate(dateStr, dataSource);
+            if (stockDiffMap.size > 0) {
+                return new Set([...stockDiffMap].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name));
+            }
+            // 实时计算无结果（可能 T-1 全量快照缓存未就绪）→ 回退到云端缓存，避免空白
             const cached = getDailyHighlightsForDate(dateStr, dataSource);
             if (cached) return cached;
-            // 回退到实时计算（慢路径，需要全量快照缓存有数据）
-            const stockDiffMap = getJingYestStocksForDate(dateStr, dataSource);
-            return new Set([...stockDiffMap].filter(([, info]) => info && info.digitGap <= 1).map(([name]) => name));
+            return new Set();
         }
 
         // ============================================================
