@@ -8356,8 +8356,17 @@
             const localMap = {};
             localList.forEach(function(s) { if (s && s.stock) localMap[s.stock.trim()] = s; });
 
-            // 合并：行情列用云端，状态列保留本地（如本地无则用云端）；只保留 in_watchlist=true 行（渲染用）
-            const mergedList = (data || []).filter(function(row) { return row.in_watchlist; }).map(function(row) {
+            // 合并策略：以云端 in_watchlist=true 的行为准替换本地列表
+            // （让抓取程序的"最近多板名单更新+同步"能反映到主程序：38→50只全替换，重复的保留云端行情数据）
+            // 但保留本地 obsAutoAdded=true 的观察组继承股票（云端没有的），不被替换掉。
+            // 状态列（selected/bought/sold/fixed）保留本地，行情列（volume/yestVolume/note/changePct/topics）用云端。
+            const cloudWatchlist = (data || []).filter(function(row) { return row.in_watchlist; });
+            const cloudNames = new Set(cloudWatchlist.map(function(r) { return (r.stock || '').trim(); }));
+            // 本地观察组继承股票（云端没有的）保留下来，追加到云端列表末尾
+            const localObsStocks = localList.filter(function(s) {
+                return s && s.stock && s.obsAutoAdded && !cloudNames.has(s.stock.trim());
+            });
+            const mergedList = cloudWatchlist.map(function(row) {
                 var local = localMap[(row.stock || '').trim()];
                 return {
                     stock: row.stock,
@@ -8372,7 +8381,7 @@
                     sold: local ? (local.sold || false) : (row.sold || false),
                     fixed: local ? (local.fixed || false) : (row.fixed || false)
                 };
-            });
+            }).concat(localObsStocks);
 
             auctionData[date] = mergedList;
             saveModule('auction');
