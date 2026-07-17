@@ -12839,10 +12839,11 @@
 
                 setApiStatus('numcatApiStatus', '正在请求猫抓接口补全题材（' + codes.length + ' 只股票）...', true);
 
-                const todayYMD = today.replace(/-/g, '');
+                // 不传 tradedate，让接口默认查最新交易日（题材是股票属性，不依赖日期；
+                // 传非交易日会返回"未找到选股数据"）
                 const data = await numcatApiPost('screening',
                     'symbol,theme_names_kpl',
-                    { symbols: codes.join(','), tradedate: todayYMD }
+                    { symbols: codes.join(',') }
                 );
 
                 const fields = data.fields || [];
@@ -16858,13 +16859,21 @@
         // 注意：编辑框预填等场景请继续使用 getDisplayNote，不要用这个函数，
         // 避免把历史题材误存成"今天的注释"
         function getDisplayNoteWithHistory(item) {
+            if (!item) return '';
             const todayNote = getDisplayNote(item);
-            if (todayNote) return todayNote;
-            if (item && item.stock) {
+            // 仅当 todayNote 已包含题材（括号内）时才直接返回；
+            // 否则即使 todayNote 有涨幅（如 "+5%"），也尝试用历史题材补全
+            if (todayNote && extractTopics(todayNote).length > 0) return todayNote;
+            if (item.stock) {
                 const historyNote = getStockHistoryTopics(item.stock);
-                if (historyNote) return historyNote;
+                if (historyNote) {
+                    // historyNote 格式 "(题材1，题材2)"，提取题材字符串
+                    const historyTopics = historyNote.replace(/^\(/, '').replace(/\)$/, '');
+                    // 和今天的 changePct 拼接（若有），如 "+5%(题材1，题材2)"
+                    return buildNoteFromFields(item.changePct, historyTopics);
+                }
             }
-            return '';
+            return todayNote || '';
         }
 
         // 提取涨幅显示值（优先用 changePct 字段，回退到 note 解析）
