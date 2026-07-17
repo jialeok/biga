@@ -7323,6 +7323,8 @@
                     <button type="button" onclick="fillYesterdayAuctionFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">补全昨日竞价量</button>
                     <button type="button" onclick="fetchTodayAuctionFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取当天竞价量</button>
                     <button type="button" onclick="fetchAllAuctionFromNumcat(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">全竞价量（昨日+今日一次请求）</button>
+                    <button type="button" onclick="fillTopicsFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">补全题材</button>
+                    <button type="button" onclick="fetchMonitorWarningFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">查询监管</button>
                 </div>
                 <span id="numcatApiStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #831843; min-height: 16px;"></span>
             </div>
@@ -12666,23 +12668,253 @@
             }
         }
 
-        // ---------- 猫抓：补全昨日竞价量 ----------
-        async function fillYesterdayAuctionFromNumcat(btn) {
-            await fetchAuctionFromNumcat(btn, { fillYesterday: true, fillToday: false });
+        // ---------- 猫抓：补全昨日竞价量（弹窗选择补全/覆盖） ----------
+        function fillYesterdayAuctionFromNumcat(btn) {
+            showNumcatChoiceModal('补全昨日竞价量', function(overwrite) {
+                fetchAuctionFromNumcat(btn, {
+                    fillYesterday: true, fillToday: false,
+                    overwriteYesterday: overwrite, overwriteToday: false
+                });
+            });
         }
 
-        // ---------- 猫抓：获取当天竞价量 ----------
-        async function fetchTodayAuctionFromNumcat(btn) {
-            await fetchAuctionFromNumcat(btn, { fillYesterday: false, fillToday: true });
+        // ---------- 猫抓：获取当天竞价量（弹窗选择补全/覆盖） ----------
+        function fetchTodayAuctionFromNumcat(btn) {
+            showNumcatChoiceModal('获取当天竞价量', function(overwrite) {
+                fetchAuctionFromNumcat(btn, {
+                    fillYesterday: false, fillToday: true,
+                    overwriteYesterday: false, overwriteToday: overwrite
+                });
+            });
         }
 
-        // ---------- 猫抓：全竞价量（昨日+今日一次请求） ----------
-        async function fetchAllAuctionFromNumcat(btn) {
-            await fetchAuctionFromNumcat(btn, { fillYesterday: true, fillToday: true });
+        // ---------- 猫抓：全竞价量（弹窗选择补全/覆盖，两天统一） ----------
+        function fetchAllAuctionFromNumcat(btn) {
+            showNumcatChoiceModal('全竞价量（昨日+今日）', function(overwrite) {
+                fetchAuctionFromNumcat(btn, {
+                    fillYesterday: true, fillToday: true,
+                    overwriteYesterday: overwrite, overwriteToday: overwrite
+                });
+            });
+        }
+
+        // ---------- 猫抓：补全题材（开盘啦，只填 topics 为空的股票） ----------
+        async function fillTopicsFromNumcat(btn) {
+            setBtnLoading(btn, true);
+            try {
+                const today = currentDate;
+                const todayList = (getAuctionData()[today] || []).filter(function(s) {
+                    return s && s.stock && !((s.topics || '').trim());
+                });
+
+                if (todayList.length === 0) {
+                    setApiStatus('numcatApiStatus', '❌ 没有需要补全题材的股票（所有股票已有题材）', false);
+                    return;
+                }
+
+                // 收集股票代码
+                const scMap = getStockCodeMap();
+                const codes = [];
+                const codeToStock = {};
+                todayList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code) {
+                        codes.push(code);
+                        codeToStock[code] = s;
+                    }
+                });
+
+                if (codes.length === 0) {
+                    setApiStatus('numcatApiStatus', '❌ 没有可补全的股票（缺少代码映射）', false);
+                    return;
+                }
+
+                setApiStatus('numcatApiStatus', '正在请求猫抓接口补全题材（' + codes.length + ' 只股票）...', true);
+
+                const todayYMD = today.replace(/-/g, '');
+                const data = await numcatApiPost('screening',
+                    'symbol,theme_names_kpl',
+                    { symbols: codes.join(','), tradedate: todayYMD }
+                );
+
+                const fields = data.fields || [];
+                const items = data.items || [];
+                const symIdx = fields.indexOf('symbol');
+                const themeIdx = fields.indexOf('theme_names_kpl');
+
+                if (symIdx < 0 || themeIdx < 0) {
+                    setApiStatus('numcatApiStatus', '❌ 返回数据字段不完整', false);
+                    return;
+                }
+
+                let filledCount = 0;
+                let skippedCount = 0;
+                items.forEach(function(row) {
+                    const code = String(row[symIdx] || '').trim();
+                    const themeNames = String(row[themeIdx] || '').trim();
+                    const stock = codeToStock[code];
+                    if (!stock) return;
+                    if (!themeNames) {
+                        skippedCount++;
+                        return;
+                    }
+                    // 分割题材，取前 3 个
+                    const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) { return t; });
+                    const top3 = topicList.slice(0, 3).join('，');
+                    stock.topics = top3;
+                    filledCount++;
+                });
+
+                // 没有返回数据的股票也算跳过
+                skippedCount += (codes.length - filledCount - skippedCount);
+
+                saveModule('auction');
+                invalidateTopicCache();
+                renderAuction();
+                renderList();
+
+                // 同步到云端
+                pushAuctionDataToCloud(today, getAuctionData()[today] || []).catch(function(e) {
+                    console.warn('pushAuctionDataToCloud 失败:', e);
+                });
+
+                setApiStatus('numcatApiStatus',
+                    '✅ 补全 ' + filledCount + ' 只股票题材，跳过 ' + skippedCount + ' 只无数据或已有题材',
+                    true);
+            } catch (err) {
+                console.error('fillTopicsFromNumcat 失败:', err);
+                let msg = err && err.message ? err.message : '获取失败';
+                if (msg.indexOf('Failed to fetch') >= 0) {
+                    msg = '代理请求失败，请确认 numcat-proxy Edge Function 已部署且 NUMCAT_API_KEY 已设置';
+                }
+                setApiStatus('numcatApiStatus', '❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
+        // ---------- 猫抓：查询交易监管（严重异常波动，最近 5 个交易日） ----------
+        async function fetchMonitorWarningFromNumcat(btn) {
+            setBtnLoading(btn, true);
+            try {
+                const today = currentDate;
+                const fullList = (getAuctionData()[today] || []).filter(function(s) { return s && s.stock; });
+
+                if (fullList.length === 0) {
+                    setApiStatus('numcatApiStatus', '❌ 当日列表为空，请先导入股票到表格', false);
+                    return;
+                }
+
+                // 收集股票代码
+                const scMap = getStockCodeMap();
+                const codes = [];
+                fullList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code) codes.push(code);
+                });
+
+                if (codes.length === 0) {
+                    setApiStatus('numcatApiStatus', '❌ 没有可查询的股票（缺少代码映射）', false);
+                    return;
+                }
+
+                // 先清除所有股票的监管标记（重新查询）
+                fullList.forEach(function(s) { delete s.monitorWarning; });
+
+                setApiStatus('numcatApiStatus', '正在请求猫抓接口查询监管记录（' + codes.length + ' 只股票）...', true);
+
+                // 查最近 5 个交易日
+                const startdate = getNthPreviousTradingDay(today, 5).replace(/-/g, '');
+                const enddate = today.replace(/-/g, '');
+
+                const data = await numcatApiPost('point_monitor',
+                    'type,symbol,name,startdate,enddate,reason',
+                    {
+                        symbols: codes.join(','),
+                        type: '严重异常波动',
+                        startdate: startdate,
+                        enddate: enddate
+                    }
+                );
+
+                const fields = data.fields || [];
+                const items = data.items || [];
+                const symIdx = fields.indexOf('symbol');
+
+                if (symIdx < 0) {
+                    setApiStatus('numcatApiStatus', '❌ 返回数据字段不完整', false);
+                    return;
+                }
+
+                // 构建有监管记录的股票代码集合
+                const warningCodes = new Set();
+                items.forEach(function(row) {
+                    const code = String(row[symIdx] || '').trim();
+                    if (code) warningCodes.add(code);
+                });
+
+                // 标记股票
+                let markedCount = 0;
+                fullList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code && warningCodes.has(code)) {
+                        s.monitorWarning = true;
+                        markedCount++;
+                    }
+                });
+
+                saveModule('auction');
+                renderAuction();
+                renderList();
+
+                // 同步到云端
+                pushAuctionDataToCloud(today, getAuctionData()[today] || []).catch(function(e) {
+                    console.warn('pushAuctionDataToCloud 失败:', e);
+                });
+
+                setApiStatus('numcatApiStatus',
+                    '✅ 查询到 ' + markedCount + ' 只股票有严重异常波动（最近 5 个交易日）',
+                    true);
+            } catch (err) {
+                console.error('fetchMonitorWarningFromNumcat 失败:', err);
+                let msg = err && err.message ? err.message : '获取失败';
+                if (msg.indexOf('Failed to fetch') >= 0) {
+                    msg = '代理请求失败，请确认 numcat-proxy Edge Function 已部署且 NUMCAT_API_KEY 已设置';
+                }
+                setApiStatus('numcatApiStatus', '❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
+        // 显示猫抓操作模式选择弹窗（补全 / 覆盖）
+        // onChoose: callback(overwrite: boolean)  overwrite=false=补全, true=覆盖
+        function showNumcatChoiceModal(title, onChoose) {
+            const modal = document.createElement('div');
+            modal.className = 'modal active';
+            modal.style.zIndex = '3000';
+            modal.innerHTML = `
+                <div class="modal-content" style="padding-bottom: 20px; max-width: 360px;">
+                    <div style="font-size: 15px; font-weight: 600; color: #831843; margin-bottom: 6px; text-align: center;">${title}</div>
+                    <div style="font-size: 12px; color: #6b7280; margin-bottom: 16px; text-align: center;">请选择操作模式</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">
+                        <button type="button" data-choice="fill" style="padding: 12px 8px; font-size: 13px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 6px; cursor: pointer; min-height: 44px; font-weight: 500;">补全<br><span style="font-size: 10px; opacity: 0.9;">只填缺失</span></button>
+                        <button type="button" data-choice="overwrite" style="padding: 12px 8px; font-size: 13px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 6px; cursor: pointer; min-height: 44px; font-weight: 500;">覆盖<br><span style="font-size: 10px; opacity: 0.9;">全部更新</span></button>
+                    </div>
+                    <button type="button" data-choice="cancel" style="width: 100%; padding: 10px; font-size: 12px; background: #f3f4f6; color: #6b7280; border: none; border-radius: 6px; cursor: pointer; min-height: 40px; margin-top: 4px;">取消</button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            const close = function() { modal.remove(); };
+            modal.querySelector('[data-choice="fill"]').onclick = function() { close(); onChoose(false); };
+            modal.querySelector('[data-choice="overwrite"]').onclick = function() { close(); onChoose(true); };
+            modal.querySelector('[data-choice="cancel"]').onclick = close;
+            modal.addEventListener('click', function(e) { if (e.target === modal) close(); });
         }
 
         // 猫抓竞价量补全共用逻辑
-        // opts: { fillYesterday: bool, fillToday: bool }
+        // opts: { fillYesterday: bool, fillToday: bool, overwriteYesterday: bool, overwriteToday: bool }
         async function fetchAuctionFromNumcat(btn, opts) {
             setBtnLoading(btn, true);
             try {
@@ -12775,32 +13007,34 @@
                     aucByDate[tradedate][code] = Math.round(Number(aucVol) / 100);
                 });
 
-                // 填充 volume（只填空，不动 yestVolume）
+                // 填充 volume
+                // overwrite=true：有新数据就覆盖（无新数据保留原值，不清空）
+                // overwrite=false：已有值就跳过（补全模式）
                 let filledCount = 0;
                 let skippedCount = 0;
 
-                const fillVolume = function(list, dateStr) {
+                const fillVolume = function(list, dateStr, overwrite) {
                     const ymd = dateStr.replace(/-/g, '');
                     const dayData = aucByDate[ymd] || {};
                     list.forEach(function(s) {
                         if (!s || !s.stock) return;
-                        if (getNumericVolume(s.volume) !== null) return; // 已有值，跳过
+                        if (!overwrite && getNumericVolume(s.volume) !== null) return; // 补全模式：已有值跳过
                         const code = (s.code || scMap[s.stock.trim()] || '').trim();
                         if (code && dayData[code] != null) {
                             s.volume = String(dayData[code]);
                             filledCount++;
                         } else {
-                            skippedCount++;
+                            skippedCount++; // 覆盖模式下也会走到这里：无新数据，保留原值
                         }
                     });
                 };
 
                 if (needToday) {
-                    fillVolume(todayList, today);
+                    fillVolume(todayList, today, !!opts.overwriteToday);
                     auctionData[today] = todayList;
                 }
                 if (needYesterday) {
-                    fillVolume(yesterdayList, yesterday);
+                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday);
                     auctionData[yesterday] = yesterdayList;
                 }
 
@@ -12815,11 +13049,12 @@
                 renderList();
 
                 const mode = (needToday && needYesterday) ? '昨日+今日' : (needToday ? '今日' : '昨日');
+                const action = (opts.overwriteToday || opts.overwriteYesterday) ? '覆盖' : '补全';
                 const yesterdayNote = (needYesterday && yesterdayListWasEmpty)
                     ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
                     : '';
                 setApiStatus('numcatApiStatus',
-                    '✅ ' + mode + '补全 ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote,
+                    '✅ ' + mode + action + ' ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote,
                     true);
             } catch (err) {
                 console.error('fetchAuctionFromNumcat 失败:', err);
@@ -13805,6 +14040,10 @@
                     _stockNameDisplay += '<sup style="color:#3b82f6;font-size:10px;font-weight:700;">观</sup>';
                 } else if (!jingYestToggleChecked && _isObs && !_isAutoAdded) {
                     _stockNameDisplay += '*';
+                }
+                // 交易监管标记：严重异常波动
+                if (item.monitorWarning) {
+                    _stockNameDisplay += '<span style="color:#dc2626;font-size:13px;margin-left:2px;" title="严重异常波动">⚠️</span>';
                 }
                 
                 return `
@@ -21760,6 +21999,16 @@
                 date.setDate(date.getDate() - 1);
             }
             return null;
+        }
+
+        // 获取 N 个交易日前的日期（递归调用 getPreviousTradingDay）
+        function getNthPreviousTradingDay(dateStr, n) {
+            let result = dateStr;
+            for (let i = 0; i < n; i++) {
+                result = getPreviousTradingDay(result);
+                if (!result) return null;
+            }
+            return result;
         }
 
         // 根据收盘数值映射K线类型
