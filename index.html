@@ -7309,6 +7309,7 @@
                     <button type="button" onclick="fillYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">两全昨日成交量</button>
                     <button type="button" onclick="fillTodayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">当天昨日成交量</button>
                     <button type="button" onclick="fillYesterdayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">对比日昨成交量</button>
+                    <button type="button" onclick="fetchChangePctFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取涨幅</button>
                 </div>
                 <span id="thsApiStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #92400e; min-height: 16px;"></span>
             </div>
@@ -12223,14 +12224,16 @@
         }
 
         // 调用猫抓 numcat-proxy（POST），返回 data 字段
-        async function numcatApiPost(apiname, fields, params) {
+        async function numcatApiPost(apiname, fields, params, pathOverride) {
+            const body = { apiname: apiname, fields: fields, params: params || {} };
+            if (pathOverride) body.path = pathOverride;
             const resp = await fetch(NUMCAT_PROXY_URL, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
                 },
-                body: JSON.stringify({ apiname: apiname, fields: fields, params: params || {} })
+                body: JSON.stringify(body)
             });
             const data = await resp.json();
             if (data.code !== 200) {
@@ -12668,6 +12671,111 @@
             }
         }
 
+        // ---------- 同花顺：获取涨幅（snapshot 接口，支持补全/覆盖弹窗） ----------
+        function fetchChangePctFromThs(btn) {
+            showNumcatChoiceModal('获取涨幅模式', function(overwrite) {
+                _fetchChangePctFromThsImpl(btn, overwrite);
+            });
+        }
+
+        async function _fetchChangePctFromThsImpl(btn, overwrite) {
+            setBtnLoading(btn, true);
+            try {
+                const today = currentDate;
+                const auctionData = getAuctionData();
+                const todayList = (auctionData[today] || []).filter(function(s) { return s && s.stock; });
+
+                if (todayList.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 当日列表为空，请先导入股票到表格', false);
+                    return;
+                }
+
+                // 收集 thscode
+                const scMap = loadAllData().stockCodeMap || {};
+                const stockMap = {}; // thscode -> stock 对象
+                const thscodes = [];
+                todayList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code) {
+                        const thscode = tickerToThscode(code);
+                        if (thscode && !stockMap[thscode]) {
+                            thscodes.push(thscode);
+                            stockMap[thscode] = s;
+                        }
+                    }
+                });
+
+                if (thscodes.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 没有可查询的股票（缺少代码映射，请先获取最近多板）', false);
+                    return;
+                }
+
+                setApiStatus('thsApiStatus', '正在请求同花顺接口获取涨幅（' + thscodes.length + ' 只股票）...', true);
+
+                // snapshot 接口支持批量查询（thscodes 逗号分隔，每批 ≤40 只）
+                const batchSize = 40;
+                let filledCount = 0;
+                let skippedCount = 0;
+
+                for (let i = 0; i < thscodes.length; i += batchSize) {
+                    const chunk = thscodes.slice(i, i + batchSize);
+                    const data = await fuyaoApiGet('/api/a-share/prices/snapshot', { thscodes: chunk.join(',') });
+                    const items = (data && data.item) || [];
+                    items.forEach(function(item) {
+                        const thscode = item.thscode;
+                        const pct = item.price_change_ratio_pct;
+                        const stock = stockMap[thscode];
+                        if (!stock) {
+                            skippedCount++;
+                            return;
+                        }
+                        if (pct === null || pct === undefined || pct === '') {
+                            skippedCount++;
+                            return;
+                        }
+                        const n = Number(pct);
+                        if (isNaN(n)) {
+                            skippedCount++;
+                            return;
+                        }
+                        if (!overwrite && ((stock.changePct || '').trim())) {
+                            skippedCount++; // 补全模式：已有值跳过
+                            return;
+                        }
+                        stock.changePct = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+                        stock.note = buildNoteFromFields(stock.changePct, stock.topics);
+                        filledCount++;
+                    });
+                }
+
+                auctionData[today] = todayList;
+                saveModule('auction');
+                invalidateTopicCache();
+                renderAuctionForm();
+                renderAuction();
+                renderList();
+
+                // 同步到云端
+                pushAuctionDataToCloud(today, todayList).catch(function(e) {
+                    console.warn('pushAuctionDataToCloud 失败:', e);
+                });
+
+                const action = overwrite ? '覆盖' : '补全';
+                setApiStatus('thsApiStatus',
+                    '✅ ' + action + ' ' + filledCount + ' 只股票涨幅，跳过 ' + skippedCount + ' 只无数据或已有',
+                    true);
+            } catch (err) {
+                console.error('fetchChangePctFromThs 失败:', err);
+                let msg = err && err.message ? err.message : '获取失败';
+                if (msg.indexOf('Failed to fetch') >= 0) {
+                    msg = '代理请求失败，请确认 fuyao-proxy Edge Function 已部署';
+                }
+                setApiStatus('thsApiStatus', '❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
         // ---------- 猫抓：补全昨日竞价量（弹窗选择补全/覆盖） ----------
         function fillYesterdayAuctionFromNumcat(btn) {
             showNumcatChoiceModal('补全昨日竞价量', function(overwrite) {
@@ -12713,7 +12821,7 @@
                 }
 
                 // 收集股票代码
-                const scMap = getStockCodeMap();
+                const scMap = loadAllData().stockCodeMap || {};
                 const codes = [];
                 const codeToStock = {};
                 todayList.forEach(function(s) {
@@ -12806,7 +12914,7 @@
                 }
 
                 // 收集股票代码
-                const scMap = getStockCodeMap();
+                const scMap = loadAllData().stockCodeMap || {};
                 const codes = [];
                 fullList.forEach(function(s) {
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
@@ -12834,7 +12942,8 @@
                         type: '严重异常波动',
                         startdate: startdate,
                         enddate: enddate
-                    }
+                    },
+                    '/reference-proxy/stock/point-monitor'
                 );
 
                 const fields = data.fields || [];
@@ -12979,23 +13088,24 @@
 
                 setApiStatus('numcatApiStatus', '正在请求猫抓接口（' + allCodesSet.size + ' 只股票）...', true);
 
-                const fields = 'symbol,name,tradedate,auc_vol';
+                const fields = 'symbol,name,tradedate,auc_vol,auc_pct_chg';
                 const result = await numcatApiPost('daily_auc', fields, params);
 
                 // 解析返回数据
-                // result.fields: ['symbol','name','tradedate','auc_vol']
-                // result.items: [['000001','平安银行','20260717', 12345], ...]
+                // result.fields: ['symbol','name','tradedate','auc_vol','auc_pct_chg']
+                // result.items: [['000001','平安银行','20260717', 12345, 2.5], ...]
                 const fieldList = result.fields || [];
                 const items = result.items || [];
                 const symbolIdx = fieldList.indexOf('symbol');
                 const tradedateIdx = fieldList.indexOf('tradedate');
                 const aucVolIdx = fieldList.indexOf('auc_vol');
+                const aucPctIdx = fieldList.indexOf('auc_pct_chg');
                 if (symbolIdx < 0 || tradedateIdx < 0 || aucVolIdx < 0) {
                     setApiStatus('numcatApiStatus', '❌ 返回数据字段不完整', false);
                     return;
                 }
 
-                // 按日期分组：YYYYMMDD -> { code: aucVol(股) }
+                // 按日期分组：YYYYMMDD -> { code: { vol: aucVol(万), pct: "+2.5%" } }
                 const aucByDate = {};
                 items.forEach(function(row) {
                     const code = String(row[symbolIdx] || '').trim();
@@ -13004,7 +13114,18 @@
                     if (!code || !tradedate || aucVol === null || aucVol === undefined) return;
                     if (!aucByDate[tradedate]) aucByDate[tradedate] = {};
                     // auc_vol 单位是手，volume 字段单位是万（1万=100手），直接 ÷100 转万
-                    aucByDate[tradedate][code] = Math.round(Number(aucVol) / 100);
+                    const entry = { vol: Math.round(Number(aucVol) / 100) };
+                    // auc_pct_chg 是数字（如 2.5 表示 +2.5%），转成 "+2.5%" 格式
+                    if (aucPctIdx >= 0) {
+                        const pct = row[aucPctIdx];
+                        if (pct !== null && pct !== undefined && pct !== '') {
+                            const n = Number(pct);
+                            if (!isNaN(n)) {
+                                entry.pct = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+                            }
+                        }
+                    }
+                    aucByDate[tradedate][code] = entry;
                 });
 
                 // 填充 volume
@@ -13013,7 +13134,7 @@
                 let filledCount = 0;
                 let skippedCount = 0;
 
-                const fillVolume = function(list, dateStr, overwrite) {
+                const fillVolume = function(list, dateStr, overwrite, fillPct) {
                     const ymd = dateStr.replace(/-/g, '');
                     const dayData = aucByDate[ymd] || {};
                     list.forEach(function(s) {
@@ -13021,7 +13142,14 @@
                         if (!overwrite && getNumericVolume(s.volume) !== null) return; // 补全模式：已有值跳过
                         const code = (s.code || scMap[s.stock.trim()] || '').trim();
                         if (code && dayData[code] != null) {
-                            s.volume = String(dayData[code]);
+                            s.volume = String(dayData[code].vol);
+                            // 只填今天的竞价涨幅；昨日不填涨幅（fillPct=false）
+                            if (fillPct && dayData[code].pct) {
+                                if (overwrite || !((s.changePct || '').trim())) {
+                                    s.changePct = dayData[code].pct;
+                                    s.note = buildNoteFromFields(s.changePct, s.topics);
+                                }
+                            }
                             filledCount++;
                         } else {
                             skippedCount++; // 覆盖模式下也会走到这里：无新数据，保留原值
@@ -13030,11 +13158,11 @@
                 };
 
                 if (needToday) {
-                    fillVolume(todayList, today, !!opts.overwriteToday);
+                    fillVolume(todayList, today, !!opts.overwriteToday, true);   // 今天：填 volume + 涨幅
                     auctionData[today] = todayList;
                 }
                 if (needYesterday) {
-                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday);
+                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false); // 昨日：只填 volume
                     auctionData[yesterday] = yesterdayList;
                 }
 
