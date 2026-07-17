@@ -7306,7 +7306,9 @@
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                     <button type="button" onclick="fetchLadderConstituentsMain(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取最近多板</button>
-                    <button type="button" onclick="fillYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">补全昨日成交量</button>
+                    <button type="button" onclick="fillYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">两全昨日成交量</button>
+                    <button type="button" onclick="fillTodayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">当天昨日成交量</button>
+                    <button type="button" onclick="fillYesterdayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">对比日昨成交量</button>
                 </div>
                 <span id="thsApiStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #92400e; min-height: 16px;"></span>
             </div>
@@ -12351,6 +12353,44 @@
             }
         }
 
+        // 批量请求 fuyao historical 拿单天成交量
+        // 返回 { ticker: volume(股) }，仅匹配 dayStr 当天的 K 线
+        async function fetchDayVolumes(codes, dayStr) {
+            const startMs = new Date(dayStr + 'T00:00:00').getTime();
+            const endMs = new Date(dayStr + 'T23:59:59').getTime();
+            const result = {};
+            const batchSize = 5;
+            for (let i = 0; i < codes.length; i += batchSize) {
+                const batch = codes.slice(i, i + batchSize);
+                await Promise.all(batch.map(async function(code) {
+                    try {
+                        const thscode = tickerToThscode(code);
+                        const data = await fuyaoApiGet('/api/a-share/prices/historical', {
+                            thscode: thscode,
+                            interval: '1d',
+                            start: String(startMs),
+                            end: String(endMs),
+                            adjust: 'none'
+                        });
+                        const items = (data && data.item) || [];
+                        items.forEach(function(item) {
+                            const d = new Date(item.date_ms);
+                            const y = d.getFullYear();
+                            const m = String(d.getMonth() + 1).padStart(2, '0');
+                            const dd = String(d.getDate()).padStart(2, '0');
+                            const dateStr = y + '-' + m + '-' + dd;
+                            if (dateStr === dayStr) {
+                                result[code] = item.volume;
+                            }
+                        });
+                    } catch (e) {
+                        console.warn('获取 ' + code + ' 在 ' + dayStr + ' 的成交量失败:', e && e.message);
+                    }
+                }));
+            }
+            return result;
+        }
+
         // ---------- 同花顺：补全昨日成交量（填两个交易日的 yestVolume，不动 volume） ----------
         async function fillYesterdayVolumeFromThs(btn) {
             const statusEl = document.getElementById('thsApiStatus');
@@ -12407,82 +12447,47 @@
                     return;
                 }
 
-                // 时间范围：dayBefore 00:00 到 yesterday 23:59（覆盖2个交易日）
-                const startMs = new Date(dayBefore + 'T00:00:00').getTime();
-                const endMs = new Date(yesterday + 'T23:59:59').getTime();
-
-                setApiStatus('thsApiStatus', '正在获取 ' + allCodes.length + ' 只股票的历史成交量...', true);
-
-                // 逐个 thscode 请求 fuyao historical（并发5个一批）
-                // volByCode 存原始 volume（单位：股），写入 yestVolume 时再 ÷10000 转万
-                const volByCode = {}; // ticker -> { 'YYYY-MM-DD': volume(股) }
-                const batchSize = 5;
-                for (let i = 0; i < allCodes.length; i += batchSize) {
-                    const batch = allCodes.slice(i, i + batchSize);
-                    await Promise.all(batch.map(async function(code) {
-                        try {
-                            const thscode = tickerToThscode(code);
-                            const data = await fuyaoApiGet('/api/a-share/prices/historical', {
-                                thscode: thscode,
-                                interval: '1d',
-                                start: String(startMs),
-                                end: String(endMs),
-                                adjust: 'none'
-                            });
-                            const items = (data && data.item) || [];
-                            volByCode[code] = {};
-                            items.forEach(function(item) {
-                                const d = new Date(item.date_ms);
-                                const y = d.getFullYear();
-                                const m = String(d.getMonth() + 1).padStart(2, '0');
-                                const dd = String(d.getDate()).padStart(2, '0');
-                                const dateStr = y + '-' + m + '-' + dd;
-                                volByCode[code][dateStr] = item.volume;
-                            });
-                        } catch (e) {
-                            console.warn('获取 ' + code + ' 历史成交量失败:', e && e.message);
-                        }
-                    }));
-                }
-
-                // 填充 yestVolume（只填空，不动 volume 字段）
-                // 单位换算：fuyao 返回股，yestVolume 字段单位是万，÷10000 四舍五入取整
+                // ===== 分两批调用 fuyao historical（每批用单天时间窗口，避免跨天窗口只返回最新一根 K 线）=====
                 let todayFilled = 0, todaySkipped = 0;
                 let yesterdayFilled = 0, yesterdaySkipped = 0;
 
-                // today 的 yestVolume ← yesterday 的 volume
+                // ===== 第一批：调取当日的昨日成交量（today.yestVolume ← yesterday 的 volume）=====
+                setApiStatus('thsApiStatus', '【1/2】正在获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
+                const volYesterday = await fetchDayVolumes(allCodes, yesterday); // ticker -> volume(股)
+
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (getNumericVolume(s.yestVolume) !== null) return; // 已有值，跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
-                    if (code && volByCode[code] && volByCode[code][yesterday] != null) {
-                        s.yestVolume = String(Math.round(volByCode[code][yesterday] / 10000));
+                    if (code && volYesterday[code] != null) {
+                        s.yestVolume = String(Math.round(volYesterday[code] / 10000));
                         todayFilled++;
                     } else {
                         todaySkipped++;
                     }
                 });
                 auctionData[today] = todayList;
+                saveModule('auction');
+                pushAuctionDataToCloud(today, todayList).catch(function(e) { console.warn('pushAuctionDataToCloud today 失败:', e); });
 
-                // yesterday 的 yestVolume ← dayBefore 的 volume
+                // ===== 第二批：调取对比日的昨日成交量（yesterday.yestVolume ← dayBefore 的 volume）=====
+                setApiStatus('thsApiStatus', '【2/2】正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
+                const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
+
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (getNumericVolume(s.yestVolume) !== null) return;
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
-                    if (code && volByCode[code] && volByCode[code][dayBefore] != null) {
-                        s.yestVolume = String(Math.round(volByCode[code][dayBefore] / 10000));
+                    if (code && volDayBefore[code] != null) {
+                        s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
                         yesterdayFilled++;
                     } else {
                         yesterdaySkipped++;
                     }
                 });
                 auctionData[yesterday] = yesterdayList;
-
                 saveModule('auction');
                 invalidateTopicCache();
-
-                // 推送两天数据到云端
-                pushAuctionDataToCloud(today, todayList).catch(function(e) { console.warn('pushAuctionDataToCloud today 失败:', e); });
                 pushAuctionDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
 
                 // 刷新表单和看板
@@ -12501,6 +12506,161 @@
                     true);
             } catch (err) {
                 console.error('fillYesterdayVolumeFromThs 失败:', err);
+                let msg = err && err.message ? err.message : '补全失败';
+                if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
+                setApiStatus('thsApiStatus', '❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
+        // ---------- 同花顺：当天昨日成交量（单独调 yesterday 单天，只填 today.yestVolume） ----------
+        async function fillTodayYesterdayVolumeFromThs(btn) {
+            setBtnLoading(btn, true);
+            try {
+                const today = currentDate;
+                const yesterday = getPreviousTradingDay(today);
+                if (!yesterday) {
+                    setApiStatus('thsApiStatus', '❌ 无法确定上一交易日', false);
+                    return;
+                }
+                const auctionData = getAuctionData();
+                const todayList = (auctionData[today] || []).slice();
+                if (todayList.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 当日列表为空，请先获取最近多板', false);
+                    return;
+                }
+                const scMap = loadAllData().stockCodeMap || {};
+                const codeToName = {};
+                todayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code) codeToName[code] = s.stock.trim();
+                });
+                const allCodes = Object.keys(codeToName);
+                if (allCodes.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 没有可补全的股票（缺代码映射，请先获取最近多板）', false);
+                    return;
+                }
+
+                setApiStatus('thsApiStatus', '正在获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
+                const volYesterday = await fetchDayVolumes(allCodes, yesterday); // ticker -> volume(股)
+
+                let filled = 0, skipped = 0;
+                todayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    if (getNumericVolume(s.yestVolume) !== null) return; // 已有值，跳过
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code && volYesterday[code] != null) {
+                        s.yestVolume = String(Math.round(volYesterday[code] / 10000));
+                        filled++;
+                    } else {
+                        skipped++;
+                    }
+                });
+                auctionData[today] = todayList;
+                saveModule('auction');
+                invalidateTopicCache();
+                pushAuctionDataToCloud(today, todayList).catch(function(e) { console.warn('pushAuctionDataToCloud today 失败:', e); });
+
+                renderAuctionForm();
+                renderAuction();
+                renderList();
+
+                setApiStatus('thsApiStatus',
+                    '✅ 当天昨日成交量填 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    true);
+            } catch (err) {
+                console.error('fillTodayYesterdayVolumeFromThs 失败:', err);
+                let msg = err && err.message ? err.message : '补全失败';
+                if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
+                setApiStatus('thsApiStatus', '❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
+        // ---------- 同花顺：对比日昨成交量（单独调 dayBefore 单天，只填 yesterday.yestVolume） ----------
+        async function fillYesterdayYesterdayVolumeFromThs(btn) {
+            setBtnLoading(btn, true);
+            try {
+                const today = currentDate;
+                const yesterday = getPreviousTradingDay(today);
+                const dayBefore = yesterday ? getPreviousTradingDay(yesterday) : null;
+                if (!yesterday || !dayBefore) {
+                    setApiStatus('thsApiStatus', '❌ 无法确定前两个交易日', false);
+                    return;
+                }
+                const auctionData = getAuctionData();
+                const todayList = (auctionData[today] || []).slice();
+                let yesterdayList = (auctionData[yesterday] || []).slice();
+                const yesterdayListWasEmpty = yesterdayList.length === 0 && todayList.length > 0;
+                if (yesterdayListWasEmpty) {
+                    yesterdayList = todayList.map(function(s) {
+                        return {
+                            stock: s.stock,
+                            code: s.code || '',
+                            volume: '',
+                            yestVolume: '',
+                            note: '',
+                            changePct: '',
+                            topics: '',
+                            selected: false,
+                            bought: false,
+                            sold: false,
+                            fixed: false
+                        };
+                    });
+                }
+                if (yesterdayList.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 对比日列表为空且当日列表也为空，请先获取最近多板', false);
+                    return;
+                }
+                const scMap = loadAllData().stockCodeMap || {};
+                const codeToName = {};
+                yesterdayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code) codeToName[code] = s.stock.trim();
+                });
+                const allCodes = Object.keys(codeToName);
+                if (allCodes.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 没有可补全的股票（缺代码映射，请先获取最近多板）', false);
+                    return;
+                }
+
+                setApiStatus('thsApiStatus', '正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
+                const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
+
+                let filled = 0, skipped = 0;
+                yesterdayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    if (getNumericVolume(s.yestVolume) !== null) return;
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (code && volDayBefore[code] != null) {
+                        s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
+                        filled++;
+                    } else {
+                        skipped++;
+                    }
+                });
+                auctionData[yesterday] = yesterdayList;
+                saveModule('auction');
+                invalidateTopicCache();
+                pushAuctionDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
+
+                renderAuctionForm();
+                renderAuction();
+                renderList();
+
+                const yesterdaySource = yesterdayListWasEmpty
+                    ? '（对比日列表为空，已用今日成分股骨架）'
+                    : '';
+                setApiStatus('thsApiStatus',
+                    '✅ 对比日昨成交量填 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    true);
+            } catch (err) {
+                console.error('fillYesterdayYesterdayVolumeFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatus', '❌ ' + msg, false);
@@ -12606,8 +12766,8 @@
                     const aucVol = row[aucVolIdx];
                     if (!code || !tradedate || aucVol === null || aucVol === undefined) return;
                     if (!aucByDate[tradedate]) aucByDate[tradedate] = {};
-                    // auc_vol 单位是手，转股（×100）
-                    aucByDate[tradedate][code] = Math.round(Number(aucVol) * 100);
+                    // auc_vol 单位是手，volume 字段单位是万（1万=100手），直接 ÷100 转万
+                    aucByDate[tradedate][code] = Math.round(Number(aucVol) / 100);
                 });
 
                 // 填充 volume（只填空，不动 yestVolume）
