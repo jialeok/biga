@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>最近多板 · 竞价量监测</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          mono: ['JetBrains Mono', 'SF Mono', 'Menlo', 'monospace'],
+          sans: ['Inter', 'system-ui', 'sans-serif'],
+        },
+        colors: {
+          paper: '#faf9f6',
+          up: '#d6412f',
+          down: '#1a8a5e',
+          amber: '#b8720a',
+          ink: {
+            900: '#1c1a17',
+            700: '#43403a',
+            500: '#7a766c',
+            300: '#c4c0b6',
+            200: '#e2ded4',
+            100: '#eeebe3',
+          },
+        }
+      }
+    }
+  }
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { -webkit-tap-highlight-color: transparent; }
+  body { background: #faf9f6; }
+  .num-tick { font-variant-numeric: tabular-nums; }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.85); }
+  }
+  .pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+  @keyframes slide-up {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .slide-up { animation: slide-up 0.3s ease-out; }
+  input:focus { outline: none; }
+</style>
+</head>
+<body class="min-h-screen bg-paper text-ink-900 font-sans antialiased">
+
+<div class="max-w-md mx-auto min-h-screen flex flex-col px-4 pb-10">
+
+  <!-- 顶部状态条 -->
+  <header class="pt-6 pb-4">
+    <div class="flex items-center justify-between mb-1">
+      <div class="flex items-center gap-2">
+        <span id="autoDot" class="w-2 h-2 rounded-full bg-ink-300"></span>
+        <h1 class="text-[13px] font-mono font-semibold tracking-[0.15em] text-ink-700 uppercase">最近多板</h1>
+      </div>
+      <span id="clock" class="text-[11px] font-mono text-ink-500 num-tick">--:--:--</span>
+    </div>
+    <p class="text-xs text-ink-500 font-mono">竞价量快照 · 883410.TI · 9:25 自动采集</p>
+  </header>
+
+  <!-- 代理地址配置区 -->
+  <section class="mb-4 bg-white border border-ink-200 rounded-xl p-4">
+    <div class="flex items-center justify-between mb-2.5">
+      <label class="text-[11px] font-mono uppercase tracking-wider text-ink-500">代理地址</label>
+      <span id="proxyStatus" class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-100 text-ink-500">未测试</span>
+    </div>
+    <input id="proxyUrl" type="text" placeholder="https://xxx.supabase.co/functions/v1/fuyao-proxy" 
+      class="w-full bg-ink-100/60 border border-ink-200 rounded-lg px-3 py-2.5 text-sm font-mono text-ink-900 placeholder-ink-500 focus:border-amber/60 transition-colors">
+  </section>
+
+  <!-- 自动采集开关 -->
+  <section class="mb-4 bg-white border border-ink-200 rounded-xl px-4 py-3 flex items-center justify-between">
+    <div>
+      <div class="text-sm font-semibold text-ink-900">9:25 自动采集</div>
+      <div id="autoStatusText" class="text-[11px] font-mono text-ink-500 mt-0.5">未开启 · 需先拉取成分股</div>
+    </div>
+    <button id="autoToggle" 
+      class="shrink-0 w-12 h-7 rounded-full bg-ink-200 relative transition-colors">
+      <span id="autoKnob" class="absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform"></span>
+    </button>
+  </section>
+
+  <!-- 按钮组 -->
+  <section class="mb-4 space-y-2.5">
+    <button id="ladderBtn" 
+      class="w-full bg-white border border-ink-300 text-ink-900 font-mono text-sm font-semibold py-3 rounded-xl active:bg-ink-100 transition-colors flex items-center justify-center gap-2">
+      <span class="text-base">▲</span>
+      <span>最近多板 · 拉取当日成分股</span>
+    </button>
+    <button id="auctionBtn" 
+      class="w-full bg-amber text-white font-mono text-sm font-semibold py-3 rounded-xl active:opacity-90 transition-opacity flex items-center justify-center gap-2">
+      <span class="text-base">◎</span>
+      <span>手动获取竞价量快照</span>
+    </button>
+  </section>
+
+  <!-- 状态提示 -->
+  <div id="statusMsg" class="hidden mb-4 text-xs font-mono px-3 py-2 rounded-lg"></div>
+
+  <!-- 板块面板 -->
+  <section id="ladderPanel" class="hidden mb-6">
+    <div class="bg-white border border-ink-200 rounded-xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-ink-200 flex items-center justify-between bg-ink-100/50">
+        <div>
+          <div class="text-sm font-bold text-ink-900">最近多板</div>
+          <div class="text-[10px] font-mono text-ink-500">883410.TI</div>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="upCount" class="text-[11px] font-mono text-up"></span>
+          <span id="ladderCount" class="text-[11px] font-mono text-ink-500"></span>
+        </div>
+      </div>
+      <!-- 表头 -->
+      <div class="px-4 py-2 border-b border-ink-200 flex items-center justify-between bg-ink-100/30">
+        <span class="text-[10px] font-mono uppercase tracking-wider text-ink-500 flex-1">股票名称</span>
+        <span class="text-[10px] font-mono uppercase tracking-wider text-ink-500 w-16 text-right">竞价量</span>
+        <span class="text-[10px] font-mono uppercase tracking-wider text-ink-500 w-16 text-right">涨幅</span>
+      </div>
+      <div id="ladderList" class="divide-y divide-ink-100"></div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvbnFmZ2V5eG5ud2ljam9wc2huIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg2NjY3NzEsImV4cCI6MjA5NDI0Mjc3MX0.el-W10JIjr9iQXEKNxV7nLNdhZfOQp6waTY7ZSH27Jg';
+const STORAGE_KEY = 'auction_watch_key';
+const LADDER_THSCODE = '883410.TI';
+
+// ---------- 时钟 ----------
+function tickClock() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = String(now.getMinutes()).padStart(2,'0');
+  const ss = String(now.getSeconds()).padStart(2,'0');
+  document.getElementById('clock').textContent = `${hh}:${mm}:${ss}`;
+  checkAutoTrigger(now);
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// ---------- 代理地址持久化 ----------
+const proxyUrlInput = document.getElementById('proxyUrl');
+const proxyStatusBadge = document.getElementById('proxyStatus');
+
+function safeGetStorage(key) {
+  try {
+    return localStorage.getItem(key) || '';
+  } catch (e) {
+    console.warn('localStorage 不可用（可能是本地文件打开导致）:', e);
+    return '';
+  }
+}
+function safeSetStorage(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (e) {
+    console.warn('localStorage 写入失败:', e);
+  }
+}
+
+proxyUrlInput.value = safeGetStorage(STORAGE_KEY);
+proxyUrlInput.addEventListener('input', () => {
+  safeSetStorage(STORAGE_KEY, proxyUrlInput.value.trim().replace(/\/$/, ''));
+  proxyStatusBadge.textContent = '未测试';
+  proxyStatusBadge.className = 'text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-100 text-ink-500';
+});
+function getProxyBase() {
+  return proxyUrlInput.value.trim().replace(/\/$/, '');
+}
+function markProxyOk() {
+  proxyStatusBadge.textContent = '连通正常';
+  proxyStatusBadge.className = 'text-[10px] font-mono px-1.5 py-0.5 rounded bg-down/10 text-down';
+}
+function markProxyFail() {
+  proxyStatusBadge.textContent = '连接失败';
+  proxyStatusBadge.className = 'text-[10px] font-mono px-1.5 py-0.5 rounded bg-up/10 text-up';
+}
+
+// ---------- 状态提示 ----------
+function showStatus(msg, type='info') {
+  const el = document.getElementById('statusMsg');
+  el.textContent = msg;
+  const styles = {
+    info: 'bg-amber/10 text-amber border border-amber/20',
+    error: 'bg-up/10 text-up border border-up/20',
+    loading: 'bg-ink-100 text-ink-500 border border-ink-200',
+  };
+  el.className = 'mb-4 text-xs font-mono px-3 py-2 rounded-lg block ' + styles[type];
+}
+function hideStatus() {
+  document.getElementById('statusMsg').className = 'hidden';
+}
+
+// ---------- 格式化 ----------
+function fmtNum(n, digits=2) {
+  if (n === null || n === undefined) return '--';
+  return Number(n).toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+function fmtVolWan(v) {
+  if (v === null || v === undefined) return '--';
+  return (v / 10000).toFixed(1);
+}
+
+// ---------- API 调用 ----------
+async function apiGet(proxyBase, path, params) {
+  let url;
+  try {
+    url = new URL(proxyBase);
+  } catch (e) {
+    throw new Error('代理地址格式不正确，请检查是否完整（需以 https:// 开头）');
+  }
+  url.searchParams.set('path', path);
+  for (const k in params) url.searchParams.set(k, params[k]);
+  const resp = await fetch(url.toString(), {
+    headers: { 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
+  });
+  const data = await resp.json();
+  if (data.code !== 0) {
+    throw new Error(data.message || `接口错误 code=${data.code}`);
+  }
+  return data.data;
+}
+
+async function fetchLadderConstituents(proxyBase) {
+  const data = await apiGet(proxyBase, '/api/a-share-index/constituents/ths-stock-list', { thscode: LADDER_THSCODE });
+  return data.item || [];
+}
+
+async function fetchSnapshotsBatch(proxyBase, thscodes) {
+  const chunks = [];
+  for (let i = 0; i < thscodes.length; i += 40) chunks.push(thscodes.slice(i, i + 40));
+  const results = [];
+  for (const chunk of chunks) {
+    const data = await apiGet(proxyBase, '/api/a-share/prices/snapshot', { thscodes: chunk.join(',') });
+    results.push(...(data.item || []));
+  }
+  return results;
+}
+
+// ---------- 状态存储 ----------
+let currentConstituents = [];   // [{thscode, ticker, name}]
+let currentSnapshots = {};      // thscode -> snapshot
+let auctionVolumes = {};        // thscode -> 竞价量(股)
+let autoArmed = false;          // 自动采集是否已开启
+let autoFiredToday = null;      // 记录今天是否已自动触发过 (存日期字符串)
+
+// ---------- 渲染列表 ----------
+function renderLadderList() {
+  const list = document.getElementById('ladderList');
+  const countEl = document.getElementById('ladderCount');
+  const upCountEl = document.getElementById('upCount');
+  list.innerHTML = '';
+
+  countEl.textContent = `${currentConstituents.length} 只`;
+  const upN = currentConstituents.filter(c => {
+    const s = currentSnapshots[c.thscode];
+    return s && s.price_change_ratio_pct >= 0;
+  }).length;
+  upCountEl.textContent = `↑${upN}`;
+
+  currentConstituents.forEach(c => {
+    const snap = currentSnapshots[c.thscode];
+    const pct = snap ? snap.price_change_ratio_pct : null;
+    const isUp = pct !== null && pct >= 0;
+    const auctionVol = auctionVolumes[c.thscode];
+
+    const row = document.createElement('div');
+    row.className = 'px-4 py-2.5 flex items-center justify-between';
+    row.innerHTML = `
+      <div class="min-w-0 flex-1 pr-2">
+        <div class="text-sm font-semibold text-ink-900 truncate">${c.name}</div>
+        <div class="text-[10px] font-mono text-ink-500">${c.thscode}</div>
+      </div>
+      <div class="w-16 text-right shrink-0">
+        <span class="text-xs font-mono ${auctionVol !== undefined ? 'text-amber font-semibold' : 'text-ink-300'}">
+          ${auctionVol !== undefined ? fmtVolWan(auctionVol) : '--'}
+        </span>
+      </div>
+      <div class="w-16 text-right shrink-0">
+        ${pct !== null
+          ? `<span class="text-xs font-mono font-semibold ${isUp ? 'text-up' : 'text-down'}">${isUp ? '+' : ''}${fmtNum(pct)}%</span>`
+          : `<span class="text-xs font-mono text-ink-300">--</span>`
+        }
+      </div>
+    `;
+    list.appendChild(row);
+  });
+}
+
+// ---------- 最近多板：拉取成分股 + 当前快照 ----------
+async function loadLadder() {
+  const proxyBase = getProxyBase();
+  if (!proxyBase) { showStatus('请先填写代理地址', 'error'); return; }
+
+  const btn = document.getElementById('ladderBtn');
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="text-base">▲</span><span>拉取中...</span>';
+  showStatus('正在拉取最近多板成分股...', 'loading');
+
+  try {
+    const constituents = await fetchLadderConstituents(proxyBase);
+    if (constituents.length === 0) {
+      showStatus('最近多板当前无成分股数据', 'error');
+      return;
+    }
+    currentConstituents = constituents;
+
+    const snapshots = await fetchSnapshotsBatch(proxyBase, constituents.map(c => c.thscode));
+    currentSnapshots = {};
+    snapshots.forEach(s => { currentSnapshots[s.thscode] = s; });
+
+    renderLadderList();
+    document.getElementById('ladderPanel').classList.remove('hidden');
+    document.getElementById('ladderPanel').classList.add('slide-up');
+    hideStatus();
+    markProxyOk();
+    updateAutoStatusText();
+  } catch (err) {
+    console.error(err);
+    let msg = err.message || '拉取失败';
+    if (msg.includes('Failed to fetch')) msg = '代理请求失败，检查代理地址是否正确';
+    showStatus(msg, 'error');
+    markProxyFail();
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+}
+
+// ---------- 竞价量快照采集（手动 / 自动 共用） ----------
+async function collectAuctionVolumes(trigger) {
+  const proxyBase = getProxyBase();
+  if (!proxyBase) { showStatus('请先填写代理地址', 'error'); return; }
+  if (currentConstituents.length === 0) {
+    showStatus('请先点击「最近多板」拉取成分股列表', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('auctionBtn');
+  const original = btn.innerHTML;
+  if (trigger === 'manual') {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="text-base">◎</span><span>采集中...</span>';
+  }
+  showStatus(trigger === 'auto' ? '9:25 自动采集触发中...' : '正在采集竞价量快照...', 'loading');
+
+  try {
+    const snapshots = await fetchSnapshotsBatch(proxyBase, currentConstituents.map(c => c.thscode));
+    auctionVolumes = {};
+    currentSnapshots = {};
+    snapshots.forEach(s => {
+      currentSnapshots[s.thscode] = s;
+      auctionVolumes[s.thscode] = s.volume;
+    });
+
+    renderLadderList();
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2,'0');
+    const mm = String(now.getMinutes()).padStart(2,'0');
+    const ss = String(now.getSeconds()).padStart(2,'0');
+    showStatus(`竞价量快照已采集 · ${hh}:${mm}:${ss}${trigger === 'auto' ? ' · 自动触发' : ''}`, 'info');
+    markProxyOk();
+  } catch (err) {
+    console.error(err);
+    let msg = err.message || '采集失败';
+    if (msg.includes('Failed to fetch')) msg = '代理请求失败，检查代理地址是否正确';
+    showStatus(msg, 'error');
+    markProxyFail();
+  } finally {
+    if (trigger === 'manual') {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+}
+
+document.getElementById('ladderBtn').addEventListener('click', loadLadder);
+document.getElementById('auctionBtn').addEventListener('click', () => collectAuctionVolumes('manual'));
+
+// ---------- 自动采集开关 ----------
+const autoToggle = document.getElementById('autoToggle');
+const autoKnob = document.getElementById('autoKnob');
+const autoDot = document.getElementById('autoDot');
+const autoStatusText = document.getElementById('autoStatusText');
+
+function updateAutoStatusText() {
+  if (!autoArmed) {
+    autoStatusText.textContent = currentConstituents.length === 0
+      ? '未开启 · 需先拉取成分股'
+      : '未开启';
+    autoDot.className = 'w-2 h-2 rounded-full bg-ink-300';
+    return;
+  }
+  const today = new Date().toLocaleDateString('zh-CN');
+  if (autoFiredToday === today) {
+    autoStatusText.textContent = '今日已采集 · 等待明日 9:25';
+  } else {
+    autoStatusText.textContent = '待命中 · 页面需保持打开，屏幕不锁';
+  }
+  autoDot.className = 'w-2 h-2 rounded-full bg-amber pulse-dot';
+}
+
+autoToggle.addEventListener('click', () => {
+  if (!autoArmed && currentConstituents.length === 0) {
+    showStatus('请先点击「最近多板」拉取成分股列表，再开启自动采集', 'error');
+    return;
+  }
+  autoArmed = !autoArmed;
+  if (autoArmed) {
+    autoToggle.classList.remove('bg-ink-200');
+    autoToggle.classList.add('bg-amber');
+    autoKnob.classList.add('translate-x-5');
+  } else {
+    autoToggle.classList.add('bg-ink-200');
+    autoToggle.classList.remove('bg-amber');
+    autoKnob.classList.remove('translate-x-5');
+  }
+  updateAutoStatusText();
+});
+
+// ---------- 到点自动触发检查 ----------
+// 页面必须保持打开、屏幕不锁，定时器才会准时触发。
+// 在 9:25:00 - 9:25:05 窗口内，若当天尚未自动采集过，则自动调用一次。
+function checkAutoTrigger(now) {
+  if (!autoArmed) return;
+  const today = now.toLocaleDateString('zh-CN');
+  if (autoFiredToday === today) return;
+
+  const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
+  if (h === 9 && m === 25 && s <= 5) {
+    autoFiredToday = today;
+    updateAutoStatusText();
+    collectAuctionVolumes('auto');
+  }
+}
+</script>
+
+</body>
+</html>
