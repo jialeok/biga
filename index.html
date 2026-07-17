@@ -12391,6 +12391,33 @@
             return result;
         }
 
+        // 基于 todayList（当前显示的表格）构建 yesterdayList
+        // 保留 auctionData[yesterday] 原有同名股票的业务字段（volume/yestVolume/note 等）
+        // 这是用户的核心需求：不管股票怎么导入的，只要表格里显示了，就是获取数据的基础
+        function buildYesterdayListFromToday(todayList, auctionData, yesterday) {
+            const existingYesterdayMap = {};
+            (auctionData[yesterday] || []).forEach(function(s) {
+                if (s && s.stock) existingYesterdayMap[s.stock.trim()] = s;
+            });
+            return todayList.map(function(s) {
+                const name = (s.stock || '').trim();
+                const existing = existingYesterdayMap[name];
+                return {
+                    stock: s.stock,
+                    code: (s.code || (existing ? (existing.code || '') : '') || '').trim(),
+                    volume: existing ? (existing.volume || '') : '',
+                    yestVolume: existing ? (existing.yestVolume || '') : '',
+                    note: existing ? (existing.note || '') : '',
+                    changePct: existing ? (existing.changePct || '') : '',
+                    topics: existing ? (existing.topics || '') : '',
+                    selected: existing ? existing.selected : false,
+                    bought: existing ? existing.bought : false,
+                    sold: existing ? existing.sold : false,
+                    fixed: existing ? existing.fixed : false
+                };
+            });
+        }
+
         // ---------- 同花顺：补全昨日成交量（填两个交易日的 yestVolume，不动 volume） ----------
         async function fillYesterdayVolumeFromThs(btn) {
             const statusEl = document.getElementById('thsApiStatus');
@@ -12406,27 +12433,13 @@
 
                 const auctionData = getAuctionData();
                 const todayList = (auctionData[today] || []).slice();
-                // 对比日列表为空时，从今日列表复制 stock+code 骨架，让 yestVolume 有行可填
-                // （不复制 volume/yestVolume/note 等业务字段，避免伪造数据）
-                let yesterdayList = (auctionData[yesterday] || []).slice();
-                const yesterdayListWasEmpty = yesterdayList.length === 0 && todayList.length > 0;
-                if (yesterdayListWasEmpty) {
-                    yesterdayList = todayList.map(function(s) {
-                        return {
-                            stock: s.stock,
-                            code: s.code || '',
-                            volume: '',
-                            yestVolume: '',
-                            note: '',
-                            changePct: '',
-                            topics: '',
-                            selected: false,
-                            bought: false,
-                            sold: false,
-                            fixed: false
-                        };
-                    });
+                if (todayList.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 当日列表为空，请先导入股票到表格', false);
+                    return;
                 }
+                // yesterdayList 始终基于 todayList（当前显示的表格），保留 auctionData[yesterday] 原有同名股票的业务字段
+                const yesterdayList = buildYesterdayListFromToday(todayList, auctionData, yesterday);
+                const yesterdayListWasEmpty = (auctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 // 收集需要查询的股票代码（today + yesterday 合并去重）
@@ -12498,7 +12511,7 @@
                 const todayTotal = todayList.length;
                 const yesterdayTotal = yesterdayList.length;
                 const yesterdaySource = yesterdayListWasEmpty
-                    ? '（对比日列表为空，已用今日成分股骨架）'
+                    ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
                     : '';
                 setApiStatus('thsApiStatus',
                     '✅ 今日填 ' + todayFilled + '/' + todayTotal + '，对比日填 ' + yesterdayFilled + '/' + yesterdayTotal + yesterdaySource +
@@ -12593,29 +12606,13 @@
                 }
                 const auctionData = getAuctionData();
                 const todayList = (auctionData[today] || []).slice();
-                let yesterdayList = (auctionData[yesterday] || []).slice();
-                const yesterdayListWasEmpty = yesterdayList.length === 0 && todayList.length > 0;
-                if (yesterdayListWasEmpty) {
-                    yesterdayList = todayList.map(function(s) {
-                        return {
-                            stock: s.stock,
-                            code: s.code || '',
-                            volume: '',
-                            yestVolume: '',
-                            note: '',
-                            changePct: '',
-                            topics: '',
-                            selected: false,
-                            bought: false,
-                            sold: false,
-                            fixed: false
-                        };
-                    });
-                }
-                if (yesterdayList.length === 0) {
-                    setApiStatus('thsApiStatus', '❌ 对比日列表为空且当日列表也为空，请先获取最近多板', false);
+                if (todayList.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 当日列表为空，请先导入股票到表格', false);
                     return;
                 }
+                // yesterdayList 始终基于 todayList（当前显示的表格），保留 auctionData[yesterday] 原有同名股票的业务字段
+                const yesterdayList = buildYesterdayListFromToday(todayList, auctionData, yesterday);
+                const yesterdayListWasEmpty = (auctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
                 const codeToName = {};
                 yesterdayList.forEach(function(s) {
@@ -12654,7 +12651,7 @@
                 renderList();
 
                 const yesterdaySource = yesterdayListWasEmpty
-                    ? '（对比日列表为空，已用今日成分股骨架）'
+                    ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
                     : '';
                 setApiStatus('thsApiStatus',
                     '✅ 对比日昨成交量填 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）',
@@ -12698,13 +12695,21 @@
 
                 const auctionData = getAuctionData();
                 const todayList = (auctionData[today] || []).slice();
-                const yesterdayList = (auctionData[yesterday] || []).slice();
+                if (todayList.length === 0) {
+                    setApiStatus('numcatApiStatus', '❌ 当日列表为空，请先导入股票到表格', false);
+                    return;
+                }
+                // yesterdayList 始终基于 todayList（当前显示的表格），保留 auctionData[yesterday] 原有同名股票的业务字段
+                const yesterdayList = opts.fillYesterday
+                    ? buildYesterdayListFromToday(todayList, auctionData, yesterday)
+                    : [];
+                const yesterdayListWasEmpty = opts.fillYesterday && (auctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 const needToday = opts.fillToday && todayList.length > 0;
                 const needYesterday = opts.fillYesterday && yesterdayList.length > 0;
                 if (!needToday && !needYesterday) {
-                    setApiStatus('numcatApiStatus', '❌ 没有可补全的股票（对应日期列表为空）', false);
+                    setApiStatus('numcatApiStatus', '❌ 没有可补全的股票', false);
                     return;
                 }
 
@@ -12810,8 +12815,11 @@
                 renderList();
 
                 const mode = (needToday && needYesterday) ? '昨日+今日' : (needToday ? '今日' : '昨日');
+                const yesterdayNote = (needYesterday && yesterdayListWasEmpty)
+                    ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
+                    : '';
                 setApiStatus('numcatApiStatus',
-                    '✅ ' + mode + '补全 ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据',
+                    '✅ ' + mode + '补全 ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote,
                     true);
             } catch (err) {
                 console.error('fetchAuctionFromNumcat 失败:', err);
