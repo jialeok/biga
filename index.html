@@ -12876,8 +12876,31 @@
                     return;
                 }
 
+                // ---- 诊断日志：区分"接口未返回该 symbol"与"返回了但字段为空" ----
+                console.log('[补全题材诊断] 请求参数:', JSON.stringify(params));
+                console.log('[补全题材诊断] 请求股票代码 (' + codes.length + '):', codes.join(','));
+                console.log('[补全题材诊断] 接口返回字段:', fields);
+                console.log('[补全题材诊断] 接口返回行数:', items.length);
+                console.log('[补全题材诊断] 接口原始返回 items:', JSON.stringify(items));
+
+                const returnedCodes = new Set();
+                items.forEach(function(row) {
+                    const code = String(row[symIdx] || '').trim();
+                    const themeNames = String(row[themeIdx] || '').trim();
+                    returnedCodes.add(code);
+                    console.log('[补全题材诊断] symbol=' + code +
+                        ' 股票=' + ((codeToStock[code] || {}).stock || '未匹配到请求列表') +
+                        ' theme_names_kpl=' + (themeNames ? '"' + themeNames + '"' : '(空字符串)'));
+                });
+                const missingCodes = codes.filter(function(c) { return !returnedCodes.has(c); });
+                if (missingCodes.length > 0) {
+                    console.log('[补全题材诊断] 接口完全未返回以下代码 (' + missingCodes.length + '):',
+                        missingCodes.map(function(c) { return c + '(' + (codeToStock[c] || {}).stock + ')'; }).join(', '));
+                }
+
                 let filledCount = 0;
                 let skippedCount = 0;
+                let emptyFieldCount = 0;
                 items.forEach(function(row) {
                     const code = String(row[symIdx] || '').trim();
                     const themeNames = String(row[themeIdx] || '').trim();
@@ -12885,6 +12908,7 @@
                     if (!stock) return;
                     if (!themeNames) {
                         skippedCount++;
+                        emptyFieldCount++;
                         return;
                     }
                     // 分割题材，取前 3 个
@@ -12895,7 +12919,11 @@
                 });
 
                 // 没有返回数据的股票也算跳过
-                skippedCount += (codes.length - filledCount - skippedCount);
+                const noRowCount = codes.length - filledCount - emptyFieldCount;
+                skippedCount = emptyFieldCount + noRowCount;
+                console.log('[补全题材诊断] 汇总: 成功=' + filledCount +
+                    ' 返回但字段为空=' + emptyFieldCount +
+                    ' 接口未返回该symbol=' + noRowCount);
 
                 saveModule('auction');
                 invalidateTopicCache();
@@ -12908,7 +12936,7 @@
                 });
 
                 setApiStatus('numcatApiStatus',
-                    '✅ [' + dateLabel + '] 补全 ' + filledCount + ' 只股票题材，跳过 ' + skippedCount + ' 只无数据或已有题材',
+                    '✅ [' + dateLabel + '] 补全 ' + filledCount + '，接口返回但题材为空 ' + emptyFieldCount + '，接口未返回该股票 ' + noRowCount,
                     true);
             } catch (err) {
                 console.error('fillTopicsFromNumcatRun 失败:', err);
