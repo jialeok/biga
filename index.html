@@ -8504,6 +8504,31 @@
             return result;
         }
 
+        // 把单只股票的题材写入云端 stock_topics 表（按 stock 维度，跨日期共享）
+        // 用户在主程序编辑题材后调用，确保下次打开主程序时能从 stock_topics 表读到
+        async function pushStockTopicsToCloud(stockName, topicsArray, code) {
+            if (!stockName) return;
+            const sb = getSupabase();
+            const topicsStr = (topicsArray || []).filter(t => t && t.trim()).map(t => t.trim()).join(',');
+            const row = {
+                stock: stockName.trim(),
+                topics: topicsStr,
+                code: code || '',
+                updated_at: new Date().toISOString()
+            };
+            const { error } = await sb.from('stock_topics')
+                .upsert(row, { onConflict: 'stock' });
+            if (error) throw error;
+
+            // 同步更新本地缓存，避免下次 buildTopicCache 时丢失
+            const trimmedName = stockName.trim();
+            if (!_cloudTopicsCache) _cloudTopicsCache = {};
+            _cloudTopicsCache[trimmedName] = new Set(topicsStr ? topicsStr.split(',').map(t => t.trim()).filter(t => t) : []);
+            if (_topicCacheBuilt && _topicCache) {
+                _topicCache[trimmedName] = new Set(_cloudTopicsCache[trimmedName]);
+            }
+        }
+
         // 从云端加载题材库到内存缓存（非阻塞，失败只打日志）
         async function loadCloudTopics() {
             try {
@@ -10539,7 +10564,7 @@
                 ? allDates.slice(-TOPIC_CACHE_DAYS)
                 : allDates;
             recentDates.forEach(date => {
-                if (date === currentDate) return;
+                // 不再排除当天：今天编辑的题材也应进入缓存，避免切换日期后回看时丢失
                 const dayList = auctionData[date] || [];
                 dayList.forEach(item => {
                     if (!item.stock) return;
@@ -10587,7 +10612,7 @@
                 ? allDates.slice(-TOPIC_CACHE_DAYS)
                 : allDates;
             recentDates.forEach(date => {
-                if (date === currentDate) return;
+                // 不排除当天：与 buildTopicCache 保持一致
                 const dayList = auctionData[date] || [];
                 const stockItem = dayList.find(item => item.stock && item.stock.trim() === stockName.trim());
                 if (stockItem && stockItem.note) {
@@ -16130,6 +16155,9 @@
             // 若"全部展开"开关已打开，渲染完成后自动展开（切换排序/搜索/重新渲染后维持状态）
             if (document.getElementById(_p + 'ExpandAllToggle2')?.checked) {
                 expandAllAuctionTrendPanelsP2();
+            } else {
+                // 否则恢复用户此前手动展开过的题材组（避免 Realtime 重渲染导致展开状态丢失）
+                restoreExpandedTopicGroupsP2(dataSource);
             }
 
             // "竞/昨数"（第二页）：常驻显示实际允许高光的达标股票数量，不带箭头
@@ -17729,8 +17757,11 @@
                     auctionData[currentDate] = auctionList;
 
                     if (currentGroup === 'hot') {
-                        syncHotStocksListForDate(currentDate).catch(function(e) {
-                            console.warn('syncHotStocksListForDate 失败（openAuctionNoteEditFromPage2）:', e);
+                        saveData();
+                        // 推送到 hot_stocks 云表（全量 upsert，含 note/topics/change_pct 等字段）
+                        // 注意：syncHotStocksListForDate 只同步状态/增删，不更新 note/topics，故用 pushHotStocksDataToCloud
+                        pushHotStocksDataToCloud(currentDate, auctionList).catch(function(e) {
+                            console.warn('pushHotStocksDataToCloud 失败（openAuctionNoteEditFromPage2）:', e);
                         });
                     } else {
                         saveData();
@@ -17742,7 +17773,15 @@
 
                     // 同步更新已添加股票的收盘涨幅
                     syncStockCloseFromAuction(stockName, normalizedNote);
-                    
+
+                    // 同步推送到 stock_topics 表（按 stock 维度，跨日期共享），避免下次打开时题材丢失
+                    const topicsArr = extractTopics(normalizedNote);
+                    const scMap = loadAllData().stockCodeMap || {};
+                    const stockCode = scMap[stockName.trim()] || (item ? (item.code || '') : '');
+                    pushStockTopicsToCloud(stockName, topicsArr, stockCode).catch(function(e) {
+                        console.warn('pushStockTopicsToCloud 失败（openAuctionNoteEditFromPage2）:', e);
+                    });
+
                     // 同步更新股票列表中的题材，统一保存一次
                     syncStockTopicsFromAuction();
                     saveModule('stocks');
@@ -18343,6 +18382,10 @@
 
         // ===== 第二页（按题材分组）专用的趋势图展开逻辑 =====
 
+        // 第二页"已展开的题材组"状态记录：存 `${dataSource}|${topic}` 格式
+        // Realtime 重渲染后用此 Set 恢复展开状态，避免 1-2 秒后自动收起
+        var _p2ExpandedTopics = new Set();
+
         // 展开/收起第二页某一行的趋势面板（rowKey 用于定位具体行，因为同一股票可能在多个题材下重复出现）
         function toggleAuctionTrendPanelP2(rowKey, stockName) {
             const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
@@ -18383,6 +18426,11 @@
             (_content2El || document).querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
                 arrowEl.classList.add('expanded');
             });
+            // 同步状态：当前 dataSource 的所有题材都加入 Set，Realtime 重渲染后可恢复
+            (_content2El || document).querySelectorAll('.auction-topic-expand-row').forEach(rowEl => {
+                const t = rowEl.dataset.topic;
+                if (t) _p2ExpandedTopics.add(_tp + '|' + t);
+            });
         }
 
         // 收起第二页所有趋势面板
@@ -18397,6 +18445,41 @@
             // 同步所有题材标题栏的箭头方向为"收起"
             _scope2.querySelectorAll('.auction-topic-expand-arrow').forEach(arrowEl => {
                 arrowEl.classList.remove('expanded');
+            });
+            // 清空当前 dataSource 的所有题材状态（保留另一个 dataSource 的）
+            const _prefix = _tp + '|';
+            Array.from(_p2ExpandedTopics).forEach(key => {
+                if (key.startsWith(_prefix)) _p2ExpandedTopics.delete(key);
+            });
+        }
+
+        // 根据 _p2ExpandedTopics 记录的展开状态，在 renderAuctionPage2 重新渲染后恢复各题材组展开
+        function restoreExpandedTopicGroupsP2(dataSource) {
+            if (!_p2ExpandedTopics || _p2ExpandedTopics.size === 0) return;
+            const _tp = dataSource === 'hot' ? 'hot' : 'auction';
+            const _prefix = _tp + '|';
+            const _content2El = document.getElementById(_tp + 'Content2');
+            if (!_content2El) return;
+
+            _p2ExpandedTopics.forEach(key => {
+                if (!key.startsWith(_prefix)) return;
+                const topic = key.substring(_prefix.length);
+                const groupEl = _content2El.querySelector('.auction-topic-group[data-topic-group="' + CSS.escape(topic) + '"]');
+                if (!groupEl) return;
+
+                const arrowEl = groupEl.querySelector('.auction-topic-expand-arrow');
+                if (arrowEl) arrowEl.classList.add('expanded');
+
+                groupEl.querySelectorAll('.auction-trend-trigger-p2').forEach(rowEl => {
+                    const stockName = (rowEl.dataset.stock || '').trim();
+                    const rowKey = rowEl.dataset.rowkey;
+                    if (!stockName || !rowKey) return;
+                    const panel = document.getElementById(_tp + 'TrendPanelP2-' + rowKey);
+                    if (!panel) return;
+                    const history = getAuctionStockHistory(stockName, currentDate, 5, currentGroup);
+                    panel.innerHTML = renderAuctionTrendHtml(history);
+                    panel.style.display = 'block';
+                });
             });
         }
 
@@ -18442,8 +18525,10 @@
             if (arrowEl) {
                 if (anyExpanded) {
                     arrowEl.classList.remove('expanded');
+                    _p2ExpandedTopics.delete(_tp + '|' + topic);
                 } else {
                     arrowEl.classList.add('expanded');
+                    _p2ExpandedTopics.add(_tp + '|' + topic);
                 }
             }
         }
@@ -19215,19 +19300,33 @@
                 saveData();
                 renderAuction();
 
-                // 同步推送到 auction_data 云表，避免下次 pullFromCloud 时被云端旧数据覆盖丢失
-                pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
-                    console.warn('pushAuctionDataToCloud 失败（showAuctionNoteInput）:', e);
-                });
+                // 按 currentGroup 分支推送到对应的云表（hot_stocks / auction_data），避免错误写入
+                if (currentGroup === 'hot') {
+                    pushHotStocksDataToCloud(currentDate, auctionList).catch(function(e) {
+                        console.warn('pushHotStocksDataToCloud 失败（showAuctionNoteInput）:', e);
+                    });
+                } else {
+                    pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
+                        console.warn('pushAuctionDataToCloud 失败（showAuctionNoteInput）:', e);
+                    });
+                }
 
                 // 同步更新已添加股票的收盘涨幅
                 const stockName = auctionList[index].stock;
                 syncStockCloseFromAuction(stockName, normalizedNote);
-                
+
+                // 同步推送到 stock_topics 表（按 stock 维度，跨日期共享），避免下次打开时题材丢失
+                const topicsArr = extractTopics(normalizedNote);
+                const scMap = loadAllData().stockCodeMap || {};
+                const stockCode = scMap[stockName.trim()] || auctionList[index].code || '';
+                pushStockTopicsToCloud(stockName, topicsArr, stockCode).catch(function(e) {
+                    console.warn('pushStockTopicsToCloud 失败（showAuctionNoteInput）:', e);
+                });
+
                 // 同步更新股票列表中的题材，统一保存一次
                 syncStockTopicsFromAuction();
                 saveModule('stocks');
-                
+
                 renderList();
             }
         }
@@ -29206,11 +29305,17 @@
                     item.stock && item.stock.trim() === stock.name.trim()
                 );
                 
-                if (auctionItem && auctionItem.note) {
-                    // 提取题材
-                    const topics = extractTopics(auctionItem.note);
+                if (auctionItem) {
+                    // 优先从 topics 字段读取，回退到 note 字段提取
+                    let topics = [];
+                    if (auctionItem.topics) {
+                        topics = auctionItem.topics.split(/[,，、;；]/).map(t => t.trim()).filter(t => t);
+                    }
+                    if (topics.length === 0 && auctionItem.note) {
+                        topics = extractTopics(auctionItem.note);
+                    }
                     const newXgcaiti = topics.join('，');
-                    
+
                     // 如果有题材且与当前不同，则更新
                     if (newXgcaiti && newXgcaiti !== stock.xgcaiti) {
                         stock.xgcaiti = newXgcaiti;
