@@ -28038,6 +28038,9 @@
                 renderTagTitles();
                 renderRank();
                 renderAuction();
+                // 热门股票看板也必须重新渲染，否则切换日期后会残留上一个日期的数据
+                // （所有日期切换函数都走 renderList，原先只渲染了 auction 分组）
+                renderHotStocks();
                 renderMulti();
                 renderHotspot();
                 renderEtf();
