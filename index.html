@@ -13154,6 +13154,9 @@
         //   - 历史日期：调用历史热股榜（hot-stock-list-history，不支持飙升榜）
         async function fetchSkyrocketHotStocksMain(btn) {
             setBtnLoading(btn, true);
+            // 关键修复：函数开始时立刻锁定当前日期快照，避免请求进行中（await 期间）
+            // 用户切换了日期 tab 导致全局 currentDate 改变，从而把数据写到错误的日期上
+            const fetchDate = currentDate;
             try {
                 // 获取系统今天（Asia/Shanghai 时区，yyyy-MM-dd 格式）
                 const now = new Date();
@@ -13163,9 +13166,9 @@
                 const sysToday = `${sysYear}-${sysMonth}-${sysDay}`;
 
                 // 日期判断：未来日期禁止拉取
-                if (currentDate > sysToday) {
+                if (fetchDate > sysToday) {
                     setApiStatus('thsApiStatusHot',
-                        '❌ 未来日期（' + currentDate + '）无交易数据，请切换到今天（' + sysToday + '）或历史日期',
+                        '❌ 未来日期（' + fetchDate + '）无交易数据，请切换到今天（' + sysToday + '）或历史日期',
                         false);
                     return;
                 }
@@ -13173,7 +13176,7 @@
                 let constituents = [];
                 let statusMsg = '';
 
-                if (currentDate === sysToday) {
+                if (fetchDate === sysToday) {
                     // 今天：调用飙升榜 + 热股榜（实时榜单）
                     setApiStatus('thsApiStatusHot', '正在请求同花顺飙升榜 + A股热股榜单...', true);
                     const [skyrocketData, hotStockData] = await Promise.all([
@@ -13200,9 +13203,9 @@
                     }
                     statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '）';
                 } else {
-                    // 历史日期：调用历史热股榜（hot-stock-list-history?date=currentDate）
-                    setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + currentDate + '）...', true);
-                    const historyData = await fuyaoApiGet('/api/a-share/special-data/hot-stock-list-history', { date: currentDate });
+                    // 历史日期：调用历史热股榜（hot-stock-list-history?date=fetchDate）
+                    setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + fetchDate + '）...', true);
+                    const historyData = await fuyaoApiGet('/api/a-share/special-data/hot-stock-list-history', { date: fetchDate });
                     const historyItems = (historyData && historyData.item) || [];
 
                     // 历史热股榜字段与实时热股榜一致（thscode/ticker/name/rank）
@@ -13213,17 +13216,26 @@
                     constituents = Object.values(mergedMap);
 
                     if (constituents.length === 0) {
-                        setApiStatus('thsApiStatusHot', '历史热股榜单（' + currentDate + '）无数据', false);
+                        setApiStatus('thsApiStatusHot', '历史热股榜单（' + fetchDate + '）无数据', false);
                         return;
                     }
                     statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（历史热股榜，不支持飙升榜）';
+                }
+
+                // 安全检查：如果用户在请求进行中切换到了别的日期 tab，此时不应再写入
+                // fetchDate 的数据（用户可能已经在看别的日期，静默写入容易造成"看起来数据串了"的错觉）
+                if (currentDate !== fetchDate) {
+                    setApiStatus('thsApiStatusHot',
+                        '⚠️ 已切换日期，' + fetchDate + ' 的榜单数据未写入（请回到该日期重新获取）',
+                        false);
+                    return;
                 }
 
                 // 备份当日数据（用于撤回）
                 backupHotStocksData('import');
 
                 const hotAuctionData = getHotAuctionData();
-                const existingList = hotAuctionData[currentDate] || [];
+                const existingList = hotAuctionData[fetchDate] || [];
                 const existingMap = {};
                 existingList.forEach(function(s) {
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
@@ -13264,11 +13276,11 @@
                     saveModule('stockCodeMap');
                 }
 
-                hotAuctionData[currentDate] = newList;
+                hotAuctionData[fetchDate] = newList;
                 invalidateTopicCache();
 
                 // 同步到云端 hot_stocks 表（处理增删 + 新股票的完整字段插入）
-                syncHotStocksListForDate(currentDate).catch(function(e) {
+                syncHotStocksListForDate(fetchDate).catch(function(e) {
                     console.warn('syncHotStocksListForDate 失败:', e);
                 });
 
