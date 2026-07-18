@@ -13411,7 +13411,13 @@
         }
 
         // ---------- 同花顺（热门股票）：当天昨日成交量（单独调 yesterday 单天，只填 today.yestVolume） ----------
-        async function fillHotTodayYesterdayVolumeFromThs(btn) {
+        // 点击按钮先弹窗选择 补全（只填缺失） / 覆盖（全部重新抓取覆盖）
+        function fillHotTodayYesterdayVolumeFromThs(btn) {
+            showNumcatChoiceModal('当天昨日成交量', function(overwrite) {
+                runFillHotTodayYesterdayVolumeFromThs(btn, overwrite);
+            });
+        }
+        async function runFillHotTodayYesterdayVolumeFromThs(btn, overwrite) {
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -13439,13 +13445,14 @@
                     return;
                 }
 
-                setApiStatus('thsApiStatusHot', '正在获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
+                const modeLabel = overwrite ? '覆盖' : '补全';
+                setApiStatus('thsApiStatusHot', '正在' + modeLabel + '获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
                 const volYesterday = await fetchDayVolumes(allCodes, yesterday); // ticker -> volume(股)
 
                 let filled = 0, skipped = 0;
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (getNumericVolume(s.yestVolume) !== null) return; // 已有值，跳过
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值，跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
@@ -13462,10 +13469,10 @@
                 renderHotStocks();
 
                 setApiStatus('thsApiStatusHot',
-                    '✅ 当天昨日成交量填 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ [' + modeLabel + '] 当天昨日成交量填 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
-                console.error('fillHotTodayYesterdayVolumeFromThs 失败:', err);
+                console.error('runFillHotTodayYesterdayVolumeFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
@@ -13475,7 +13482,13 @@
         }
 
         // ---------- 同花顺（热门股票）：对比日昨成交量（以当前日期表格为准，单独调 dayBefore 单天，只填 today.yestVolume） ----------
-        async function fillHotYesterdayYesterdayVolumeFromThs(btn) {
+        // 点击按钮先弹窗选择 补全（只填缺失） / 覆盖（全部重新抓取覆盖）
+        function fillHotYesterdayYesterdayVolumeFromThs(btn) {
+            showNumcatChoiceModal('对比日昨成交量', function(overwrite) {
+                _fillHotYesterdayYesterdayVolumeFromThsImpl(btn, overwrite);
+            });
+        }
+        async function _fillHotYesterdayYesterdayVolumeFromThsImpl(btn, overwrite) {
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -13505,13 +13518,14 @@
                     return;
                 }
 
-                setApiStatus('thsApiStatusHot', '正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
+                const modeLabel = overwrite ? '覆盖' : '补全';
+                setApiStatus('thsApiStatusHot', '正在' + modeLabel + '获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
 
                 let filled = 0, skipped = 0;
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (getNumericVolume(s.yestVolume) !== null) return;
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值，跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
@@ -13528,10 +13542,10 @@
                 renderHotStocks();
 
                 setApiStatus('thsApiStatusHot',
-                    '✅ 对比日昨成交量填 ' + filled + '/' + todayList.length + '（对比日 ' + dayBefore + '），跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ [' + modeLabel + '] 对比日昨成交量填 ' + filled + '/' + todayList.length + '（对比日 ' + dayBefore + '），跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
-                console.error('fillHotYesterdayYesterdayVolumeFromThs 失败:', err);
+                console.error('_fillHotYesterdayYesterdayVolumeFromThsImpl 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
