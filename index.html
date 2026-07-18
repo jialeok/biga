@@ -30798,6 +30798,13 @@
                 pullDailyHighlights().then(function() {
                     renderAuction();
                 }).catch(function(e) { console.warn('daily_highlights 加载失败:', e.message); });
+                // 热门股票数据存在独立的 hot_stocks 表中，不在 pullFromCloud() 拉取的 user_data blob 里，
+                // 必须单独加载，否则刷新页面后"热门股票"分组会一直显示为空（数据其实还在云端）
+                // （Realtime 订阅已在上面的 startSessionPoll() 里启动，这里只需要补上遗漏的初始数据加载）
+                pullHotStocksHighlights().catch(function(e) { console.warn('hot_stocks_highlights 加载失败:', e.message); });
+                loadHotStocksFromCloud().then(function() {
+                    if (typeof renderHotStocks === 'function') renderHotStocks();
+                }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
                 // 后台拉取全量数据（慢），完成后刷新所有页面
                 pullFromCloud().then(function() {
                     allData = null; loadAllData();
