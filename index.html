@@ -8852,7 +8852,7 @@
 
             // 后台加载热门股票数据与高光缓存（Tab 切换前预拉取，避免切换瞬间等待）
             pullHotStocksHighlights().catch(function(e) { console.warn('hot_stocks_highlights 加载失败:', e.message); });
-            loadHotStocksFromCloud().then(function() { if (typeof renderHotStocks === 'function') renderHotStocks(); }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
+            loadHotStocksFromCloud().then(function() { if (typeof renderHotStocks === 'function') renderHotStocks(); _cleanupHotHistoryDatesOnce(); }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
 
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
@@ -11491,6 +11491,43 @@
             alert('✅ 已清空所有热门股票行');
         }
 
+        // 一次性清空所有历史日期的热门股票数据（只保留当天）
+        // 用途：清理 buildYesterdayListFromToday 连锁复制累积的历史污染数据
+        // 通过 localStorage 标记 hotHistoryCleanupDone 确保只执行一次
+        function _cleanupHotHistoryDatesOnce() {
+            if (localStorage.getItem('hotHistoryCleanupDone') === '1') return;
+            const hotData = getHotAuctionData();
+            const today = currentDate;
+            const historyDates = Object.keys(hotData).filter(function(d) { return d && d !== today; });
+            if (historyDates.length === 0) {
+                localStorage.setItem('hotHistoryCleanupDone', '1');
+                return;
+            }
+            // 1. 清空本地 _hotAuctionData 里非当天的数据
+            historyDates.forEach(function(d) { delete hotData[d]; });
+            // 2. 清空云端 hot_stocks 表里非当天的数据（置 in_watchlist=false，保留行快照供历史行情查询）
+            const sb = getSupabase();
+            const now = new Date().toISOString();
+            sb.from('hot_stocks')
+                .update({ in_watchlist: false, updated_at: now, updated_by: 'main' })
+                .neq('date', today)
+                .then(function() {
+                    // 3. 同步删除 _hotFullRowCache 里非当天的数据
+                    if (typeof _hotFullRowCache !== 'undefined') {
+                        historyDates.forEach(function(d) { delete _hotFullRowCache[d]; });
+                    }
+                    invalidateTopicCache();
+                    renderHotForm();
+                    renderAuction('hot');
+                    console.log('✅ 已清空 ' + historyDates.length + ' 个历史日期的热门股票数据（一次性清理）');
+                    localStorage.setItem('hotHistoryCleanupDone', '1');
+                })
+                .catch(function(err) {
+                    console.error('_cleanupHotHistoryDatesOnce 失败:', err);
+                    // 失败不标记，下次启动重试
+                });
+        }
+
         // AI识图（热门股票独立版本）：打开后写入 hotPasteInput，调用 importHotFromPaste
         function openHotAiVisionModal() {
             _aiVisionTarget = 'hot';
@@ -13264,9 +13301,9 @@
                     setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先导入股票到表格', false);
                     return;
                 }
-                // yesterdayList 始终基于 todayList（当前显示的表格），保留 hotAuctionData[yesterday] 原有同名股票的业务字段
-                const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
-                const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
+                // yesterdayList 直接读 hotAuctionData[yesterday] 已有列表，不复制 todayList（避免污染历史日期）
+                const yesterdayList = (hotAuctionData[yesterday] || []).slice();
+                const yesterdayListWasEmpty = yesterdayList.length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 // 收集需要查询的股票代码（today + yesterday 合并去重）
@@ -13310,6 +13347,14 @@
                 pushHotStocksDataToCloud(today, todayList).catch(function(e) { console.warn('pushHotStocksDataToCloud today 失败:', e); });
 
                 // ===== 第二批：调取对比日的昨日成交量（yesterday.yestVolume ← dayBefore 的 volume）=====
+                if (yesterdayList.length === 0) {
+                    setApiStatus('thsApiStatusHot',
+                        '✅ 今日填 ' + todayFilled + '/' + todayList.length + '，对比日列表为空已跳过',
+                        true);
+                    renderHotForm();
+                    renderHotStocks();
+                    return;
+                }
                 setApiStatus('thsApiStatusHot', '【2/2】正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
 
@@ -13427,14 +13472,12 @@
                     return;
                 }
                 const hotAuctionData = getHotAuctionData();
-                const todayList = (hotAuctionData[today] || []).slice();
-                if (todayList.length === 0) {
-                    setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先导入股票到表格', false);
+                // yesterdayList 直接读 hotAuctionData[yesterday] 已有列表，不复制 todayList（避免污染历史日期）
+                const yesterdayList = (hotAuctionData[yesterday] || []).slice();
+                if (yesterdayList.length === 0) {
+                    setApiStatus('thsApiStatusHot', '❌ 对比日列表为空，请先在对比日导入股票', false);
                     return;
                 }
-                // yesterdayList 始终基于 todayList（当前显示的表格），保留 hotAuctionData[yesterday] 原有同名股票的业务字段
-                const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
-                const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
                 const codeToName = {};
                 yesterdayList.forEach(function(s) {
@@ -13470,11 +13513,8 @@
                 renderHotForm();
                 renderHotStocks();
 
-                const yesterdaySource = yesterdayListWasEmpty
-                    ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
-                    : '';
                 setApiStatus('thsApiStatusHot',
-                    '✅ 对比日昨成交量填 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ 对比日昨成交量填 ' + filled + '/' + yesterdayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
                 console.error('fillHotYesterdayYesterdayVolumeFromThs 失败:', err);
@@ -13637,11 +13677,11 @@
                     setApiStatus('numcatApiStatusHot', '❌ 当日列表为空，请先导入股票到表格', false);
                     return;
                 }
-                // yesterdayList 始终基于 todayList（当前显示的表格），保留 hotAuctionData[yesterday] 原有同名股票的业务字段
+                // yesterdayList 直接读 hotAuctionData[yesterday] 已有列表，不复制 todayList（避免污染历史日期）
                 const yesterdayList = opts.fillYesterday
-                    ? buildYesterdayListFromToday(todayList, hotAuctionData, yesterday)
+                    ? (hotAuctionData[yesterday] || []).slice()
                     : [];
-                const yesterdayListWasEmpty = opts.fillYesterday && (hotAuctionData[yesterday] || []).length === 0;
+                const yesterdayListWasEmpty = opts.fillYesterday && yesterdayList.length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 const needToday = opts.fillToday && todayList.length > 0;
@@ -14551,10 +14591,20 @@
                 board.classList.remove('collapsed');
             }
 
-            // 标记当前日期为脏，触发 syncAuctionListForDate 全量增删同步
-            // （处理股票名称修改：删除云端旧名称行，插入新名称行）
-            markAuctionDirty(currentDate);
-            scheduleCloudPush();
+            // 标记当前日期为脏，触发全量增删同步
+            // hot 分支：推 hot_stocks 表（syncHotStocksListForDate 增删 + pushHotStocksDataToCloud 全量字段）
+            // auction 分支：推 auction_data 表（markAuctionDirty + scheduleCloudPush）
+            if (currentGroup === 'hot') {
+                syncHotStocksListForDate(currentDate).catch(function(e) {
+                    console.warn('saveAuction syncHotStocksListForDate 失败:', e);
+                });
+                pushHotStocksDataToCloud(currentDate, getHotAuctionData()[currentDate] || []).catch(function(e) {
+                    console.warn('saveAuction pushHotStocksDataToCloud 失败:', e);
+                });
+            } else {
+                markAuctionDirty(currentDate);
+                scheduleCloudPush();
+            }
 
             closeAuctionModal();
         }
@@ -30939,6 +30989,7 @@
                 pullHotStocksHighlights().catch(function(e) { console.warn('hot_stocks_highlights 加载失败:', e.message); });
                 loadHotStocksFromCloud().then(function() {
                     if (typeof renderHotStocks === 'function') renderHotStocks();
+                    _cleanupHotHistoryDatesOnce();
                 }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
                 // 后台拉取全量数据（慢），完成后刷新所有页面
                 pullFromCloud().then(function() {
