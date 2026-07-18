@@ -18752,7 +18752,10 @@
             // 优先从当前点击所在行的 DOM 结构中读取真实股票名，而不是直接信任 index
             // （index 是渲染那一刻的位置，若渲染与点击之间发生了数据刷新重渲染，两者可能已经错位）
             let stockKey = null;
-            const rowEl = document.querySelector('.auction-item[data-index="' + index + '"]');
+            // 限定到当前 tab 的 content 容器内查找，避免早盘竞价和热门股票两个 tab 的 DOM 同时存在时
+            // querySelector 返回错误 tab 的元素（auctionPage1 在 DOM 中排在 hotPage1 前面）
+            const _contentEl = document.getElementById(_tp + 'Content');
+            const rowEl = _contentEl ? _contentEl.querySelector('.auction-item[data-index="' + index + '"]') : null;
             // 优先从 data-stock 属性读取干净股票名（避免 textContent 包含 *、观、⚠️ 等后缀标记导致查找失败）
             if (rowEl && rowEl.dataset.stock) {
                 stockKey = rowEl.dataset.stock.trim();
