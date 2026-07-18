@@ -10532,13 +10532,17 @@
         }
 
         // 获取今日早盘竞价数据
+        // 返回数组的浅拷贝，防止外部修改意外影响原始数据，确保日期间数据隔离
         function getTodayAuction() {
-            return getAuctionData()[currentDate] || [];
+            const list = getAuctionData()[currentDate];
+            return list ? list.slice() : [];
         }
 
         // 获取今日指定分组（早盘竞价 / 热门股票）数据，供渲染函数按 dataSource 复用
+        // 返回数组的浅拷贝，防止外部修改意外影响原始数据，确保日期间数据隔离
         function getTodayGroupList(dataSource='auction') {
-            return getGroupData(dataSource)[currentDate] || [];
+            const list = getGroupData(dataSource)[currentDate];
+            return list ? list.slice() : [];
         }
 
         function buildTopicCache() {
@@ -11393,17 +11397,19 @@
         // 清除题材（热门股票独立版本）
         function clearAllHotConcepts() {
             const hotData = getHotAuctionData();
-            const existingList = hotData[currentDate] || [];
+            const existingList = (hotData[currentDate] || []).slice();
             if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
             let clearCount = 0;
-            existingList.forEach(item => {
+            existingList.forEach((item, idx) => {
                 if ((item.note && item.note.includes('(')) || item.topics) {
-                    let newNote = item.note || '';
+                    const newItem = { ...item };
+                    let newNote = newItem.note || '';
                     newNote = newNote.replace(/\(([^)]+)\)/g, '');
-                    item.note = newNote;
-                    item.topics = '';
+                    newItem.note = newNote;
+                    newItem.topics = '';
                     var parsed = parseNoteToFields(newNote);
-                    item.changePct = parsed.changePct;
+                    newItem.changePct = parsed.changePct;
+                    existingList[idx] = newItem;
                     clearCount++;
                 }
             });
@@ -11423,10 +11429,10 @@
         // 清除文字（热门股票独立版本）
         function clearAllHotText() {
             const hotData = getHotAuctionData();
-            const existingList = hotData[currentDate] || [];
+            const existingList = (hotData[currentDate] || []).slice();
             if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
             let clearCount = 0;
-            existingList.forEach(item => {
+            existingList.forEach((item, idx) => {
                 if (item.note) {
                     const percentMatches = item.note.match(/-?\d+\.?\d*%/g) || [];
                     const bracketMatches = item.note.match(/\([^)]+\)/g) || [];
@@ -11434,10 +11440,11 @@
                     const uniqueZtDt = [...new Set(ztDtMatches)];
                     const newNote = percentMatches.join('') + uniqueZtDt.join('') + bracketMatches.join('');
                     if (newNote !== item.note) {
-                        item.note = newNote;
+                        const newItem = { ...item, note: newNote };
                         var parsed = parseNoteToFields(newNote);
-                        item.changePct = parsed.changePct;
-                        item.topics = parsed.topics;
+                        newItem.changePct = parsed.changePct;
+                        newItem.topics = parsed.topics;
+                        existingList[idx] = newItem;
                         clearCount++;
                     }
                 }
@@ -11458,11 +11465,14 @@
         // 清除注释（热门股票独立版本）
         function clearAllHotNotes() {
             const hotData = getHotAuctionData();
-            const existingList = hotData[currentDate] || [];
+            const existingList = (hotData[currentDate] || []).slice();
             if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
             let clearCount = 0;
-            existingList.forEach(item => {
-                if (item.note) { item.note = ''; clearCount++; }
+            existingList.forEach((item, idx) => {
+                if (item.note) {
+                    existingList[idx] = { ...item, note: '' };
+                    clearCount++;
+                }
             });
             if (clearCount > 0) {
                 getHotAuctionData()[currentDate] = existingList;
@@ -11553,7 +11563,7 @@
             // 同步到今日热门股票列表：将导入的名称追加到 _hotAuctionData[currentDate]（已存在的不重复添加）
             let addedToHot = 0;
             if (newNames.length > 0) {
-                const hotList = getHotAuctionData()[currentDate] || [];
+                const hotList = (getHotAuctionData()[currentDate] || []).slice();
                 newNames.forEach(name => {
                     const exists = hotList.some(item => item && item.stock && item.stock.trim() === name);
                     if (!exists) {
@@ -13154,9 +13164,6 @@
         //   - 历史日期：调用历史热股榜（hot-stock-list-history，不支持飙升榜）
         async function fetchSkyrocketHotStocksMain(btn) {
             setBtnLoading(btn, true);
-            // 关键修复：函数开始时立刻锁定当前日期快照，避免请求进行中（await 期间）
-            // 用户切换了日期 tab 导致全局 currentDate 改变，从而把数据写到错误的日期上
-            const fetchDate = currentDate;
             try {
                 // 获取系统今天（Asia/Shanghai 时区，yyyy-MM-dd 格式）
                 const now = new Date();
@@ -13166,9 +13173,9 @@
                 const sysToday = `${sysYear}-${sysMonth}-${sysDay}`;
 
                 // 日期判断：未来日期禁止拉取
-                if (fetchDate > sysToday) {
+                if (currentDate > sysToday) {
                     setApiStatus('thsApiStatusHot',
-                        '❌ 未来日期（' + fetchDate + '）无交易数据，请切换到今天（' + sysToday + '）或历史日期',
+                        '❌ 未来日期（' + currentDate + '）无交易数据，请切换到今天（' + sysToday + '）或历史日期',
                         false);
                     return;
                 }
@@ -13176,7 +13183,7 @@
                 let constituents = [];
                 let statusMsg = '';
 
-                if (fetchDate === sysToday) {
+                if (currentDate === sysToday) {
                     // 今天：调用飙升榜 + 热股榜（实时榜单）
                     setApiStatus('thsApiStatusHot', '正在请求同花顺飙升榜 + A股热股榜单...', true);
                     const [skyrocketData, hotStockData] = await Promise.all([
@@ -13203,9 +13210,9 @@
                     }
                     statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '）';
                 } else {
-                    // 历史日期：调用历史热股榜（hot-stock-list-history?date=fetchDate）
-                    setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + fetchDate + '）...', true);
-                    const historyData = await fuyaoApiGet('/api/a-share/special-data/hot-stock-list-history', { date: fetchDate });
+                    // 历史日期：调用历史热股榜（hot-stock-list-history?date=currentDate）
+                    setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + currentDate + '）...', true);
+                    const historyData = await fuyaoApiGet('/api/a-share/special-data/hot-stock-list-history', { date: currentDate });
                     const historyItems = (historyData && historyData.item) || [];
 
                     // 历史热股榜字段与实时热股榜一致（thscode/ticker/name/rank）
@@ -13216,26 +13223,17 @@
                     constituents = Object.values(mergedMap);
 
                     if (constituents.length === 0) {
-                        setApiStatus('thsApiStatusHot', '历史热股榜单（' + fetchDate + '）无数据', false);
+                        setApiStatus('thsApiStatusHot', '历史热股榜单（' + currentDate + '）无数据', false);
                         return;
                     }
                     statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（历史热股榜，不支持飙升榜）';
-                }
-
-                // 安全检查：如果用户在请求进行中切换到了别的日期 tab，此时不应再写入
-                // fetchDate 的数据（用户可能已经在看别的日期，静默写入容易造成"看起来数据串了"的错觉）
-                if (currentDate !== fetchDate) {
-                    setApiStatus('thsApiStatusHot',
-                        '⚠️ 已切换日期，' + fetchDate + ' 的榜单数据未写入（请回到该日期重新获取）',
-                        false);
-                    return;
                 }
 
                 // 备份当日数据（用于撤回）
                 backupHotStocksData('import');
 
                 const hotAuctionData = getHotAuctionData();
-                const existingList = hotAuctionData[fetchDate] || [];
+                const existingList = hotAuctionData[currentDate] || [];
                 const existingMap = {};
                 existingList.forEach(function(s) {
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
@@ -13276,11 +13274,11 @@
                     saveModule('stockCodeMap');
                 }
 
-                hotAuctionData[fetchDate] = newList;
+                hotAuctionData[currentDate] = newList;
                 invalidateTopicCache();
 
                 // 同步到云端 hot_stocks 表（处理增删 + 新股票的完整字段插入）
-                syncHotStocksListForDate(fetchDate).catch(function(e) {
+                syncHotStocksListForDate(currentDate).catch(function(e) {
                     console.warn('syncHotStocksListForDate 失败:', e);
                 });
 
