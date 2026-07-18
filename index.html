@@ -2386,31 +2386,33 @@
             background: #e5e7eb;
         }
 
-        /* 竞放量达标行（今日竞价量/昨日竞价量 >= 1.5）：极浅护眼色背景，仅在"环比"开关打开时显示 */
+        /* 竞放量达标行（今日竞价量/昨日竞价量 >= 1.5）：左侧黄色边框，仅在"环比"开关打开时显示
+           用 box-shadow inset 而非 border-left，避免全局 box-sizing:border-box 挤压内容；
+           背景色让给 bought/sold/selected 等状态色，两者互不覆盖 */
         .auction-item.high-ratio {
-            background: #fffbeb;
+            box-shadow: inset 4px 0 0 #f59e0b;
         }
 
         .auction-item.high-ratio:hover {
-            background: #fef3c7;
+            background: rgba(245, 158, 11, 0.12);
         }
 
-        /* 平行达标行（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：独立护眼色，仅在"平行"开关打开时显示，优先于竞放量高光 */
+        /* 平行达标行（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：左侧绿色边框，仅在"平行"开关打开时显示，优先于竞放量高光 */
         .auction-item.parallel-match {
-            background: #ecfdf5;
+            box-shadow: inset 4px 0 0 #10b981;
         }
 
         .auction-item.parallel-match:hover {
-            background: #d1fae5;
+            background: rgba(16, 185, 129, 0.12);
         }
 
-        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：独立护眼色，仅在"竞/昨"开关打开时显示，优先于平行高光 */
+        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：左侧蓝色边框，仅在"竞/昨"开关打开时显示，优先于平行高光 */
         .auction-item.jing-yest-match {
-            background: #eff6ff;
+            box-shadow: inset 4px 0 0 #3b82f6;
         }
 
         .auction-item.jing-yest-match:hover {
-            background: #dbeafe;
+            background: rgba(59, 130, 246, 0.12);
         }
 
         .auction-highratio-stat {
@@ -2982,19 +2984,21 @@
             background: #f3e8ff;
         }
 
-        /* 竞放量达标行（今日竞价量/昨日竞价量四舍五入后 >= 1.5）：极浅护眼色背景，仅在"环比"开关打开时显示 */
+        /* 竞放量达标行（今日竞价量/昨日竞价量四舍五入后 >= 1.5）：左侧黄色边框，仅在"环比"开关打开时显示
+           用 box-shadow inset 而非 border-left，避免全局 box-sizing:border-box 挤压内容；
+           背景色让给 bought/sold/selected 等状态色，两者互不覆盖 */
         .auction-topic-row.high-ratio {
-            background: #fffbeb;
+            box-shadow: inset 4px 0 0 #f59e0b;
         }
 
-        /* 平行达标行：独立护眼色，仅在"平行"开关打开时显示，优先于竞放量高光 */
+        /* 平行达标行：左侧绿色边框，仅在"平行"开关打开时显示，优先于竞放量高光 */
         .auction-topic-row.parallel-match {
-            background: #ecfdf5;
+            box-shadow: inset 4px 0 0 #10b981;
         }
 
-        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：独立护眼色，仅在"竞/昨"开关打开时显示，优先于平行高光 */
+        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：左侧蓝色边框，仅在"竞/昨"开关打开时显示，优先于平行高光 */
         .auction-topic-row.jing-yest-match {
-            background: #eff6ff;
+            box-shadow: inset 4px 0 0 #3b82f6;
         }
 
         .auction-topic-stock {
@@ -15943,7 +15947,7 @@
                         })
                         .map(x => x.s);
                 } else if (sortByParallelEnabled2 && parallelStockNames2) {
-                    if (sortByJingYestEnabled2 && jingYestStockNames2) {
+                    if (sortByJingYestEnabled2) {
                         // "竞/昨"是"平行"的加强筛选，排序需三层：
                         //   1. 竞/昨真正达标（高光条件：平行 + 差值>0 + 位数差<=1）：按"位数差"从小到大排，位数差相同再按差值从高到低排
                         //   2. 平行达标但不满足高光条件（差值<=0，或差值>0但位数差>1）：同样按位数差/差值排序（差值不要求>0，能算出来就参与）
