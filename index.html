@@ -13474,7 +13474,7 @@
             }
         }
 
-        // ---------- 同花顺（热门股票）：对比日昨成交量（单独调 dayBefore 单天，只填 yesterday.yestVolume） ----------
+        // ---------- 同花顺（热门股票）：对比日昨成交量（以当前日期表格为准，单独调 dayBefore 单天，只填 today.yestVolume） ----------
         async function fillHotYesterdayYesterdayVolumeFromThs(btn) {
             setBtnLoading(btn, true);
             try {
@@ -13486,15 +13486,15 @@
                     return;
                 }
                 const hotAuctionData = getHotAuctionData();
-                // yesterdayList 直接读 hotAuctionData[yesterday] 已有列表，不复制 todayList（避免污染历史日期）
-                const yesterdayList = (hotAuctionData[yesterday] || []).slice();
-                if (yesterdayList.length === 0) {
-                    setApiStatus('thsApiStatusHot', '❌ 对比日列表为空，请先在对比日导入股票', false);
+                // 股票列表以当前选中日期（today）导入并保存的表格为准，不读取 yesterday 的表
+                const todayList = (hotAuctionData[today] || []).slice();
+                if (todayList.length === 0) {
+                    setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先获取飙升+热股', false);
                     return;
                 }
                 const scMap = loadAllData().stockCodeMap || {};
                 const codeToName = {};
-                yesterdayList.forEach(function(s) {
+                todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code) codeToName[code] = s.stock.trim();
@@ -13509,7 +13509,7 @@
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
 
                 let filled = 0, skipped = 0;
-                yesterdayList.forEach(function(s) {
+                todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (getNumericVolume(s.yestVolume) !== null) return;
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
@@ -13520,15 +13520,15 @@
                         skipped++;
                     }
                 });
-                hotAuctionData[yesterday] = yesterdayList;
+                hotAuctionData[today] = todayList;
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                pushHotStocksDataToCloud(today, todayList).catch(function(e) { console.warn('pushHotStocksDataToCloud today 失败:', e); });
 
                 renderHotForm();
                 renderHotStocks();
 
                 setApiStatus('thsApiStatusHot',
-                    '✅ 对比日昨成交量填 ' + filled + '/' + yesterdayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ 对比日昨成交量填 ' + filled + '/' + todayList.length + '（对比日 ' + dayBefore + '），跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
                 console.error('fillHotYesterdayYesterdayVolumeFromThs 失败:', err);
