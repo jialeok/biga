@@ -9376,8 +9376,8 @@
 
         // 热门股票脏日期全量同步（照抄 syncAuctionListForDate，改表名 hot_stocks、数据源 getGroupData('hot')）
         async function syncHotStocksListForDate(date) {
-            _justPushedHotAuction = true; // 标记刚推送，5秒内忽略自己触发的 Realtime 通知
-            setTimeout(function() { _justPushedHotAuction = false; }, 5000);
+            _justPushedHotAuction = true; // 标记刚推送，忽略自己触发的 Realtime 通知
+            try {
             const sb = getSupabase();
             const localList = (getGroupData('hot')[date] || []).filter(function(s) { return s && s.stock; });
             const localStocks = new Set(localList.map(function(s) { return s.stock.trim(); }));
@@ -9440,6 +9440,10 @@
                     }));
                 }
             }
+            } finally {
+                // 写入真正全部完成后，再留 2 秒缓冲吸收 Realtime 回显，而不是在写入尚未结束时就提前放开
+                setTimeout(function() { _justPushedHotAuction = false; }, 2000);
+            }
         }
 
         // 热门股票接口按钮专用：全量 upsert 行情数据（volume/yest_volume/change_pct/topics/note 等）
@@ -9449,7 +9453,7 @@
         async function pushHotStocksDataToCloud(date, items) {
             if (!_hotAuctionTableAvailable) return;
             _justPushedHotAuction = true;
-            setTimeout(function() { _justPushedHotAuction = false; }, 5000);
+            try {
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
@@ -9488,13 +9492,16 @@
                     _hotFullRowCache[date].push(mergedRow);
                 }
             });
+            } finally {
+                setTimeout(function() { _justPushedHotAuction = false; }, 2000);
+            }
         }
 
         // pushToCloud 中调用：同步 auction 数据到新表
         async function pushAuctionToCloud() {
             if (!_auctionTableAvailable) return; // 表不可用时跳过，回退到 user_data
-            _justPushedAuction = true; // 标记自己推送，5秒内忽略 Realtime 通知
-            setTimeout(function() { _justPushedAuction = false; }, 5000);
+            _justPushedAuction = true; // 标记自己推送，忽略 Realtime 通知
+            try {
             const dirtyDates = window._auctionDirtyDates ? Array.from(window._auctionDirtyDates) : [];
 
             // 1. 脏日期：全量同步（增删股票）
@@ -9522,13 +9529,16 @@
 
             // 3. 清空脏日期标记
             if (window._auctionDirtyDates) window._auctionDirtyDates.clear();
+            } finally {
+                setTimeout(function() { _justPushedAuction = false; }, 2000);
+            }
         }
 
         // 导入功能用：批量 upsert 行情+状态数据（用于 importAuctionFromPaste / importAuctionHistoryFill）
         async function pushAuctionDataToCloud(date, items) {
             if (!_auctionTableAvailable) return;
             _justPushedAuction = true;
-            setTimeout(function() { _justPushedAuction = false; }, 5000);
+            try {
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
@@ -9575,13 +9585,16 @@
                              so: s.sold || false, f: s.fixed || false };
                 }));
             }
+            } finally {
+                setTimeout(function() { _justPushedAuction = false; }, 2000);
+            }
         }
 
         // 导入代码映射后：批量更新某日期的 code 列
         async function pushAuctionCodeToCloud(date) {
             if (!_auctionTableAvailable) return;
             _justPushedAuction = true;
-            setTimeout(function() { _justPushedAuction = false; }, 5000);
+            try {
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock; });
@@ -9596,6 +9609,9 @@
                 }
             });
             if (tasks.length > 0) await Promise.all(tasks);
+            } finally {
+                setTimeout(function() { _justPushedAuction = false; }, 2000);
+            }
         }
 
         // 一次性迁移：将本地 allData.auction 灌入 auction_data 表
