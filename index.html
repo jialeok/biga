@@ -18266,7 +18266,7 @@
             if (!panel) return;
             const auctionList = getTodayGroupList(currentGroup);
             const item = auctionList[index];
-            if (!item || !item.stock) return;
+            if (!item || !item.stock) return; // index 已失效（数据在渲染后被刷新过），安全放弃这次展开，不报错
             const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5, currentGroup);
             panel.innerHTML = renderAuctionTrendHtml(history);
             panel.style.display = 'block';
@@ -18706,16 +18706,41 @@
         });
 
         // 展开/收起某只股票的5日竞价量+昨日成交量趋势图
+        // 注意：index 来自渲染时绑定的 data-index，但 Realtime 刷新（抓取程序写入后 800ms 防抖重渲染）
+        // 可能在"渲染完成"与"用户实际点击"之间悄悄重建整个列表 DOM（innerHTML 整体替换）。
+        // 一旦发生：旧的 index 可能已经对不上当前数组里的同一只股票，或者对应的面板节点已被替换。
+        // 因此这里优先按点击当下 DOM 里真实显示的股票名称来定位，而不是完全信任传入的 index，
+        // 从而避免出现"点了没反应"的现象。
         function toggleAuctionTrendPanel(index) {
             const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
-            const panel = document.getElementById(_tp + 'TrendPanel-' + index);
-            if (!panel) return;
+            let panel = document.getElementById(_tp + 'TrendPanel-' + index);
+
+            // 优先从当前点击所在行的 DOM 结构中读取真实股票名，而不是直接信任 index
+            // （index 是渲染那一刻的位置，若渲染与点击之间发生了数据刷新重渲染，两者可能已经错位）
+            let stockKey = null;
+            const rowEl = document.querySelector('.auction-item[data-index="' + index + '"]');
+            const nameEl = rowEl ? rowEl.querySelector('.auction-stock-name') : null;
+            if (nameEl) {
+                const nameText = nameEl.textContent.trim();
+                if (nameText && nameText !== '-') stockKey = nameText;
+            }
 
             const auctionList = getTodayGroupList(currentGroup);
-            const item = auctionList[index];
-            const stockKey = item && item.stock ? item.stock.trim() : null;
+            // 如果按 DOM 读到了股票名，用名称重新定位它在当前数组中的真实下标（数据可能已刷新，index 未必仍然有效）
+            let resolvedIndex = index;
+            if (stockKey) {
+                const freshIdx = auctionList.findIndex(it => it && it.stock && it.stock.trim() === stockKey);
+                if (freshIdx >= 0) resolvedIndex = freshIdx;
+            } else {
+                const item = auctionList[index];
+                stockKey = item && item.stock ? item.stock.trim() : null;
+            }
 
-            const isOpen = panel.style.display !== 'none';
+            // 面板节点可能因为期间的重渲染已经不是原来那个了，按最终确定的下标重新获取一次
+            panel = document.getElementById(_tp + 'TrendPanel-' + resolvedIndex) || panel;
+            if (!panel) return;
+
+            const isOpen = panel.style.display !== 'none' && panel.innerHTML !== '';
             if (isOpen) {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
@@ -18724,7 +18749,7 @@
             }
 
             if (stockKey) expandedAuctionStocks.add(stockKey);
-            expandAuctionTrendPanel(index);
+            expandAuctionTrendPanel(resolvedIndex);
         }
 
         // 获取某只股票最近N个交易日（含当天）的竞价量/昨日成交量历史
