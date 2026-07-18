@@ -12861,22 +12861,25 @@
 
                 setApiStatus('numcatApiStatus', '正在请求猫抓接口补全题材（' + dateLabel + '，' + codes.length + ' 只股票）...', true);
 
+                // 一次请求同时拿 3 个题材来源，优先级：开盘啦 > 选股宝 > 韭菜公社，谁有值用谁
                 const data = await numcatApiPost('screening',
-                    'symbol,theme_names_kpl',
+                    'symbol,theme_names_kpl,theme_names_xgb,theme_names_jygs',
                     params
                 );
 
                 const fields = data.fields || [];
                 const items = data.items || [];
                 const symIdx = fields.indexOf('symbol');
-                const themeIdx = fields.indexOf('theme_names_kpl');
+                const kplIdx = fields.indexOf('theme_names_kpl');
+                const xgbIdx = fields.indexOf('theme_names_xgb');
+                const jygsIdx = fields.indexOf('theme_names_jygs');
 
-                if (symIdx < 0 || themeIdx < 0) {
+                if (symIdx < 0 || kplIdx < 0 || xgbIdx < 0 || jygsIdx < 0) {
                     setApiStatus('numcatApiStatus', '❌ 返回数据字段不完整', false);
                     return;
                 }
 
-                // ---- 诊断日志：区分"接口未返回该 symbol"与"返回了但字段为空" ----
+                // ---- 诊断日志：区分"接口未返回该 symbol"与"三个来源都为空" ----
                 console.log('[补全题材诊断] 请求参数:', JSON.stringify(params));
                 console.log('[补全题材诊断] 请求股票代码 (' + codes.length + '):', codes.join(','));
                 console.log('[补全题材诊断] 接口返回字段:', fields);
@@ -12886,11 +12889,15 @@
                 const returnedCodes = new Set();
                 items.forEach(function(row) {
                     const code = String(row[symIdx] || '').trim();
-                    const themeNames = String(row[themeIdx] || '').trim();
+                    const kpl = String(row[kplIdx] || '').trim();
+                    const xgb = String(row[xgbIdx] || '').trim();
+                    const jygs = String(row[jygsIdx] || '').trim();
                     returnedCodes.add(code);
                     console.log('[补全题材诊断] symbol=' + code +
                         ' 股票=' + ((codeToStock[code] || {}).stock || '未匹配到请求列表') +
-                        ' theme_names_kpl=' + (themeNames ? '"' + themeNames + '"' : '(空字符串)'));
+                        ' 开盘啦=' + (kpl ? '"' + kpl + '"' : '(空)') +
+                        ' 选股宝=' + (xgb ? '"' + xgb + '"' : '(空)') +
+                        ' 韭菜公社=' + (jygs ? '"' + jygs + '"' : '(空)'));
                 });
                 const missingCodes = codes.filter(function(c) { return !returnedCodes.has(c); });
                 if (missingCodes.length > 0) {
@@ -12899,30 +12906,40 @@
                 }
 
                 let filledCount = 0;
-                let skippedCount = 0;
                 let emptyFieldCount = 0;
+                const sourceCounts = { kpl: 0, xgb: 0, jygs: 0 };
                 items.forEach(function(row) {
                     const code = String(row[symIdx] || '').trim();
-                    const themeNames = String(row[themeIdx] || '').trim();
                     const stock = codeToStock[code];
                     if (!stock) return;
+
+                    // 优先级：开盘啦 > 选股宝 > 韭菜公社，谁有值用谁
+                    const kpl = String(row[kplIdx] || '').trim();
+                    const xgb = String(row[xgbIdx] || '').trim();
+                    const jygs = String(row[jygsIdx] || '').trim();
+                    let themeNames = '';
+                    let sourceUsed = '';
+                    if (kpl) { themeNames = kpl; sourceUsed = 'kpl'; }
+                    else if (xgb) { themeNames = xgb; sourceUsed = 'xgb'; }
+                    else if (jygs) { themeNames = jygs; sourceUsed = 'jygs'; }
+
                     if (!themeNames) {
-                        skippedCount++;
                         emptyFieldCount++;
                         return;
                     }
-                    // 分割题材，取前 3 个
+                    // 分割题材，取前 3 个（填入逻辑不变）
                     const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) { return t; });
                     const top3 = topicList.slice(0, 3).join('，');
                     stock.topics = top3;
                     filledCount++;
+                    sourceCounts[sourceUsed]++;
                 });
 
                 // 没有返回数据的股票也算跳过
                 const noRowCount = codes.length - filledCount - emptyFieldCount;
-                skippedCount = emptyFieldCount + noRowCount;
                 console.log('[补全题材诊断] 汇总: 成功=' + filledCount +
-                    ' 返回但字段为空=' + emptyFieldCount +
+                    ' (开盘啦=' + sourceCounts.kpl + ' 选股宝=' + sourceCounts.xgb + ' 韭菜公社=' + sourceCounts.jygs + ')' +
+                    ' 三个来源均为空=' + emptyFieldCount +
                     ' 接口未返回该symbol=' + noRowCount);
 
                 saveModule('auction');
@@ -12936,7 +12953,9 @@
                 });
 
                 setApiStatus('numcatApiStatus',
-                    '✅ [' + dateLabel + '] 补全 ' + filledCount + '，接口返回但题材为空 ' + emptyFieldCount + '，接口未返回该股票 ' + noRowCount,
+                    '✅ [' + dateLabel + '] 补全 ' + filledCount +
+                    '（开盘啦' + sourceCounts.kpl + '/选股宝' + sourceCounts.xgb + '/韭菜公社' + sourceCounts.jygs + '）' +
+                    '，三源均空 ' + emptyFieldCount + '，接口未返回 ' + noRowCount,
                     true);
             } catch (err) {
                 console.error('fillTopicsFromNumcatRun 失败:', err);
