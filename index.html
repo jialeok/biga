@@ -13449,16 +13449,22 @@
                 setApiStatus('thsApiStatusHot', '正在' + modeLabel + '获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
                 const volYesterday = await fetchDayVolumes(allCodes, yesterday); // ticker -> volume(股)
 
-                let filled = 0, skipped = 0;
+                let filled = 0;
+                const noCodeNames = [];   // 缺代码映射，根本没查
+                const noDataNames = [];   // 有代码，但接口没返回该日期数据
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值，跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
-                    if (code && volYesterday[code] != null) {
+                    if (!code) {
+                        noCodeNames.push(s.stock.trim());
+                        return;
+                    }
+                    if (volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
                         filled++;
                     } else {
-                        skipped++;
+                        noDataNames.push(s.stock.trim());
                     }
                 });
                 hotAuctionData[today] = todayList;
@@ -13468,8 +13474,23 @@
                 renderHotForm();
                 renderHotStocks();
 
+                const skipped = noCodeNames.length + noDataNames.length;
+                if (skipped > 0) {
+                    console.log('[当天昨日成交量] 缺代码映射（' + noCodeNames.length + '）:', noCodeNames);
+                    console.log('[当天昨日成交量] 接口无数据（' + noDataNames.length + '，查询日 ' + yesterday + '）:', noDataNames);
+                }
+                const previewNames = function(names) {
+                    if (names.length === 0) return '';
+                    const shown = names.slice(0, 5).join('、');
+                    return names.length > 5 ? shown + '等' + names.length + '只' : shown;
+                };
+                let skipDetail = '';
+                if (noCodeNames.length > 0) skipDetail += '缺代码' + noCodeNames.length + '（' + previewNames(noCodeNames) + '）';
+                if (noDataNames.length > 0) skipDetail += (skipDetail ? '，' : '') + '接口无数据' + noDataNames.length + '（' + previewNames(noDataNames) + '）';
+
                 setApiStatus('thsApiStatusHot',
-                    '✅ [' + modeLabel + '] 当天昨日成交量填 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ [' + modeLabel + '] 当天昨日成交量填 ' + filled + '/' + todayList.length +
+                    (skipped > 0 ? '，跳过 ' + skipped + '：' + skipDetail + '（详情见控制台）' : ''),
                     true);
             } catch (err) {
                 console.error('runFillHotTodayYesterdayVolumeFromThs 失败:', err);
@@ -13522,16 +13543,22 @@
                 setApiStatus('thsApiStatusHot', '正在' + modeLabel + '获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
 
-                let filled = 0, skipped = 0;
+                let filled = 0;
+                const noCodeNames = [];   // 缺代码映射，根本没查
+                const noDataNames = [];   // 有代码，但接口没返回该日期数据
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值，跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
-                    if (code && volDayBefore[code] != null) {
+                    if (!code) {
+                        noCodeNames.push(s.stock.trim());
+                        return;
+                    }
+                    if (volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
                         filled++;
                     } else {
-                        skipped++;
+                        noDataNames.push(s.stock.trim());
                     }
                 });
                 hotAuctionData[today] = todayList;
@@ -13541,8 +13568,23 @@
                 renderHotForm();
                 renderHotStocks();
 
+                const skipped = noCodeNames.length + noDataNames.length;
+                if (skipped > 0) {
+                    console.log('[对比日昨成交量] 缺代码映射（' + noCodeNames.length + '）:', noCodeNames);
+                    console.log('[对比日昨成交量] 接口无数据（' + noDataNames.length + '，查询日 ' + dayBefore + '）:', noDataNames);
+                }
+                const previewNames = function(names) {
+                    if (names.length === 0) return '';
+                    const shown = names.slice(0, 5).join('、');
+                    return names.length > 5 ? shown + '等' + names.length + '只' : shown;
+                };
+                let skipDetail = '';
+                if (noCodeNames.length > 0) skipDetail += '缺代码' + noCodeNames.length + '（' + previewNames(noCodeNames) + '）';
+                if (noDataNames.length > 0) skipDetail += (skipDetail ? '，' : '') + '接口无数据' + noDataNames.length + '（' + previewNames(noDataNames) + '）';
+
                 setApiStatus('thsApiStatusHot',
-                    '✅ [' + modeLabel + '] 对比日昨成交量填 ' + filled + '/' + todayList.length + '（对比日 ' + dayBefore + '），跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ [' + modeLabel + '] 对比日昨成交量填 ' + filled + '/' + todayList.length + '（对比日 ' + dayBefore + '）' +
+                    (skipped > 0 ? '，跳过 ' + skipped + '：' + skipDetail + '（详情见控制台）' : ''),
                     true);
             } catch (err) {
                 console.error('_fillHotYesterdayYesterdayVolumeFromThsImpl 失败:', err);
