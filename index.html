@@ -9107,6 +9107,34 @@
             _hotAuctionTableAvailable = true;
             _hotAuctionData = result;
             console.log('hot_stocks 加载完成:', Object.keys(result).length, '个日期');
+
+            // 防御性修复：如果非当天日期有 in_watchlist=true 的行，自动置为 false
+            // 防止其他端或 upsert 意外把历史日期的 in_watchlist 改回 true
+            const historyDatesWithData = Object.keys(result).filter(function(d) { return d && d !== currentDate; });
+            if (historyDatesWithData.length > 0) {
+                const sb = getSupabase();
+                const now = new Date().toISOString();
+                sb.from('hot_stocks')
+                    .update({ in_watchlist: false, updated_at: now, updated_by: 'main_autoclean' })
+                    .neq('date', currentDate)
+                    .eq('in_watchlist', true)
+                    .then(function() {
+                        // 同步清理本地 _hotAuctionData 里非当天的数据
+                        historyDatesWithData.forEach(function(d) { delete _hotAuctionData[d]; });
+                        // 同步清理 _hotFullRowCache 里非当天的 in_watchlist=true 标记
+                        if (_hotFullRowCache) {
+                            historyDatesWithData.forEach(function(d) {
+                                if (_hotFullRowCache[d]) {
+                                    _hotFullRowCache[d].forEach(function(r) { r.in_watchlist = false; });
+                                }
+                            });
+                        }
+                        console.log('🛡️  防御性清理：已将 ' + historyDatesWithData.length + ' 个历史日期的 in_watchlist 置为 false');
+                    })
+                    .catch(function(err) {
+                        console.warn('防御性清理历史日期 in_watchlist 失败:', err);
+                    });
+            }
         }
 
         // 从 hot_stocks_highlights 表加载所有预计算高光（小表，快）
