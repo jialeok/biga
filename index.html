@@ -10906,6 +10906,11 @@
             syncHotStocksListForDate(currentDate).catch(function(err) {
                 console.error('saveHotStocks syncHotStocksListForDate 失败:', err);
             });
+            // syncHotStocksListForDate 不会更新已有股票的 note/changePct/topics，这里补一次，
+            // 避免新股票带出的历史题材（getStockHistoryTopics）只留在本地、刷新后丢失
+            pushHotStocksDataToCloud(currentDate, hotList).catch(function(err) {
+                console.error('saveHotStocks pushHotStocksDataToCloud 失败:', err);
+            });
             closeHotEditModal();
         }
 
@@ -11116,9 +11121,14 @@
             // 写入 _hotAuctionData（不写 localStorage，不调 saveModule/saveData）
             getHotAuctionData()[currentDate] = hotList;
             invalidateTopicCache();
-            // 同步到 hot_stocks 表（不调 pushAuctionDataToCloud）
+            // 同步到 hot_stocks 表：增删/状态用 syncHotStocksListForDate，
+            // 但它不会把已有股票的 note/changePct/topics/volume 写到云端（只处理增删和选中状态），
+            // 所以这里必须再补一次 pushHotStocksDataToCloud，否则涨幅/题材/注释等更新只留在本地，刷新后消失
             syncHotStocksListForDate(currentDate).catch(function(err) {
                 console.error('importHotFromPaste syncHotStocksListForDate 失败:', err);
+            });
+            pushHotStocksDataToCloud(currentDate, hotList).catch(function(err) {
+                console.error('importHotFromPaste pushHotStocksDataToCloud 失败:', err);
             });
             const pasteInput = document.getElementById('hotPasteInput');
             if (pasteInput) pasteInput.value = '';
@@ -11210,6 +11220,11 @@
                 invalidateTopicCache();
                 syncHotStocksListForDate(currentDate).catch(function(err) {
                     console.error('replaceHotConceptFromPaste syncHotStocksListForDate 失败:', err);
+                });
+                // syncHotStocksListForDate 只同步增删/选中状态，不会把刚替换的 note/changePct/topics 写到云端
+                // （这正是之前"粘贴导入题材、保存后刷新就消失"的原因）——这里补上真正写入这些字段的调用
+                pushHotStocksDataToCloud(currentDate, existingList).catch(function(err) {
+                    console.error('replaceHotConceptFromPaste pushHotStocksDataToCloud 失败:', err);
                 });
                 renderHotForm();
                 renderAuction('hot');
@@ -11367,6 +11382,7 @@
                 getHotAuctionData()[currentDate] = existingList;
                 invalidateTopicCache();
                 syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotConcepts syncHotStocksListForDate 失败:', err); });
+                pushHotStocksDataToCloud(currentDate, existingList).catch(function(err) { console.error('clearAllHotConcepts pushHotStocksDataToCloud 失败:', err); });
                 renderHotForm();
                 renderAuction('hot');
                 alert('✅ 已清除 ' + clearCount + ' 条题材数据');
@@ -11401,6 +11417,7 @@
                 getHotAuctionData()[currentDate] = existingList;
                 invalidateTopicCache();
                 syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotText syncHotStocksListForDate 失败:', err); });
+                pushHotStocksDataToCloud(currentDate, existingList).catch(function(err) { console.error('clearAllHotText pushHotStocksDataToCloud 失败:', err); });
                 renderHotForm();
                 renderAuction('hot');
                 alert('✅ 已清除 ' + clearCount + ' 条文字数据');
@@ -11422,6 +11439,7 @@
                 getHotAuctionData()[currentDate] = existingList;
                 invalidateTopicCache();
                 syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotNotes syncHotStocksListForDate 失败:', err); });
+                pushHotStocksDataToCloud(currentDate, existingList).catch(function(err) { console.error('clearAllHotNotes pushHotStocksDataToCloud 失败:', err); });
                 renderHotForm();
                 renderAuction('hot');
                 alert('✅ 已清除 ' + clearCount + ' 条注释数据');
