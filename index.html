@@ -13148,32 +13148,75 @@
         // ============================================================
 
         // ---------- 同花顺（热门股票）：获取飙升榜+A股热股榜单 ----------
+        // 根据 currentDate 与系统今天的对比，智能选择 API：
+        //   - 未来日期：禁止拉取（API 只返回最新交易日数据，会造成日期不对齐）
+        //   - 今天：调用飙升榜 + 热股榜（实时榜单）
+        //   - 历史日期：调用历史热股榜（hot-stock-list-history，不支持飙升榜）
         async function fetchSkyrocketHotStocksMain(btn) {
             setBtnLoading(btn, true);
             try {
-                setApiStatus('thsApiStatusHot', '正在请求同花顺飙升榜 + A股热股榜单...', true);
-                // 并行请求两个榜单
-                const [skyrocketData, hotStockData] = await Promise.all([
-                    fuyaoApiGet('/api/a-share/special-data/skyrocket-list', { period: 'day' }),
-                    fuyaoApiGet('/api/a-share/special-data/hot-stock-list', { period: 'day' })
-                ]);
+                // 获取系统今天（Asia/Shanghai 时区，yyyy-MM-dd 格式）
+                const now = new Date();
+                const sysYear = now.getFullYear();
+                const sysMonth = String(now.getMonth() + 1).padStart(2, '0');
+                const sysDay = String(now.getDate()).padStart(2, '0');
+                const sysToday = `${sysYear}-${sysMonth}-${sysDay}`;
 
-                const skyrocketItems = (skyrocketData && skyrocketData.item) || [];
-                const hotStockItems = (hotStockData && hotStockData.item) || [];
-
-                // 按 thscode 去重合并（飙升榜优先，热股榜补充）
-                const mergedMap = {}; // thscode -> item
-                skyrocketItems.forEach(function(c) {
-                    if (c && c.thscode && !mergedMap[c.thscode]) mergedMap[c.thscode] = c;
-                });
-                hotStockItems.forEach(function(c) {
-                    if (c && c.thscode && !mergedMap[c.thscode]) mergedMap[c.thscode] = c;
-                });
-                const constituents = Object.values(mergedMap);
-
-                if (constituents.length === 0) {
-                    setApiStatus('thsApiStatusHot', '飙升榜和热股榜单当前无数据', false);
+                // 日期判断：未来日期禁止拉取
+                if (currentDate > sysToday) {
+                    setApiStatus('thsApiStatusHot',
+                        '❌ 未来日期（' + currentDate + '）无交易数据，请切换到今天（' + sysToday + '）或历史日期',
+                        false);
                     return;
+                }
+
+                let constituents = [];
+                let statusMsg = '';
+
+                if (currentDate === sysToday) {
+                    // 今天：调用飙升榜 + 热股榜（实时榜单）
+                    setApiStatus('thsApiStatusHot', '正在请求同花顺飙升榜 + A股热股榜单...', true);
+                    const [skyrocketData, hotStockData] = await Promise.all([
+                        fuyaoApiGet('/api/a-share/special-data/skyrocket-list', { period: 'day' }),
+                        fuyaoApiGet('/api/a-share/special-data/hot-stock-list', { period: 'day' })
+                    ]);
+
+                    const skyrocketItems = (skyrocketData && skyrocketData.item) || [];
+                    const hotStockItems = (hotStockData && hotStockData.item) || [];
+
+                    // 按 thscode 去重合并（飙升榜优先，热股榜补充）
+                    const mergedMap = {};
+                    skyrocketItems.forEach(function(c) {
+                        if (c && c.thscode && !mergedMap[c.thscode]) mergedMap[c.thscode] = c;
+                    });
+                    hotStockItems.forEach(function(c) {
+                        if (c && c.thscode && !mergedMap[c.thscode]) mergedMap[c.thscode] = c;
+                    });
+                    constituents = Object.values(mergedMap);
+
+                    if (constituents.length === 0) {
+                        setApiStatus('thsApiStatusHot', '飙升榜和热股榜单当前无数据', false);
+                        return;
+                    }
+                    statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '）';
+                } else {
+                    // 历史日期：调用历史热股榜（hot-stock-list-history?date=currentDate）
+                    setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + currentDate + '）...', true);
+                    const historyData = await fuyaoApiGet('/api/a-share/special-data/hot-stock-list-history', { date: currentDate });
+                    const historyItems = (historyData && historyData.item) || [];
+
+                    // 历史热股榜字段与实时热股榜一致（thscode/ticker/name/rank）
+                    const mergedMap = {};
+                    historyItems.forEach(function(c) {
+                        if (c && c.thscode && !mergedMap[c.thscode]) mergedMap[c.thscode] = c;
+                    });
+                    constituents = Object.values(mergedMap);
+
+                    if (constituents.length === 0) {
+                        setApiStatus('thsApiStatusHot', '历史热股榜单（' + currentDate + '）无数据', false);
+                        return;
+                    }
+                    statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（历史热股榜，不支持飙升榜）';
                 }
 
                 // 备份当日数据（用于撤回）
@@ -13233,9 +13276,7 @@
                 renderHotForm();
                 renderHotStocks();
 
-                setApiStatus('thsApiStatusHot',
-                    '✅ 已获取 ' + newList.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + newList.length + '）',
-                    true);
+                setApiStatus('thsApiStatusHot', statusMsg, true);
             } catch (err) {
                 console.error('fetchSkyrocketHotStocksMain 失败:', err);
                 let msg = err && err.message ? err.message : '拉取失败';
