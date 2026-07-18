@@ -8852,7 +8852,7 @@
 
             // 后台加载热门股票数据与高光缓存（Tab 切换前预拉取，避免切换瞬间等待）
             pullHotStocksHighlights().catch(function(e) { console.warn('hot_stocks_highlights 加载失败:', e.message); });
-            loadHotStocksFromCloud().then(function() { if (typeof renderHotStocks === 'function') renderHotStocks(); _cleanupHotHistoryDatesOnce(); }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
+            loadHotStocksFromCloud().then(function() { if (typeof renderHotStocks === 'function') renderHotStocks(); }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
 
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
@@ -9107,34 +9107,6 @@
             _hotAuctionTableAvailable = true;
             _hotAuctionData = result;
             console.log('hot_stocks 加载完成:', Object.keys(result).length, '个日期');
-
-            // 防御性修复：如果非当天日期有 in_watchlist=true 的行，自动置为 false
-            // 防止其他端或 upsert 意外把历史日期的 in_watchlist 改回 true
-            const historyDatesWithData = Object.keys(result).filter(function(d) { return d && d !== currentDate; });
-            if (historyDatesWithData.length > 0) {
-                const sb = getSupabase();
-                const now = new Date().toISOString();
-                sb.from('hot_stocks')
-                    .update({ in_watchlist: false, updated_at: now, updated_by: 'main_autoclean' })
-                    .neq('date', currentDate)
-                    .eq('in_watchlist', true)
-                    .then(function() {
-                        // 同步清理本地 _hotAuctionData 里非当天的数据
-                        historyDatesWithData.forEach(function(d) { delete _hotAuctionData[d]; });
-                        // 同步清理 _hotFullRowCache 里非当天的 in_watchlist=true 标记
-                        if (_hotFullRowCache) {
-                            historyDatesWithData.forEach(function(d) {
-                                if (_hotFullRowCache[d]) {
-                                    _hotFullRowCache[d].forEach(function(r) { r.in_watchlist = false; });
-                                }
-                            });
-                        }
-                        console.log('🛡️  防御性清理：已将 ' + historyDatesWithData.length + ' 个历史日期的 in_watchlist 置为 false');
-                    })
-                    .catch(function(err) {
-                        console.warn('防御性清理历史日期 in_watchlist 失败:', err);
-                    });
-            }
         }
 
         // 从 hot_stocks_highlights 表加载所有预计算高光（小表，快）
@@ -11517,43 +11489,6 @@
             renderHotForm();
             renderAuction('hot');
             alert('✅ 已清空所有热门股票行');
-        }
-
-        // 一次性清空所有历史日期的热门股票数据（只保留当天）
-        // 用途：清理 buildYesterdayListFromToday 连锁复制累积的历史污染数据
-        // 通过 localStorage 标记 hotHistoryCleanupDone 确保只执行一次
-        function _cleanupHotHistoryDatesOnce() {
-            if (localStorage.getItem('hotHistoryCleanupDone') === '1') return;
-            const hotData = getHotAuctionData();
-            const today = currentDate;
-            const historyDates = Object.keys(hotData).filter(function(d) { return d && d !== today; });
-            if (historyDates.length === 0) {
-                localStorage.setItem('hotHistoryCleanupDone', '1');
-                return;
-            }
-            // 1. 清空本地 _hotAuctionData 里非当天的数据
-            historyDates.forEach(function(d) { delete hotData[d]; });
-            // 2. 清空云端 hot_stocks 表里非当天的数据（置 in_watchlist=false，保留行快照供历史行情查询）
-            const sb = getSupabase();
-            const now = new Date().toISOString();
-            sb.from('hot_stocks')
-                .update({ in_watchlist: false, updated_at: now, updated_by: 'main' })
-                .neq('date', today)
-                .then(function() {
-                    // 3. 同步删除 _hotFullRowCache 里非当天的数据
-                    if (typeof _hotFullRowCache !== 'undefined') {
-                        historyDates.forEach(function(d) { delete _hotFullRowCache[d]; });
-                    }
-                    invalidateTopicCache();
-                    renderHotForm();
-                    renderAuction('hot');
-                    console.log('✅ 已清空 ' + historyDates.length + ' 个历史日期的热门股票数据（一次性清理）');
-                    localStorage.setItem('hotHistoryCleanupDone', '1');
-                })
-                .catch(function(err) {
-                    console.error('_cleanupHotHistoryDatesOnce 失败:', err);
-                    // 失败不标记，下次启动重试
-                });
         }
 
         // AI识图（热门股票独立版本）：打开后写入 hotPasteInput，调用 importHotFromPaste
@@ -14619,20 +14554,11 @@
                 board.classList.remove('collapsed');
             }
 
-            // 标记当前日期为脏，触发全量增删同步
-            // hot 分支：推 hot_stocks 表（syncHotStocksListForDate 增删 + pushHotStocksDataToCloud 全量字段）
-            // auction 分支：推 auction_data 表（markAuctionDirty + scheduleCloudPush）
-            if (currentGroup === 'hot') {
-                syncHotStocksListForDate(currentDate).catch(function(e) {
-                    console.warn('saveAuction syncHotStocksListForDate 失败:', e);
-                });
-                pushHotStocksDataToCloud(currentDate, getHotAuctionData()[currentDate] || []).catch(function(e) {
-                    console.warn('saveAuction pushHotStocksDataToCloud 失败:', e);
-                });
-            } else {
-                markAuctionDirty(currentDate);
-                scheduleCloudPush();
-            }
+            // 标记当前日期为脏，触发 syncAuctionListForDate 全量增删同步
+            // （处理股票名称修改：删除云端旧名称行，插入新名称行）
+            // 注意：本函数 saveAuction 是早盘竞价表单的保存按钮；热门股票表单的保存按钮调用 saveHotStocks
+            markAuctionDirty(currentDate);
+            scheduleCloudPush();
 
             closeAuctionModal();
         }
@@ -31017,7 +30943,6 @@
                 pullHotStocksHighlights().catch(function(e) { console.warn('hot_stocks_highlights 加载失败:', e.message); });
                 loadHotStocksFromCloud().then(function() {
                     if (typeof renderHotStocks === 'function') renderHotStocks();
-                    _cleanupHotHistoryDatesOnce();
                 }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
                 // 后台拉取全量数据（慢），完成后刷新所有页面
                 pullFromCloud().then(function() {
