@@ -12807,7 +12807,15 @@
         }
 
         // ---------- 猫抓：补全题材（开盘啦，只填 topics 为空的股票） ----------
-        async function fillTopicsFromNumcat(btn) {
+        // 弹窗选择：补全实时题材（走当前最新交易日实时大表，非交易日/盘前可能查不到数据）
+        //          补全上次题材（走上一交易日历史沉淀数据，任何时间点都能查到）
+        function fillTopicsFromNumcat(btn) {
+            showNumcatChoiceModal('补全题材', function(useLatest) {
+                fillTopicsFromNumcatRun(btn, useLatest);
+            }, { fillLabel: '上次题材', fillSub: '上一交易日', overwriteLabel: '实时题材', overwriteSub: '最新交易日' });
+        }
+
+        async function fillTopicsFromNumcatRun(btn, useLatest) {
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -12837,13 +12845,25 @@
                     return;
                 }
 
-                setApiStatus('numcatApiStatus', '正在请求猫抓接口补全题材（' + codes.length + ' 只股票）...', true);
+                // useLatest=true：不传 tradedate，走实时大表查最新交易日（盘前/非交易日可能查不到）
+                // useLatest=false：传上一交易日日期，走历史沉淀数据查询逻辑（任何时间点都能查到）
+                let params = { symbols: codes.join(',') };
+                let dateLabel = '最新交易日';
+                if (!useLatest) {
+                    const prevDay = getPreviousTradingDay(today);
+                    if (!prevDay) {
+                        setApiStatus('numcatApiStatus', '❌ 无法确定上一交易日', false);
+                        return;
+                    }
+                    params.tradedate = prevDay.replace(/-/g, '');
+                    dateLabel = prevDay + '（上一交易日）';
+                }
 
-                // 不传 tradedate，让接口默认查最新交易日（题材是股票属性，不依赖日期；
-                // 传非交易日会返回"未找到选股数据"）
+                setApiStatus('numcatApiStatus', '正在请求猫抓接口补全题材（' + dateLabel + '，' + codes.length + ' 只股票）...', true);
+
                 const data = await numcatApiPost('screening',
                     'symbol,theme_names_kpl',
-                    { symbols: codes.join(',') }
+                    params
                 );
 
                 const fields = data.fields || [];
@@ -12888,10 +12908,10 @@
                 });
 
                 setApiStatus('numcatApiStatus',
-                    '✅ 补全 ' + filledCount + ' 只股票题材，跳过 ' + skippedCount + ' 只无数据或已有题材',
+                    '✅ [' + dateLabel + '] 补全 ' + filledCount + ' 只股票题材，跳过 ' + skippedCount + ' 只无数据或已有题材',
                     true);
             } catch (err) {
-                console.error('fillTopicsFromNumcat 失败:', err);
+                console.error('fillTopicsFromNumcatRun 失败:', err);
                 let msg = err && err.message ? err.message : '获取失败';
                 if (msg.indexOf('Failed to fetch') >= 0) {
                     msg = '代理请求失败，请确认 numcat-proxy Edge Function 已部署且 NUMCAT_API_KEY 已设置';
@@ -12999,7 +13019,12 @@
 
         // 显示猫抓操作模式选择弹窗（补全 / 覆盖）
         // onChoose: callback(overwrite: boolean)  overwrite=false=补全, true=覆盖
-        function showNumcatChoiceModal(title, onChoose) {
+        function showNumcatChoiceModal(title, onChoose, labelOpts) {
+            const opts = labelOpts || {};
+            const fillLabel = opts.fillLabel || '补全';
+            const fillSub = opts.fillSub || '只填缺失';
+            const overwriteLabel = opts.overwriteLabel || '覆盖';
+            const overwriteSub = opts.overwriteSub || '全部更新';
             const modal = document.createElement('div');
             modal.className = 'modal active';
             modal.style.zIndex = '3000';
@@ -13008,8 +13033,8 @@
                     <div style="font-size: 15px; font-weight: 600; color: #831843; margin-bottom: 6px; text-align: center;">${title}</div>
                     <div style="font-size: 12px; color: #6b7280; margin-bottom: 16px; text-align: center;">请选择操作模式</div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">
-                        <button type="button" data-choice="fill" style="padding: 12px 8px; font-size: 13px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 6px; cursor: pointer; min-height: 44px; font-weight: 500;">补全<br><span style="font-size: 10px; opacity: 0.9;">只填缺失</span></button>
-                        <button type="button" data-choice="overwrite" style="padding: 12px 8px; font-size: 13px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 6px; cursor: pointer; min-height: 44px; font-weight: 500;">覆盖<br><span style="font-size: 10px; opacity: 0.9;">全部更新</span></button>
+                        <button type="button" data-choice="fill" style="padding: 12px 8px; font-size: 13px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 6px; cursor: pointer; min-height: 44px; font-weight: 500;">${fillLabel}<br><span style="font-size: 10px; opacity: 0.9;">${fillSub}</span></button>
+                        <button type="button" data-choice="overwrite" style="padding: 12px 8px; font-size: 13px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 6px; cursor: pointer; min-height: 44px; font-weight: 500;">${overwriteLabel}<br><span style="font-size: 10px; opacity: 0.9;">${overwriteSub}</span></button>
                     </div>
                     <button type="button" data-choice="cancel" style="width: 100%; padding: 10px; font-size: 12px; background: #f3f4f6; color: #6b7280; border: none; border-radius: 6px; cursor: pointer; min-height: 40px; margin-top: 4px;">取消</button>
                 </div>
