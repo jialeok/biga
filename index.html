@@ -13522,14 +13522,13 @@
                     return;
                 }
                 const hotAuctionData = getHotAuctionData();
-                // 股票列表以当前选中日期（today）导入并保存的表格为准，用于构建对比日（yesterday）的股票清单，
-                // 并保留 hotAuctionData[yesterday] 原有同名股票的业务字段（volume/yestVolume/note 等）
-                const todayList = (hotAuctionData[today] || []).slice();
-                if (todayList.length === 0) {
-                    setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先获取飙升+热股', false);
+                // 热门股票每天名单不同（不是固定关注列表），不能像早盘竞价那样用今天的名单去构建/覆盖昨天的名单，
+                // 必须直接读取 hotAuctionData[yesterday] 自己已保存的列表，只在原列表上补 yestVolume 字段
+                const yesterdayList = (hotAuctionData[yesterday] || []).slice();
+                if (yesterdayList.length === 0) {
+                    setApiStatus('thsApiStatusHot', '❌ 对比日（' + yesterday + '）列表为空，请先切换到该日期获取飙升+热股，或用"两全昨日成交量"', false);
                     return;
                 }
-                const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
                 const scMap = loadAllData().stockCodeMap || {};
                 const codeToName = {};
                 yesterdayList.forEach(function(s) {
