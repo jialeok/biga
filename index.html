@@ -10002,7 +10002,12 @@
                     });
                 }
                 if (cloudObj.exportDate) {
-                    localStorage.setItem('lastEditedDate_v42', cloudObj.exportDate);
+                    const localDate = localStorage.getItem('lastEditedDate_v42');
+                    // 仅当云端日期比本地新时才覆盖（YYYY-MM-DD 字符串比较等价于日期比较）
+                    // 避免陈旧的云端 exportDate（如 2025-01-02）覆盖本地好日期
+                    if (!localDate || cloudObj.exportDate > localDate) {
+                        localStorage.setItem('lastEditedDate_v42', cloudObj.exportDate);
+                    }
                 }
 
                 // 重置内存中的 allData，让 loadAllData() 重新从 localStorage 读取
@@ -10195,6 +10200,19 @@
             if (savedDate && savedDate >= '2025-01-01') {
                 currentDate = savedDate;
             }
+            // 365 天阈值保护：如果 currentDate 距今超过 365 天，重置为今天
+            // 避免陈旧的 lastEditedDate（如 2025-01-02）导致应用显示历史日期
+            const _now = new Date();
+            const _threshold = new Date(_now.getTime() - 365 * 24 * 60 * 60 * 1000);
+            const _thresholdStr = _threshold.getFullYear() + '-' +
+                String(_threshold.getMonth() + 1).padStart(2, '0') + '-' +
+                String(_threshold.getDate()).padStart(2, '0');
+            if (currentDate < _thresholdStr) {
+                const y = _now.getFullYear();
+                const m = String(_now.getMonth() + 1).padStart(2, '0');
+                const d = String(_now.getDate()).padStart(2, '0');
+                currentDate = y + '-' + m + '-' + d;
+            }
             // 触发原有的 DOMContentLoaded 逻辑（已绑定在页面底部）
             _appInit();
         }
@@ -10211,6 +10229,21 @@
             currentDate = `${year}-${month}-${day}`;
         }
         if (currentDate < '2025-01-01') currentDate = '2025-01-01';
+        // 365 天阈值保护：如果 currentDate 距今超过 365 天，重置为今天
+        // 避免陈旧的 lastEditedDate（如 2025-01-02）导致应用显示历史日期
+        {
+            const _now = new Date();
+            const _threshold = new Date(_now.getTime() - 365 * 24 * 60 * 60 * 1000);
+            const _thresholdStr = _threshold.getFullYear() + '-' +
+                String(_threshold.getMonth() + 1).padStart(2, '0') + '-' +
+                String(_threshold.getDate()).padStart(2, '0');
+            if (currentDate < _thresholdStr) {
+                const _y = _now.getFullYear();
+                const _m = String(_now.getMonth() + 1).padStart(2, '0');
+                const _d = String(_now.getDate()).padStart(2, '0');
+                currentDate = _y + '-' + _m + '-' + _d;
+            }
+        }
 
         let isStrengthSortEnabled = false;
 
