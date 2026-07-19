@@ -8277,6 +8277,23 @@
             }
         }
 
+        // 读取云端当前 session token（刷新恢复登录时用来校验本地 token 是否仍然有效）
+        async function readSessionToken() {
+            try {
+                const sb = getSupabase();
+                const { data, error } = await sb
+                    .from('user_data')
+                    .select('data')
+                    .eq('id', 'session')
+                    .single();
+                if (error) throw error; // 包括"session 行不存在"的情况，走 catch 返回 undefined，不阻断登录
+                return (data && data.data && data.data._session_token) || null;
+            } catch (e) {
+                console.warn('readSessionToken 失败（不阻断登录）:', e && e.message);
+                return undefined; // undefined 表示读取失败/无该行，区别于 null（云端 token 字段为空）
+            }
+        }
+
         // 启动 Realtime 订阅：同时监听互踢 (session行) 和数据变更 (owner行)
         function startSessionPoll() {
             stopSessionPoll();
@@ -8794,8 +8811,8 @@
             stopSessionPoll();
             clearTimeout(_pushDebounceTimer);
             _sessionToken = null;
-            sessionStorage.removeItem('unlocked');
-            sessionStorage.removeItem('sessionToken');
+            localStorage.removeItem('unlocked');
+            localStorage.removeItem('sessionToken');
             document.getElementById('kickedOverlay').style.display = 'flex';
         }
 
@@ -8827,8 +8844,8 @@
             errEl.textContent = '';
             statusEl.innerHTML = '<span style="color:#60a5fa">🔄 正在登录并同步数据...</span>';
             _sessionToken = generateToken();
-            sessionStorage.setItem('unlocked', '1');
-            sessionStorage.setItem('sessionToken', _sessionToken);
+            localStorage.setItem('unlocked', '1');
+            localStorage.setItem('sessionToken', _sessionToken);
             // 先写 token 踢掉旧会话（旧窗口收到后会停止推送）
             await writeSessionToken(_sessionToken);
             // 等待旧窗口的防抖推送完成（防抖2秒 + 网络时间，留足余量）
@@ -13427,8 +13444,10 @@
 
         // ---------- 同花顺（热门股票）：获取飙升榜+A股热股榜单 ----------
         // 根据 currentDate 与系统今天的对比，智能选择 API：
-        //   - 未来日期：禁止拉取（API 只返回最新交易日数据，会造成日期不对齐）
-        //   - 今天：调用飙升榜 + 热股榜（实时榜单）
+        //   - 今天或未来日期：调用飙升榜 + 热股榜（实时榜单）。
+        //     未来日期用于提前建仓位：先用当前最新榜单预置，次日再次点击时
+        //     会按股票名称做增量合并——已存在的股票保留原有 volume/yestVolume/
+        //     note/changePct/选中状态等字段（视为"补全"），新出现的股票才是全新插入。
         //   - 历史日期：调用历史热股榜（hot-stock-list-history，不支持飙升榜）
         async function fetchSkyrocketHotStocksMain(btn) {
             setBtnLoading(btn, true);
@@ -13440,20 +13459,18 @@
                 const sysDay = String(now.getDate()).padStart(2, '0');
                 const sysToday = `${sysYear}-${sysMonth}-${sysDay}`;
 
-                // 日期判断：未来日期禁止拉取
-                if (currentDate > sysToday) {
-                    setApiStatus('thsApiStatusHot',
-                        '❌ 未来日期（' + currentDate + '）无交易数据，请切换到今天（' + sysToday + '）或历史日期',
-                        false);
-                    return;
-                }
-
                 let constituents = [];
                 let statusMsg = '';
 
-                if (currentDate === sysToday) {
-                    // 今天：调用飙升榜 + 热股榜（实时榜单）
-                    setApiStatus('thsApiStatusHot', '正在请求同花顺飙升榜 + A股热股榜单...', true);
+                const isFutureDate = currentDate > sysToday;
+
+                if (currentDate >= sysToday) {
+                    // 今天：实时榜单即为当日数据；未来日期：用实时榜单预置仓位，等次日刷新覆盖
+                    setApiStatus('thsApiStatusHot',
+                        isFutureDate
+                            ? '正在请求同花顺飙升榜 + A股热股榜单（预置到 ' + currentDate + '）...'
+                            : '正在请求同花顺飙升榜 + A股热股榜单...',
+                        true);
                     const [skyrocketData, hotStockData] = await Promise.all([
                         fuyaoApiGet('/api/a-share/special-data/skyrocket-list', { period: 'day' }),
                         fuyaoApiGet('/api/a-share/special-data/hot-stock-list', { period: 'day' })
@@ -13476,7 +13493,9 @@
                         setApiStatus('thsApiStatusHot', '飙升榜和热股榜单当前无数据', false);
                         return;
                     }
-                    statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '）';
+                    statusMsg = isFutureDate
+                        ? ('✅ 已为 ' + currentDate + ' 预置 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '，明日刷新将增量合并覆盖）')
+                        : ('✅ 已获取 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '）');
                 } else {
                     // 历史日期：调用历史热股榜（hot-stock-list-history?date=currentDate）
                     setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + currentDate + '）...', true);
@@ -31253,22 +31272,41 @@
         }  // end _appInit
 
         // ============================================================
-        // 页面启动入口：检查 sessionStorage，决定是否跳过密码
-        // ============================================================
-        window.addEventListener('DOMContentLoaded', function() {
-            if (sessionStorage.getItem('unlocked') === '1') {
-                // 已解锁（同一标签页刷新）：恢复 session token 并重启轮询
-                const savedToken = sessionStorage.getItem('sessionToken');
-                if (savedToken) {
-                    _sessionToken = savedToken;
-                    startSessionPoll();
-                } else {
-                    // sessionStorage 里没有 token（理论上不会，但保险起见重新登录）
-                    sessionStorage.removeItem('unlocked');
+        // 页面启动入口：检查登录状态，决定是否跳过密码
+        // 存储改为 localStorage（原为 sessionStorage，导致部分手机浏览器"刷新"等同于
+        // 关标签页重开，sessionStorage 被清空，每次都要重新输密码）。
+        // 为避免"被踢下线后刷新绕过踢人逻辑"，恢复登录前会先向云端校验 token 是否仍然有效。
+        window.addEventListener('DOMContentLoaded', async function() {
+            // 一次性迁移：老用户 localStorage 里还没有登录态，但 sessionStorage 里有（同一次会话内），直接迁移，不用重新输密码
+            if (localStorage.getItem('unlocked') !== '1' && sessionStorage.getItem('unlocked') === '1') {
+                localStorage.setItem('unlocked', '1');
+                const oldToken = sessionStorage.getItem('sessionToken');
+                if (oldToken) localStorage.setItem('sessionToken', oldToken);
+            }
+
+            if (localStorage.getItem('unlocked') === '1') {
+                // 已解锁：恢复 session token，但先向云端校验是否仍然有效（防止被踢下线后刷新绕过）
+                const savedToken = localStorage.getItem('sessionToken');
+                if (!savedToken) {
+                    localStorage.removeItem('unlocked');
                     document.getElementById('passwordOverlay').style.display = 'flex';
                     setTimeout(function() { document.getElementById('pwdInput').focus(); }, 300);
                     return;
                 }
+
+                const remoteToken = await readSessionToken();
+                if (remoteToken !== undefined && remoteToken !== null && remoteToken !== savedToken) {
+                    // 云端 token 与本地不一致 → 已被其他设备踢下线，要求重新登录
+                    localStorage.removeItem('unlocked');
+                    localStorage.removeItem('sessionToken');
+                    document.getElementById('passwordOverlay').style.display = 'flex';
+                    setTimeout(function() { document.getElementById('pwdInput').focus(); }, 300);
+                    return;
+                }
+                // remoteToken === undefined 表示网络/读取失败，此时不阻断登录，按原 token 继续（避免离线时无法使用）
+
+                _sessionToken = savedToken;
+                startSessionPoll();
                 document.getElementById('passwordOverlay').style.display = 'none';
                 _appInit();
                 // 刷新场景：先快速加载 highlights 缓存（小表，秒开），立即刷新竞/昨显示
