@@ -2042,6 +2042,11 @@
             max-width: 320px;
             height: auto;
             display: block;
+            animation: starStatsDonutFadeIn 0.35s ease;
+        }
+        @keyframes starStatsDonutFadeIn {
+            from { opacity: 0.35; }
+            to { opacity: 1; }
         }
 
         .star-stats-donut-center-value {
@@ -17485,6 +17490,10 @@
         }
 
         // 渲染星标签统计看板（星无/星现/星平/星增/星减 占比伞形图 + 数量横向柱状图）
+        // _lastStarStatsSignature：上一次实际渲染时的数据指纹，用于判断本次调用数据是否真的发生变化（治本：避免无意义的重复渲染）
+        // _lastStarStatsShape：上一次渲染出的 DOM 结构类型（'empty' | 'nostar' | 'full'），结构不同才整体重建，结构相同只做局部更新（治标：避免整体 innerHTML 重建造成的闪烁）
+        let _lastStarStatsSignature = null;
+        let _lastStarStatsShape = null;
         function renderAuctionStatsBoard(dataSource='auction') {
             const container = document.getElementById('starStatsContent');
             if (!container) return;
@@ -17496,6 +17505,10 @@
             const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction || []) : [];
 
             if (!todayGroups || todayGroups.length === 0) {
+                const sig = 'empty|' + dataSource + '|' + currentDate;
+                if (_lastStarStatsSignature === sig && _lastStarStatsShape === 'empty') return;
+                _lastStarStatsSignature = sig;
+                _lastStarStatsShape = 'empty';
                 container.innerHTML = '<div class="star-stats-empty">暂无题材数据</div>';
                 return;
             }
@@ -17557,6 +17570,10 @@
             const stockCountHtml = `${todayStockCount}<span style="color:${stockCountArrowColor};margin-left:2px;">${stockCountArrow}</span>`;
 
             if (total === 0) {
+                const sig = 'nostar|' + topicCount + '|' + stockCountHtml + '|' + maxStockTopic + '|' + maxStockCount;
+                if (_lastStarStatsSignature === sig && _lastStarStatsShape === 'nostar') return;
+                _lastStarStatsSignature = sig;
+                _lastStarStatsShape = 'nostar';
                 container.innerHTML = `
                     <div class="star-stats-summary">
                         <div class="star-stats-summary-item">
@@ -17631,12 +17648,23 @@
                 centerLabel = '强度';
             }
 
+            // ---- 治本：内容指纹比对，数据没有实质变化就直接跳过，不碰 DOM ----
+            const signature = [
+                'full',
+                order.map(k => cats[k].count).join(','),
+                topicCount, stockCountHtml, maxStockTopic, maxStockCount,
+                strengthText, displayArrow, centerLabel, centerColor
+            ].join('|');
+            if (_lastStarStatsSignature === signature && _lastStarStatsShape === 'full') {
+                return;
+            }
+
             const donutSvg = `
-                <svg class="star-stats-donut-svg" viewBox="0 0 ${size} ${size}">
+                <svg class="star-stats-donut-svg" viewBox="0 0 ${size} ${size}" id="starStatsDonutSvg">
                     <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#f1f5f9" stroke-width="${strokeWidth}"></circle>
                     ${segments}
-                    <text x="${cx}" y="${cy - 4}" text-anchor="middle" class="star-stats-donut-center-value" style="fill:${centerColor}">${strengthText}${displayArrow}</text>
-                    <text x="${cx}" y="${cy + 16}" text-anchor="middle" class="star-stats-donut-center-label" style="fill:${centerColor}">${centerLabel}</text>
+                    <text x="${cx}" y="${cy - 4}" text-anchor="middle" class="star-stats-donut-center-value" id="starStatsDonutValue" style="fill:${centerColor}">${strengthText}${displayArrow}</text>
+                    <text x="${cx}" y="${cy + 16}" text-anchor="middle" class="star-stats-donut-center-label" id="starStatsDonutLabel" style="fill:${centerColor}">${centerLabel}</text>
                 </svg>
             `;
 
@@ -17644,7 +17672,7 @@
                 const c = cats[key];
                 const pct = total > 0 ? Math.round((c.count / total) * 100) : 0;
                 return `
-                    <div class="star-stats-legend-item">
+                    <div class="star-stats-legend-item" data-cat="${key}">
                         <span class="star-stats-legend-dot" style="background:${c.color}"></span>
                         <span>${c.label}</span>
                         <span class="star-stats-legend-value">${c.count}（${pct}%）</span>
@@ -17658,7 +17686,7 @@
                 const c = cats[key];
                 const widthPct = Math.round((c.count / maxCount) * 100);
                 return `
-                    <div class="star-stats-bar-row">
+                    <div class="star-stats-bar-row" data-cat="${key}">
                         <div class="star-stats-bar-label">${c.label}</div>
                         <div class="star-stats-bar-track">
                             <div class="star-stats-bar-fill" style="width:${widthPct}%;background:${c.color}"></div>
@@ -17668,28 +17696,64 @@
                 `;
             }).join('');
 
-            container.innerHTML = `
-                <div class="star-stats-donut-wrap">
-                    ${donutSvg}
-                    <div class="star-stats-legend">${legendHtml}</div>
-                </div>
-                <div class="star-stats-summary">
-                    <div class="star-stats-summary-item">
-                        <div class="star-stats-summary-label">题材数量</div>
-                        <div class="star-stats-summary-value">${topicCount}</div>
+            // ---- 治标：结构相同时只做局部 DOM 更新，避免整体 innerHTML 重建导致的闪烁 ----
+            const canPatchInPlace = _lastStarStatsShape === 'full'
+                && container.querySelector('#starStatsDonutSvg')
+                && container.querySelectorAll('.star-stats-legend-item').length === order.length
+                && container.querySelectorAll('.star-stats-bar-row').length === order.length;
+
+            if (canPatchInPlace) {
+                // 局部更新甜甜圈图：整个 SVG 替换（弧线数量本身可能增减），但汇总区/图例/柱状图逐项更新
+                const svgEl = container.querySelector('#starStatsDonutSvg');
+                svgEl.outerHTML = donutSvg;
+
+                const summaryValues = container.querySelectorAll('.star-stats-summary-value');
+                if (summaryValues[0]) summaryValues[0].textContent = topicCount;
+                if (summaryValues[1]) summaryValues[1].innerHTML = stockCountHtml;
+                if (summaryValues[2]) summaryValues[2].innerHTML = maxStockTopic ? maxStockTopic + '（' + maxStockCount + '）' : '-';
+
+                order.forEach(key => {
+                    const c = cats[key];
+                    const pct = total > 0 ? Math.round((c.count / total) * 100) : 0;
+                    const legendItem = container.querySelector('.star-stats-legend-item[data-cat="' + key + '"] .star-stats-legend-value');
+                    if (legendItem) legendItem.textContent = `${c.count}（${pct}%）`;
+
+                    const barRow = container.querySelector('.star-stats-bar-row[data-cat="' + key + '"]');
+                    if (barRow) {
+                        const widthPct = Math.round((c.count / maxCount) * 100);
+                        const fillEl = barRow.querySelector('.star-stats-bar-fill');
+                        const valueEl = barRow.querySelector('.star-stats-bar-value');
+                        if (fillEl) fillEl.style.width = widthPct + '%';
+                        if (valueEl) valueEl.textContent = c.count;
+                    }
+                });
+            } else {
+                container.innerHTML = `
+                    <div class="star-stats-donut-wrap">
+                        ${donutSvg}
+                        <div class="star-stats-legend">${legendHtml}</div>
                     </div>
-                    <div class="star-stats-summary-item">
-                        <div class="star-stats-summary-label">个股数量</div>
-                        <div class="star-stats-summary-value">${stockCountHtml}</div>
+                    <div class="star-stats-summary">
+                        <div class="star-stats-summary-item">
+                            <div class="star-stats-summary-label">题材数量</div>
+                            <div class="star-stats-summary-value">${topicCount}</div>
+                        </div>
+                        <div class="star-stats-summary-item">
+                            <div class="star-stats-summary-label">个股数量</div>
+                            <div class="star-stats-summary-value">${stockCountHtml}</div>
+                        </div>
+                        <div class="star-stats-summary-item">
+                            <div class="star-stats-summary-label">个股总数最多题材</div>
+                            <div class="star-stats-summary-value topic-name">${maxStockTopic ? maxStockTopic + '（' + maxStockCount + '）' : '-'}</div>
+                        </div>
                     </div>
-                    <div class="star-stats-summary-item">
-                        <div class="star-stats-summary-label">个股总数最多题材</div>
-                        <div class="star-stats-summary-value topic-name">${maxStockTopic ? maxStockTopic + '（' + maxStockCount + '）' : '-'}</div>
-                    </div>
-                </div>
-                <div class="star-stats-divider"></div>
-                <div class="star-stats-bars">${barsHtml}</div>
-            `;
+                    <div class="star-stats-divider"></div>
+                    <div class="star-stats-bars">${barsHtml}</div>
+                `;
+            }
+
+            _lastStarStatsSignature = signature;
+            _lastStarStatsShape = 'full';
         }
 
         // 第四页数据存储（按日期存储）
