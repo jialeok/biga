@@ -15797,7 +15797,11 @@
             });
             
             // 若"全部展开"开关已打开，渲染完成后自动展开所有趋势面板
-            if (document.getElementById('auctionExpandAllToggle')?.checked) {
+            // 注意：必须用 _p 前缀动态取对应分组的开关（auctionExpandAllToggle / hotExpandAllToggle），
+            // 不能硬编码写死 auctionExpandAllToggle —— 否则热门股票tap渲染时会错误地读取
+            // 早盘竞价那个开关的状态，导致"数据"开关联动打开"全部展开"后，热门股票列表
+            // 实际并不会展开（因为读到的是早盘竞价开关的 checked 值，而不是热门股票自己的）。
+            if (document.getElementById(_p + 'ExpandAllToggle')?.checked) {
                 expandAllAuctionTrendPanels();
             } else {
                 // 否则恢复用户此前手动展开过的个别股票的趋势面板（避免刷新/轮询导致展开状态丢失）
