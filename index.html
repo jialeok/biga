@@ -9728,7 +9728,20 @@
         // 用途：补全成交量/竞价量/涨幅/题材/监管等按钮把字段写入云端 hot_stocks 表
         // 注意：syncHotStocksListForDate 只同步状态/增删，不更新已有股票的 volume 等字段，故需要本函数
         async function pushHotStocksDataToCloud(date, items) {
-            if (!_hotAuctionTableAvailable) return;
+            // 原逻辑：表未就绪（loadHotStocksFromCloud 尚未跑完）时直接静默 return，
+            // 会导致"登录/刷新后立刻点击同花顺接口按钮"时数据被无声丢弃、云端完全没写入。
+            // 改为：最多等待 5 秒（loadHotStocksFromCloud 正常几百毫秒~1秒内完成），
+            // 超时仍未就绪才放弃，并在控制台留痕方便排查。
+            if (!_hotAuctionTableAvailable) {
+                const waitStart = Date.now();
+                while (!_hotAuctionTableAvailable && Date.now() - waitStart < 5000) {
+                    await new Promise(function(r) { setTimeout(r, 100); });
+                }
+                if (!_hotAuctionTableAvailable) {
+                    console.warn('pushHotStocksDataToCloud 放弃：hot_stocks 表 5 秒内仍未就绪，数据未写入云端。日期:', date);
+                    return;
+                }
+            }
             _justPushedHotAuction = true;
             try {
             const sb = getSupabase();
@@ -10559,7 +10572,7 @@
             });
             localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
             // 已解锁状态下，触发防抖云同步（2秒后推送）
-            if (sessionStorage.getItem('unlocked') === '1') {
+            if (localStorage.getItem('unlocked') === '1') {
                 scheduleCloudPush();
             }
         }
