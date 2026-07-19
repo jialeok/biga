@@ -8196,6 +8196,12 @@
 
     <script>
         let allData = null;
+        // bidding（竞价变化）内存缓存：与 allData 的 null-reset 周期解耦。
+        // allData 在很多地方会被设为 null 强制"从 localStorage 重新加载"，
+        // 但 bidding 已不落 localStorage，若跟着一起清空会在切换页面可见性等
+        // 场景下短暂闪烁清空。这个变量始终持有同一份引用，只由云端
+        // pullBiddingFromTable/pullBiddingForDate 或本地编辑保存来更新。
+        let _biddingMemCache = null;
         let _topicCache = null;
         let _topicCacheBuilt = false;
         let expandedAuctionStocks = new Set(); // 记录当前"早盘竞价"第一页中，用户手动展开的股票（按股票名），用于 renderAuction 重新渲染后恢复展开状态
@@ -8669,10 +8675,9 @@
                 }
                 return item;
             });
+            // 直接写入持久内存缓存（bidding 已不落 localStorage）
             const biddingData = getBiddingData();
             biddingData[date] = rows;
-            saveModule('bidding'); // 只写 localStorage，不触发 scheduleCloudPush（避免 Realtime 循环）
-            allData = null; // 重置内存
             _biddingTableAvailable = true;
         }
 
@@ -8713,13 +8718,31 @@
             if (error) throw error;
         }
 
+        // 删除 bidding_data 表中某天的全部数据（用于"清除当天数据"功能）。
+        // 之前该操作只清内存，云端表行还在，下次刷新/Realtime 会把数据"复活"。
+        async function deleteBiddingFromCloud(date) {
+            if (!date) return;
+            _justPushedBidding = true;
+            setTimeout(function() { _justPushedBidding = false; }, 5000);
+            const sb = getSupabase();
+            const { error } = await sb.from('bidding_data').delete().eq('"date"', date);
+            if (error) throw error;
+        }
+
         // 一次性迁移：将本地 allData.bidding 灌入 bidding_data 表
         async function migrateBiddingToTable() {
             if (localStorage.getItem('_bidding_table_migrated') === '1') {
                 _biddingTableAvailable = true; // 已迁移过，标记表可用
                 return;
             }
-            const biddingData = getBiddingData();
+            // 直接读取本机 localStorage 里现存的旧快照（可能是拆表前，或本次修复前遗留的）。
+            // loadAllData()/getBiddingData() 已改为不再读取 localStorage 的 bidding 数据，
+            // 所以这里必须绕过它们，直接读原始 key，避免把设备上现存的本地数据白白漏掉。
+            let biddingData = {};
+            try {
+                const raw = localStorage.getItem(_moduleKey('bidding'));
+                if (raw) biddingData = JSON.parse(raw) || {};
+            } catch (e) { biddingData = {}; }
             const dates = Object.keys(biddingData).filter(function(d) {
                 return Array.isArray(biddingData[d]) && biddingData[d].length > 0;
             });
@@ -8782,6 +8805,8 @@
             if (!hadError) {
                 _biddingTableAvailable = true;
                 localStorage.setItem('_bidding_table_migrated', '1');
+                // 迁移确认成功后清除本地旧快照，云端表从此是唯一数据源
+                try { localStorage.removeItem(_moduleKey('bidding')); } catch (e) {}
                 console.log('[迁移] bidding_data 迁移完成:', totalRows, '行');
             }
         }
@@ -10118,15 +10143,18 @@
                     console.warn('auction_data 表拉取失败，回退到 blob:', tableErr.message);
                 }
 
-                // 从 bidding_data 独立表拉取 bidding 数据
+                // 从 bidding_data 独立表拉取 bidding 数据（云端表是唯一权威来源）
                 try {
                     const tableBidding = await pullBiddingFromTable();
                     if (Object.keys(tableBidding).length > 0) {
-                        localStorage.setItem('stockApp_v42_bidding', JSON.stringify(tableBidding));
-                        allData = null; // 重置内存，让下次读取用新数据
+                        // 原地更新持久内存缓存（不写 localStorage，也不重置 allData）
+                        if (!_biddingMemCache) _biddingMemCache = {};
+                        Object.keys(_biddingMemCache).forEach(function(d) { delete _biddingMemCache[d]; });
+                        Object.assign(_biddingMemCache, tableBidding);
+                        if (allData) allData.bidding = _biddingMemCache;
                     }
                 } catch(tableErr) {
-                    console.warn('bidding_data 表拉取失败，回退到 blob:', tableErr.message);
+                    console.warn('bidding_data 表拉取失败，回退到内存缓存:', tableErr.message);
                 }
 
                 // 观察组可能受云端数据影响（上一交易日"竞/昨"达标股票可能变化），清除标记重新计算
@@ -10382,6 +10410,16 @@
                 if (hasPartitioned) {
                     allData = {};
                     MODULE_KEYS.forEach(key => {
+                        // bidding 已改为纯云端表（bidding_data）+ 内存缓存：
+                        // 不再从 localStorage 读取旧快照，避免旧/空本地数据在刷新时
+                        // 短暂顶替云端数据，甚至被后续保存动作当真值写回云端。
+                        // 指向持久的 _biddingMemCache（不随 allData=null 重置而清空），
+                        // 正确数据由 pullBiddingFromTable()/migrateBiddingToTable() 异步填充。
+                        if (key === 'bidding') {
+                            if (!_biddingMemCache) _biddingMemCache = {};
+                            allData[key] = _biddingMemCache;
+                            return;
+                        }
                         const raw = localStorage.getItem(_moduleKey(key));
                         if (raw !== null) {
                             try {
@@ -10399,9 +10437,10 @@
                         saveModule('auction');
                     }
                 } else {
+                    if (!_biddingMemCache) _biddingMemCache = {};
                     allData = {
                         stocks: {}, jiwang: {}, rank: {}, multi: {},
-                        hotspot: {}, pattern: {}, bidding: {}, tagTitles: {},
+                        hotspot: {}, pattern: {}, bidding: _biddingMemCache, tagTitles: {},
                         auction: {}, holidays: [], stockCodeMap: {}
                     };
                 }
@@ -10586,6 +10625,8 @@
 
         function saveModule(name) {
             if (!allData || !allData[name]) return;
+            // bidding 已改为纯云端表 + 内存缓存，不再落 localStorage
+            if (name === 'bidding') return;
             try {
                 localStorage.setItem(_moduleKey(name), JSON.stringify(allData[name]));
             } catch (e) {
@@ -10598,6 +10639,9 @@
 
         function saveData() {
             MODULE_KEYS.forEach(key => {
+                // bidding 已改为纯云端表（bidding_data）+ 内存缓存，不再落 localStorage，
+                // 避免本地旧/空快照在下次保存或导入时把云端数据覆盖掉
+                if (key === 'bidding') return;
                 if (allData && allData[key] !== undefined) {
                     try {
                         localStorage.setItem(_moduleKey(key), JSON.stringify(allData[key]));
@@ -29609,6 +29653,11 @@
             if (allData.bidding && allData.bidding[currentDate]) {
                 delete allData.bidding[currentDate];
             }
+            // bidding 已是纯云端表，仅清内存不够，需同步删除云端对应日期的行，
+            // 否则下次刷新页面或 Realtime 同步会把数据从云端"复活"
+            deleteBiddingFromCloud(currentDate).catch(function(e) {
+                console.warn('deleteBiddingFromCloud 失败:', e.message);
+            });
             if (allData.auction && allData.auction[currentDate]) {
                 delete allData.auction[currentDate];
             }
@@ -30901,8 +30950,12 @@
                         // 备份早盘竞价数据（用于撤回）
                         backupAuctionData('import');
                         
-                        const currentTemplate = getDefaultBiddingTemplate();
-                        
+                        // bidding（竞价变化）已改为纯云端表 + 内存缓存，是独立于本次
+                        // 导入的数据源。整体导入覆盖的是 stocks/jiwang/... 等其它模块，
+                        // 不应该连带影响 bidding 云端数据——哪怕导入的备份文件里带有
+                        // bidding 字段，也不再读取/覆盖，避免旧/损坏的备份把云端数据冲掉。
+                        // allData.bidding 继续指向持久内存缓存 _biddingMemCache。
+                        if (!_biddingMemCache) _biddingMemCache = {};
                         allData = {
                             stocks: imported.stocks || {},
                             jiwang: imported.jiwang || {},
@@ -30910,7 +30963,7 @@
                             multi: imported.multi || {},
                             hotspot: imported.hotspot || {},
                             pattern: imported.pattern || {},
-                            bidding: {},
+                            bidding: _biddingMemCache,
                             auction: imported.auction || {},
                             tagTitles: imported.tagTitles || {}
                         };
@@ -30921,39 +30974,6 @@
                         // "以云端为基准"的保护逻辑会反过来用云端（可能是脏数据）
                         // 把刚导入的干净数据覆盖掉，导致"导入了但多余股票还在"。
                         Object.keys(allData.auction).forEach(function(d) { markAuctionDirty(d); });
-                        
-                        if (imported.bidding) {
-                            Object.keys(imported.bidding).forEach(date => {
-                                const importedDateData = imported.bidding[date];
-                                if (Array.isArray(importedDateData) && importedDateData.length > 0) {
-                                    const newDateData = [];
-                                    for (let i = 0; i < currentTemplate.length; i++) {
-                                        const templateRow = currentTemplate[i];
-                                        const importedRow = importedDateData[i];
-                                        if (importedRow) {
-                                            newDateData.push({
-                                                name: templateRow.name,
-                                                time915: importedRow.time915 || '',
-                                                time920: importedRow.time920 || '',
-                                                time930: importedRow.time930 || '',
-                                                change: importedRow.change || '',
-                                                close: importedRow.close || ''
-                                            });
-                                        } else {
-                                            newDateData.push({
-                                                name: templateRow.name,
-                                                time915: '',
-                                                time920: '',
-                                                time930: '',
-                                                change: '',
-                                                close: ''
-                                            });
-                                        }
-                                    }
-                                    allData.bidding[date] = newDateData;
-                                }
-                            });
-                        }
                         
                         if (imported.duibanData) {
                             localStorage.setItem('duibanData', JSON.stringify(imported.duibanData));
@@ -31197,9 +31217,12 @@
             try {
                 const imported = JSON.parse(text);
                 if (confirm('导入将覆盖现有数据，是否继续？')) {
-                    // 获取当前默认模板
-                    const currentTemplate = getDefaultBiddingTemplate();
-                    
+                    // bidding（竞价变化）已改为纯云端表 + 内存缓存，是独立于本次
+                    // 导入的数据源。整体导入覆盖的是 stocks/jiwang/... 等其它模块，
+                    // 不应该连带影响 bidding 云端数据——哪怕导入的内容里带有
+                    // bidding 字段，也不再读取/覆盖，避免旧/损坏的备份把云端数据冲掉。
+                    // allData.bidding 继续指向持久内存缓存 _biddingMemCache。
+                    if (!_biddingMemCache) _biddingMemCache = {};
                     allData = {
                         stocks: imported.stocks || {},
                         jiwang: imported.jiwang || {},
@@ -31207,46 +31230,10 @@
                         multi: imported.multi || {},
                         hotspot: imported.hotspot || {},
                         pattern: imported.pattern || {},
-                        bidding: {},
+                        bidding: _biddingMemCache,
                         auction: imported.auction || {},
                         tagTitles: imported.tagTitles || {}
                     };
-                    
-                    // 智能导入竞价变化数据（按行索引匹配）
-                    if (imported.bidding) {
-                        Object.keys(imported.bidding).forEach(date => {
-                            const importedDateData = imported.bidding[date];
-                            if (Array.isArray(importedDateData) && importedDateData.length > 0) {
-                                const newDateData = [];
-                                // 使用当前模板的行数，导入的数据按索引匹配
-                                const templateLength = currentTemplate.length;
-                                for (let i = 0; i < templateLength; i++) {
-                                    if (i < importedDateData.length) {
-                                        // 有导入数据，使用导入的数据值，但使用当前模板的名称
-                                        newDateData.push({
-                                            name: currentTemplate[i]?.name || importedDateData[i]?.name || '',
-                                            time915: importedDateData[i]?.time915 || '',
-                                            time920: importedDateData[i]?.time920 || '',
-                                            time930: importedDateData[i]?.time930 || '',
-                                            change: importedDateData[i]?.change || '',
-                                            close: importedDateData[i]?.close || ''
-                                        });
-                                    } else {
-                                        // 没有导入数据，创建空行
-                                        newDateData.push({
-                                            name: currentTemplate[i]?.name || '',
-                                            time915: '',
-                                            time920: '',
-                                            time930: '',
-                                            change: '',
-                                            close: ''
-                                        });
-                                    }
-                                }
-                                allData.bidding[date] = newDateData;
-                            }
-                        });
-                    }
                     
                     // 修复tagTitles数据结构
                     if (allData.tagTitles) {
@@ -31520,6 +31507,12 @@
                     renderList();
                     // 重新计算顺势/逆势标签
                     autoTagShunshiNishi();
+                    // bidding 已是纯云端表：手机切到后台一段时间后，Realtime 的
+                    // WebSocket 订阅常会断线且不一定自动重连，切回前台时主动
+                    // 补拉一次当天数据，避免看到过期的内存缓存
+                    pullBiddingForDate(currentDate).then(function() {
+                        renderBidding();
+                    }).catch(function(e) { console.warn('切回前台重新拉取 bidding 失败:', e.message); });
                 }
             });
             
