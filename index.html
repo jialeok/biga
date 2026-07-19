@@ -21743,13 +21743,16 @@
         // 内部辅助：将表单当前输入静默写入存储（不触发渲染/toast/关闭弹窗）
         // 供 addBiddingRow / removeBiddingRow / clearBiddingData 在操作前调用，
         // 防止用户填了一半的内容因表单重建而丢失。
+        // 内部辅助：将表单当前输入静默写入存储（不触发渲染/toast/关闭弹窗）
+        // 供 addBiddingRow / removeBiddingRow / clearBiddingData 在操作前调用，
+        // 防止用户填了一半的内容因表单重建而丢失。
         function _saveBiddingFormToStorage() {
             const formContainer = document.getElementById('biddingFormContainer');
             if (!formContainer) return;
             const nameInputs = formContainer.querySelectorAll('[name^="name-"]');
             if (nameInputs.length === 0) return;
 
-            const biddingData = [];
+            const rawRows = [];
             const count = nameInputs.length;
             for (let i = 0; i < count; i++) {
                 const nameInput   = formContainer.querySelector(`[name="name-${i}"]`);
@@ -21758,7 +21761,7 @@
                 const time930Input = formContainer.querySelector(`[name="time930-${i}"]`);
                 const changeInput  = formContainer.querySelector(`[name="change-${i}"]`);
                 const closeInput   = formContainer.querySelector(`[name="close-${i}"]`);
-                biddingData.push({
+                rawRows.push({
                     name:    nameInput    ? nameInput.value.trim()    : '',
                     time915: time915Input ? time915Input.value.trim() : '',
                     time920: time920Input ? time920Input.value.trim() : '',
@@ -21767,6 +21770,28 @@
                     close:   closeInput   ? closeInput.value.trim()   : ''
                 });
             }
+
+            // 与旧数据逐字段合并，逻辑同 saveBidding：本次为空的字段保留旧值，避免误清空
+            const oldBiddingDataForMerge = getTodayBidding() || [];
+            const FIELDS_TO_MERGE = ['time915', 'time920', 'time930', 'change', 'close'];
+            const biddingData = rawRows.map(function(newRow, i) {
+                let oldRow = null;
+                if (newRow.name) {
+                    oldRow = oldBiddingDataForMerge.find(r => r && r.name === newRow.name);
+                }
+                if (!oldRow) {
+                    oldRow = oldBiddingDataForMerge[i] || null;
+                }
+                if (!oldRow) return newRow;
+                const merged = { ...newRow };
+                FIELDS_TO_MERGE.forEach(function(field) {
+                    if (merged[field] === '' && oldRow[field] !== undefined && oldRow[field] !== '') {
+                        merged[field] = oldRow[field];
+                    }
+                });
+                return merged;
+            });
+
             getBiddingData()[currentDate] = biddingData;
             saveData();
         }
@@ -21774,7 +21799,7 @@
         // 保存竞价变化数据
         function saveBidding() {
             const formContainer = document.getElementById('biddingFormContainer');
-            const biddingData = [];
+            const rawRows = [];
             
             // 获取所有name输入框
             const nameInputs = formContainer.querySelectorAll('[name^="name-"]');
@@ -21796,7 +21821,7 @@
                 const close = closeInput ? closeInput.value.trim() : '';
                 
                 // 保留所有行（包括名称为空的行），否则历史数据会被当前模板覆盖
-                biddingData.push({
+                rawRows.push({
                     name,
                     time915,
                     time920,
@@ -21805,6 +21830,30 @@
                     close
                 });
             }
+
+            // 合并式保存：本次表单中某字段为空，不代表用户想清空它，很可能只是这个时段
+            // （比如9:20保存时，9:25/收盘列本来就还没到时间填）尚未填写。
+            // 因此与旧数据逐字段合并——只有本次提交了非空值才覆盖旧值，本次为空则保留旧值。
+            // 行的匹配优先按 name（同名视为同一行），找不到旧行或 name 为空时按 index 兜底对齐。
+            const oldBiddingDataForMerge = getTodayBidding() || [];
+            const FIELDS_TO_MERGE = ['time915', 'time920', 'time930', 'change', 'close'];
+            const biddingData = rawRows.map(function(newRow, i) {
+                let oldRow = null;
+                if (newRow.name) {
+                    oldRow = oldBiddingDataForMerge.find(r => r && r.name === newRow.name);
+                }
+                if (!oldRow) {
+                    oldRow = oldBiddingDataForMerge[i] || null;
+                }
+                if (!oldRow) return newRow;
+                const merged = { ...newRow };
+                FIELDS_TO_MERGE.forEach(function(field) {
+                    if (merged[field] === '' && oldRow[field] !== undefined && oldRow[field] !== '') {
+                        merged[field] = oldRow[field];
+                    }
+                });
+                return merged;
+            });
 
             // "最近多板%"这一行的9:25（time930）修改历史锁定逻辑
             // 只针对这一行，记录第一次保存的值（锁定不变）和最后一次保存的时间
