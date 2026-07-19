@@ -9850,12 +9850,23 @@
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
+            // in_watchlist 判断依据：该股票是否是"当前 auctionData[date] 正式列表"的成员。
+            // 正式列表成员 → in_watchlist=true，tap 页面正常显示；
+            // 不在正式列表里、单独传入用于补数据的影子记录 → in_watchlist=false，
+            // 只写入全量快照缓存供趋势图查询，不出现在 tap 页面第一页，也不会在下次
+            // syncAuctionListForDate 同步时被误判为"该移除"而连累其它正式股票。
+            const existingWatchlistNames = {};
+            ((getAuctionData()[date]) || []).forEach(function(s) {
+                if (s && s.stock) existingWatchlistNames[s.stock.trim()] = true;
+            });
             const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
+                const nameTrim = item.stock.trim();
                 return {
-                    date: date, stock: item.stock.trim(),
-                    code: scMap[item.stock.trim()] || item.code || '',
+                    date: date, stock: nameTrim,
+                    code: scMap[nameTrim] || item.code || '',
                     volume: item.volume || '', yest_volume: item.yestVolume || '', note: item.note || '',
                     change_pct: item.changePct || '', topics: item.topics || '',
+                    in_watchlist: !!existingWatchlistNames[nameTrim],
                     selected: item.selected || false, bought: item.bought || false,
                     sold: item.sold || false, fixed: item.fixed || false,
                     updated_at: now, updated_by: 'main'
@@ -9876,7 +9887,8 @@
                     stock: row.stock, code: row.code,
                     volume: row.volume, yest_volume: row.yest_volume, note: row.note,
                     change_pct: row.change_pct, topics: row.topics,
-                    in_watchlist: existing ? existing.in_watchlist : true, // 推送的行本身就是当前观察列表，默认 true
+                    // 已有云端行的 in_watchlist 状态优先保留（避免补数据操作意外改变已有正式股票的状态）
+                    in_watchlist: existing ? existing.in_watchlist : row.in_watchlist,
                     selected: row.selected, bought: row.bought, sold: row.sold, fixed: row.fixed
                 };
                 if (idx >= 0) {
@@ -12958,10 +12970,42 @@
                         yesterdaySkipped++;
                     }
                 });
-                auctionData[yesterday] = yesterdayList;
+
+                // 关键修复：不能再用 buildYesterdayListFromToday 造出来的 yesterdayList（以 todayList 名单为模板）
+                // 直接覆盖 auctionData[yesterday] —— 这会把本地内存里"对比日原有、但这次名单里没有的股票"
+                // 整个丢掉，而后续只要触发一次 syncAuctionListForDate(yesterday)（脏日期同步），
+                // 就会把云端那些"本地没有"的股票行标记 in_watchlist=false，导致对比日 tap 页面第一页
+                // 原有股票被静默移除（表现为"股票变少了"）。
+                // 正确做法：真正需要覆盖式更新的，只有"对比日原本就存在的股票"（合并 yestVolume 补全结果）；
+                // 对比日原本没有的股票（本次为了凑对比而临时造出的影子行），不写回本地正式列表 auctionData[yesterday]，
+                // 只单独传给 pushAuctionDataToCloud 标记为 in_watchlist=false，仅供趋势图查询。
+                const existingYesterdayList = (auctionData[yesterday] || []).slice();
+                const existingYesterdayNames = {};
+                existingYesterdayList.forEach(function(s) {
+                    if (s && s.stock) existingYesterdayNames[s.stock.trim()] = true;
+                });
+                // 用补全后的 yestVolume 更新"本来就存在于对比日列表"的那些股票（原地更新已有记录）
+                yesterdayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    const name = s.stock.trim();
+                    if (!existingYesterdayNames[name]) return; // 对比日本来没有的，跳过，不写回正式列表
+                    const target = existingYesterdayList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                    if (target) target.yestVolume = s.yestVolume;
+                });
+                // 对比日本来没有的股票（影子记录），单独收集，只用于推送时标记 in_watchlist=false
+                const shadowOnlyYesterdayStocks = yesterdayList.filter(function(s) {
+                    return s && s.stock && !existingYesterdayNames[s.stock.trim()];
+                });
+
+                auctionData[yesterday] = existingYesterdayList; // 正式列表：只包含对比日原有股票，数量不变
                 saveModule('auction');
                 invalidateTopicCache();
-                pushAuctionDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
+                pushAuctionDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
+                if (shadowOnlyYesterdayStocks.length > 0) {
+                    // 影子记录单独推送，且推送前 auctionData[yesterday] 已经是"不含它们"的正式列表，
+                    // pushAuctionDataToCloud 内部会按"是否在当前正式列表"判断 in_watchlist，天然落到 false
+                    pushAuctionDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday(影子) 失败:', e); });
+                }
 
                 // 刷新表单和看板
                 renderAuctionForm();
@@ -13101,10 +13145,34 @@
                         skipped++;
                     }
                 });
-                auctionData[yesterday] = yesterdayList;
+
+                // 同「两全昨日成交量」的修复：不能用 buildYesterdayListFromToday 造出的 yesterdayList
+                // 直接覆盖 auctionData[yesterday]，否则会把对比日原有、但这次名单没覆盖到的股票冲掉，
+                // 后续 syncAuctionListForDate 同步时会把这些股票误标记 in_watchlist=false 而从
+                // tap 页面消失。只把补全的 yestVolume 合并回原有股票，不存在的股票不进正式列表。
+                const existingYesterdayList = (auctionData[yesterday] || []).slice();
+                const existingYesterdayNames = {};
+                existingYesterdayList.forEach(function(s) {
+                    if (s && s.stock) existingYesterdayNames[s.stock.trim()] = true;
+                });
+                yesterdayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    const name = s.stock.trim();
+                    if (!existingYesterdayNames[name]) return;
+                    const target = existingYesterdayList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                    if (target) target.yestVolume = s.yestVolume;
+                });
+                const shadowOnlyYesterdayStocks = yesterdayList.filter(function(s) {
+                    return s && s.stock && !existingYesterdayNames[s.stock.trim()];
+                });
+
+                auctionData[yesterday] = existingYesterdayList;
                 saveModule('auction');
                 invalidateTopicCache();
-                pushAuctionDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
+                pushAuctionDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
+                if (shadowOnlyYesterdayStocks.length > 0) {
+                    pushAuctionDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday(影子) 失败:', e); });
+                }
 
                 renderAuctionForm();
                 renderAuction();
@@ -13680,17 +13748,38 @@
                         yesterdaySkipped++;
                     }
                 });
-                // 关键：必须在 hotAuctionData[yesterday] 被下面这行覆盖赋值之前，
-                // 就把"本来就已经在对比日正式列表里的股票"记下来，并原样保留到 pushHotStocksDataToCloud
-                // 用来判断 in_watchlist 的那份数据里 —— 否则推送函数事后再查 getHotAuctionData()[yesterday]，
-                // 读到的已经是这里刚赋值的 yesterdayList 本身，会把所有股票误判成"已存在"，
-                // 导致本该标记为仅供趋势图使用（in_watchlist=false）的影子股票被错误标记为 true，
-                // 从而"补数据"变成了"新增股票"，污染对比日 tap 页面第一页的展示列表。
-                const preExistingYesterdaySnapshot = (hotAuctionData[yesterday] || []).slice();
-                hotAuctionData[yesterday] = yesterdayList;
+                // 关键修复：不能再用 buildYesterdayListFromToday 造出来的 yesterdayList（以 todayList 名单为模板）
+                // 直接覆盖 hotAuctionData[yesterday] —— 这会把本地内存里"对比日原有、但这次名单里没有的股票"
+                // 整个丢掉，而后续只要触发一次 syncHotStocksListForDate(yesterday)（脏日期同步），
+                // 就会把云端那些"本地没有"的股票行标记 in_watchlist=false，导致对比日 tap 页面第一页
+                // 原有股票被静默移除。正确做法：只把补全的 yestVolume 合并回"对比日原本就存在的股票"，
+                // 对比日原本没有的股票（影子行）不写回正式列表，只单独推送并标记 in_watchlist=false。
+                const existingYesterdayList = (hotAuctionData[yesterday] || []).slice();
+                const existingYesterdayNames = {};
+                existingYesterdayList.forEach(function(s) {
+                    if (s && s.stock) existingYesterdayNames[s.stock.trim()] = true;
+                });
+                yesterdayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    const name = s.stock.trim();
+                    if (!existingYesterdayNames[name]) return;
+                    const target = existingYesterdayList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                    if (target) target.yestVolume = s.yestVolume;
+                });
+                const shadowOnlyYesterdayStocks = yesterdayList.filter(function(s) {
+                    return s && s.stock && !existingYesterdayNames[s.stock.trim()];
+                });
+
+                hotAuctionData[yesterday] = existingYesterdayList; // 正式列表：只含对比日原有股票，数量不变
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(yesterday, yesterdayList, preExistingYesterdaySnapshot).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
-                pushHotTrendsToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                pushHotStocksDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                pushHotTrendsToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                if (shadowOnlyYesterdayStocks.length > 0) {
+                    // 影子记录单独推送：此时 hotAuctionData[yesterday] 已经是"不含它们"的正式列表，
+                    // pushHotStocksDataToCloud 内部按"是否在当前正式列表"判断，天然落到 in_watchlist=false
+                    pushHotStocksDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday(影子) 失败:', e); });
+                    pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
+                }
 
                 // 刷新表单和看板
                 renderHotForm();
@@ -13840,15 +13929,34 @@
                         skipped++;
                     }
                 });
-                // 同「两全昨日成交量」：必须在覆盖赋值前先留一份事前快照，
-                // 让 pushHotStocksDataToCloud 能正确区分"本来就在对比日正式列表里的股票"
-                // 和"这次为了补成交量临时造出来的影子股票"，避免后者被误标记为 in_watchlist=true
-                // 而出现在对比日 tap 页面第一页。
-                const preExistingYesterdaySnapshot = (hotAuctionData[yesterday] || []).slice();
-                hotAuctionData[yesterday] = yesterdayList;
+                // 同「两全昨日成交量」的修复：不能用 buildYesterdayListFromToday 造出的 yesterdayList
+                // 直接覆盖 hotAuctionData[yesterday]，否则会把对比日原有、这次名单没覆盖到的股票冲掉，
+                // 后续 syncHotStocksListForDate 同步时会把这些股票误标记 in_watchlist=false 而从
+                // tap 页面消失。只把补全的 yestVolume 合并回原有股票，不存在的股票不进正式列表。
+                const existingYesterdayList = (hotAuctionData[yesterday] || []).slice();
+                const existingYesterdayNames = {};
+                existingYesterdayList.forEach(function(s) {
+                    if (s && s.stock) existingYesterdayNames[s.stock.trim()] = true;
+                });
+                yesterdayList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    const name = s.stock.trim();
+                    if (!existingYesterdayNames[name]) return;
+                    const target = existingYesterdayList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                    if (target) target.yestVolume = s.yestVolume;
+                });
+                const shadowOnlyYesterdayStocks = yesterdayList.filter(function(s) {
+                    return s && s.stock && !existingYesterdayNames[s.stock.trim()];
+                });
+
+                hotAuctionData[yesterday] = existingYesterdayList;
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(yesterday, yesterdayList, preExistingYesterdaySnapshot).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
-                pushHotTrendsToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                pushHotStocksDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                pushHotTrendsToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                if (shadowOnlyYesterdayStocks.length > 0) {
+                    pushHotStocksDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday(影子) 失败:', e); });
+                    pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
+                }
 
                 renderHotForm();
                 renderHotStocks();
@@ -14521,16 +14629,41 @@
                     fillVolume(todayList, today, !!opts.overwriteToday, true);   // 今天：填 volume + 涨幅
                     auctionData[today] = todayList;
                 }
+                // 同「两全/对比日昨成交量」的修复：needYesterday 场景下 yesterdayList 是
+                // buildYesterdayListFromToday 用 todayList 名单造出来的，不能直接覆盖 auctionData[yesterday]，
+                // 否则对比日原有、这次名单没覆盖到的股票会被冲掉，后续同步时误标记 in_watchlist=false 而消失。
+                let shadowOnlyYesterdayStocks = [];
+                let existingYesterdayList = null;
                 if (needYesterday) {
                     fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false); // 昨日：只填 volume
-                    auctionData[yesterday] = yesterdayList;
+                    existingYesterdayList = (auctionData[yesterday] || []).slice();
+                    const existingYesterdayNames = {};
+                    existingYesterdayList.forEach(function(s) {
+                        if (s && s.stock) existingYesterdayNames[s.stock.trim()] = true;
+                    });
+                    yesterdayList.forEach(function(s) {
+                        if (!s || !s.stock) return;
+                        const name = s.stock.trim();
+                        if (!existingYesterdayNames[name]) return;
+                        const target = existingYesterdayList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                        if (target) { target.volume = s.volume; }
+                    });
+                    shadowOnlyYesterdayStocks = yesterdayList.filter(function(s) {
+                        return s && s.stock && !existingYesterdayNames[s.stock.trim()];
+                    });
+                    auctionData[yesterday] = existingYesterdayList;
                 }
 
                 saveModule('auction');
                 invalidateTopicCache();
 
                 if (needToday) pushAuctionDataToCloud(today, todayList).catch(function(e) { console.warn('pushAuctionDataToCloud today 失败:', e); });
-                if (needYesterday) pushAuctionDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
+                if (needYesterday) {
+                    pushAuctionDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
+                    if (shadowOnlyYesterdayStocks.length > 0) {
+                        pushAuctionDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday(影子) 失败:', e); });
+                    }
+                }
 
                 renderAuctionForm();
                 renderAuction();
