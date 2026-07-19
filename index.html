@@ -15238,10 +15238,14 @@
                 // 没有数据时显示 -
                 // 注：强度显示（auctionStrengthValue/auctionStrengthArrow）是"早盘竞价"和"热门股票"两个 tab 共用的同一套 DOM
                 // （标题栏文字本身就会随 switchGroup 切换），因此这里固定写这一套，而不是按 _p 拼接（HTML 里并不存在 hotStrengthValue）
-                const strengthValueEl = document.getElementById('auctionStrengthValue');
-                const strengthArrowEl = document.getElementById('auctionStrengthArrow');
-                if (strengthValueEl) strengthValueEl.textContent = '-';
-                if (strengthArrowEl) strengthArrowEl.textContent = '-';
+                // 分组守卫：只有当前渲染分组等于用户正在查看的 tab，才允许写入这套共用 DOM，
+                // 避免另一个 tab 的后台异步渲染（Realtime 推送等）把当前可见 tab 的强度覆盖掉
+                if (dataSource === currentGroup) {
+                    const strengthValueEl = document.getElementById('auctionStrengthValue');
+                    const strengthArrowEl = document.getElementById('auctionStrengthArrow');
+                    if (strengthValueEl) strengthValueEl.textContent = '-';
+                    if (strengthArrowEl) strengthArrowEl.textContent = '-';
+                }
                 // 没有数据时，"竞放量数"、"竞/昨数"也要重置为 -，避免残留上一个有数据日期的数值
                 const highRatioCountElEmpty = document.getElementById(_p + 'HighRatioCount');
                 const highRatioArrowElEmpty = document.getElementById(_p + 'HighRatioArrow');
@@ -15340,30 +15344,35 @@
                 const yesterdayStrength = yesterdayTotalCount > 0 ? Math.round((yesterdayStrongCount / yesterdayTotalCount) * 100) : null;
                 
                 // 同上：强度显示是两个 tab 共用的同一套 DOM，固定读写 auctionStrengthValue/auctionStrengthArrow
-                const strengthValueEl = document.getElementById('auctionStrengthValue');
-                const strengthArrowEl = document.getElementById('auctionStrengthArrow');
-                
-                if (strengthValueEl) {
-                    strengthValueEl.textContent = todayStrength + '% ';
-                }
-                if (strengthArrowEl) {
-                    if (yesterdayStrength !== null) {
-                        if (todayStrength > yesterdayStrength) {
-                            strengthArrowEl.textContent = '⬆';
-                        } else if (todayStrength < yesterdayStrength) {
-                            strengthArrowEl.textContent = '⬇';
+                // 分组守卫：只有当前渲染分组等于用户正在查看的 tab，才允许写入
+                if (dataSource === currentGroup) {
+                    const strengthValueEl = document.getElementById('auctionStrengthValue');
+                    const strengthArrowEl = document.getElementById('auctionStrengthArrow');
+                    
+                    if (strengthValueEl) {
+                        strengthValueEl.textContent = todayStrength + '% ';
+                    }
+                    if (strengthArrowEl) {
+                        if (yesterdayStrength !== null) {
+                            if (todayStrength > yesterdayStrength) {
+                                strengthArrowEl.textContent = '⬆';
+                            } else if (todayStrength < yesterdayStrength) {
+                                strengthArrowEl.textContent = '⬇';
+                            } else {
+                                strengthArrowEl.textContent = '-';
+                            }
                         } else {
                             strengthArrowEl.textContent = '-';
                         }
-                    } else {
-                        strengthArrowEl.textContent = '-';
                     }
                 }
             } else {
-                const strengthValueEl = document.getElementById('auctionStrengthValue');
-                const strengthArrowEl = document.getElementById('auctionStrengthArrow');
-                if (strengthValueEl) strengthValueEl.textContent = '-';
-                if (strengthArrowEl) strengthArrowEl.textContent = '-';
+                if (dataSource === currentGroup) {
+                    const strengthValueEl = document.getElementById('auctionStrengthValue');
+                    const strengthArrowEl = document.getElementById('auctionStrengthArrow');
+                    if (strengthValueEl) strengthValueEl.textContent = '-';
+                    if (strengthArrowEl) strengthArrowEl.textContent = '-';
+                }
             }
 
             // 计算"竞放量数"（今日竞价量/昨日竞价量 >= 1.5 的股票数量）及与昨天的对比箭头
