@@ -8683,7 +8683,12 @@
 
         // 当日竞价变化数据 UPSERT 到 bidding_data 表
         async function pushBiddingToCloud(date) {
-            if (!_biddingTableAvailable) return; // 表不可用时跳过
+            // 注：不再用 _biddingTableAvailable 做早退保护。该表已长期稳定使用，
+            // 之前"表不可用时跳过"是为了兼容表还没建好的过渡期，但这个标记要等
+            // 应用启动时的整体云端同步全部跑完才会置 true，如果同步过程中前面
+            // 某一步失败，甚至可能永远不会置 true——保存会静默失败、不报任何错，
+            // 这正是"保存后能看到、一刷新就消失"的根源。真正需要保护的场景
+            // （表确实不存在）交给下面的 try/error 处理即可。
             _justPushedBidding = true; // 标记自己推送，5秒内忽略 Realtime 通知
             setTimeout(function() { _justPushedBidding = false; }, 5000);
             const sb = getSupabase();
@@ -8716,6 +8721,7 @@
             const { error } = await sb.from('bidding_data')
                 .upsert(rows, { onConflict: 'date,name' });
             if (error) throw error;
+            _biddingTableAvailable = true; // 推送成功即证明表可用
         }
 
         // 删除 bidding_data 表中某天的全部数据（用于"清除当天数据"功能）。
@@ -21927,8 +21933,15 @@
 
             getBiddingData()[currentDate] = biddingData;
             saveData();
-            // 同步到 bidding_data 独立表（非阻塞）
-            pushBiddingToCloud(currentDate).catch(function(e) { console.warn('saveBidding pushBiddingToCloud 失败:', e); });
+            // 同步到 bidding_data 独立表（非阻塞）。
+            // bidding 已经是纯云端数据源，这次推送如果失败，意味着这次编辑
+            // 实际上没有真正保存下来（内存里的显示只是暂时的，一刷新就会
+            // 恢复成云端旧值）。因此失败时必须用醒目的方式告知用户，
+            // 不能只在控制台 warn——那样用户完全不会发现数据其实没保存成功。
+            pushBiddingToCloud(currentDate).catch(function(e) {
+                console.warn('saveBidding pushBiddingToCloud 失败:', e);
+                showWarningToast('⚠️ 云端同步失败，本次修改可能未保存！请检查网络后重新保存');
+            });
             
             // Fix Bug5: iOS上点"保存"时oninput可能来不及触发syncBiddingCloseToEtf
             // 在saveBidding中主动同步板块ETF收盘值到早盘ETF看板
