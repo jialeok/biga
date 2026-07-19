@@ -15595,6 +15595,15 @@
                     element.addEventListener('contextmenu', function(e) {
                         e.preventDefault();
                     });
+                    // 双击打开编辑弹窗（电脑端鼠标操作）：因为上面的 click 处理器会
+                    // stopPropagation，双击时外层 #auctionContent/#hotContent 的
+                    // dblclick 收不到冒泡事件，这里单独绑定 dblclick 直接调用，不依赖冒泡
+                    element.addEventListener('dblclick', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        clearTimeout(pressTimer);
+                        if (dataSource === 'hot') { openHotEdit(); } else { openAuctionEdit(); }
+                    });
                 })(el);
             });
             
@@ -17301,7 +17310,7 @@
             const yesterdayDate = getYesterdayDate(currentDate);
             const yesterdayAuction = yesterdayDate ? (getGroupData(dataSource)[yesterdayDate] || []) : [];
             const todayGroups = getTopicGroups(todayAuction || []);
-            const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
+            const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction || []) : [];
 
             if (!todayGroups || todayGroups.length === 0) {
                 container.innerHTML = '<div class="star-stats-empty">暂无题材数据</div>';
@@ -22457,9 +22466,9 @@
             try {
                 const todayAuction = getTodayGroupList(currentGroup);
                 const yesterdayDate = getYesterdayDate(currentDate);
-                const yesterdayAuction = yesterdayDate ? getGroupData(currentGroup)[yesterdayDate] : [];
+                const yesterdayAuction = yesterdayDate ? (getGroupData(currentGroup)[yesterdayDate] || []) : [];
                 const todayGroups = getTopicGroups(todayAuction || []);
-                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
+                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction || []) : [];
                 
                 let xingxianCount = 0;
                 let xingzengCount = 0;
@@ -22544,7 +22553,7 @@
             // 七、强度分（需要用到昨天数据）
             let yesterdayAuction = [];
             try {
-                yesterdayAuction = getYesterdayDate(currentDate) ? getGroupData(currentGroup)[getYesterdayDate(currentDate)] : [];
+                yesterdayAuction = getYesterdayDate(currentDate) ? (getGroupData(currentGroup)[getYesterdayDate(currentDate)] || []) : [];
             } catch(e) { yesterdayAuction = []; }
 
             const auctionData = getGroupData(currentGroup);
@@ -22762,9 +22771,9 @@
             try {
                 const todayAuction = getTodayGroupList(currentGroup);
                 const yesterdayDate = getYesterdayDate(currentDate);
-                const yesterdayAuction = yesterdayDate ? getGroupData(currentGroup)[yesterdayDate] : [];
+                const yesterdayAuction = yesterdayDate ? (getGroupData(currentGroup)[yesterdayDate] || []) : [];
                 const todayGroups = getTopicGroups(todayAuction || []);
-                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
+                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction || []) : [];
                 
                 let xingxianCount = 0;
                 let xingzengCount = 0;
@@ -22849,7 +22858,7 @@
             // 七、强度分（需要用到昨天数据）
             let yesterdayAuction = [];
             try {
-                yesterdayAuction = getYesterdayDate(currentDate) ? getGroupData(currentGroup)[getYesterdayDate(currentDate)] : [];
+                yesterdayAuction = getYesterdayDate(currentDate) ? (getGroupData(currentGroup)[getYesterdayDate(currentDate)] || []) : [];
             } catch(e) { yesterdayAuction = []; }
 
             const auctionData = getGroupData(currentGroup);
@@ -23049,9 +23058,9 @@
             try {
                 const todayAuction = getTodayGroupList(currentGroup);
                 const yesterdayDate = getYesterdayDate(currentDate);
-                const yesterdayAuction = yesterdayDate ? getGroupData(currentGroup)[yesterdayDate] : [];
+                const yesterdayAuction = yesterdayDate ? (getGroupData(currentGroup)[yesterdayDate] || []) : [];
                 const todayGroups = getTopicGroups(todayAuction || []);
-                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
+                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction || []) : [];
                 
                 let xingxianCount = 0;
                 let xingzengCount = 0;
@@ -23136,7 +23145,7 @@
             // 七、强度分（需要用到昨天数据）
             let yesterdayAuction = [];
             try {
-                yesterdayAuction = getYesterdayDate(currentDate) ? getGroupData(currentGroup)[getYesterdayDate(currentDate)] : [];
+                yesterdayAuction = getYesterdayDate(currentDate) ? (getGroupData(currentGroup)[getYesterdayDate(currentDate)] || []) : [];
             } catch(e) { yesterdayAuction = []; }
 
             const auctionData = getGroupData(currentGroup);
@@ -26471,7 +26480,7 @@
                 const todayAuction = auctionData[currentDate] || [];
                 const yesterdayAuction = yesterdayDate ? auctionData[yesterdayDate] : [];
                 const todayGroups = getTopicGroups(todayAuction);
-                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction) : [];
+                const yesterdayGroups = yesterdayDate ? getTopicGroups(yesterdayAuction || []) : [];
                 
                 let xingxianCount = 0, xingzengCount = 0, xingpingCount = 0;
                 todayGroups.forEach(todayGroup => {
