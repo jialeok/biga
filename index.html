@@ -5472,6 +5472,7 @@
             </div>
             <button class="nav-btn" onclick="changeDate(1)">›</button>
             <button class="today-btn" onclick="goToday()">今天</button>
+            <button class="today-btn" style="background:#f3f4f6;color:#6b7280;font-size:11px;padding:6px 8px;" onclick="showDebugLog()" title="同步调试日志">日志</button>
         </div>
 
         <!-- 统计导航栏 -->
@@ -8241,13 +8242,23 @@
         // 云同步调试日志：手机上没有控制台，出问题时只能靠这个环形缓冲区
         // 查看。最多保留最近 200 条，每条带时间戳。通过 showDebugLog()
         // 弹出查看（也可在浏览器控制台里调用 window.showDebugLog()）。
+        // 用 sessionStorage 持久化：之前是纯内存数组，一刷新（下拉刷新/
+        // 切后台太久被系统回收）就清空了，导致"出问题前发生了什么"永远看不到——
+        // 而这类 bug 恰恰是在刷新那一刻才暴露出来的，日志必须跨刷新保留。
         // ============================================================
-        window._dbgLogBuffer = [];
+        const _DBG_LOG_KEY = 'jiwang_dbg_log_v1';
+        window._dbgLogBuffer = (function() {
+            try {
+                const saved = sessionStorage.getItem(_DBG_LOG_KEY);
+                return saved ? JSON.parse(saved) : [];
+            } catch (e) { return []; }
+        })();
         function _dbgLog(msg) {
             const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
             const line = '[' + time + '] ' + msg;
             window._dbgLogBuffer.push(line);
             if (window._dbgLogBuffer.length > 200) window._dbgLogBuffer.shift();
+            try { sessionStorage.setItem(_DBG_LOG_KEY, JSON.stringify(window._dbgLogBuffer)); } catch (e) {}
             console.log(line);
         }
         function showDebugLog() {
@@ -8261,6 +8272,7 @@
                         <span style="color:#fff;font-weight:600;">同步调试日志</span>
                         <div>
                             <button id="_dbgLogCopyBtn" style="margin-right:8px;background:#059669;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;">复制</button>
+                            <button id="_dbgLogClearBtn" style="margin-right:8px;background:#b91c1c;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;">清空</button>
                             <button id="_dbgLogCloseBtn" style="background:#374151;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;">关闭</button>
                         </div>
                     </div>
@@ -8273,6 +8285,12 @@
                 navigator.clipboard && navigator.clipboard.writeText(lines).then(function() {
                     showToast('✅ 已复制调试日志');
                 }).catch(function() {});
+            };
+            document.getElementById('_dbgLogClearBtn').onclick = function() {
+                window._dbgLogBuffer = [];
+                try { sessionStorage.removeItem(_DBG_LOG_KEY); } catch (e) {}
+                overlay.remove();
+                showToast('已清空调试日志');
             };
         }
         window.showDebugLog = showDebugLog;
@@ -10557,6 +10575,7 @@
 
                 // 从 jiwang_data 独立表拉取记忘看板数据（云端表是唯一权威来源）
                 try {
+                    const _beforeMerge = JSON.stringify((_jiwangMemCache || {})[currentDate] || null).slice(0, 200);
                     const tableJiwang = await pullJiwangFromTable();
                     if (!_jiwangMemCache) _jiwangMemCache = {};
                     // 重要修复：以前这里会把"这次没在 pendingDates 里的本地日期"全部删掉，
@@ -10577,12 +10596,18 @@
                         if (!pendingDates.has(d)) _jiwangMemCache[d] = tableJiwang[d];
                     });
                     if (allData) allData.jiwang = _jiwangMemCache;
+                    const _afterMerge = JSON.stringify(_jiwangMemCache[currentDate] || null).slice(0, 200);
+                    _dbgLog('pullFromCloud: jiwang 合并完成, currentDate=' + currentDate +
+                        ', 云端表共 ' + Object.keys(tableJiwang).length + ' 天, 云端是否含当前日期=' + tableJiwang.hasOwnProperty(currentDate) +
+                        ', 合并前=' + _beforeMerge + ', 合并后=' + _afterMerge);
                     if (pendingDates.size > 0) {
-                        _dbgLog && _dbgLog('pullFromCloud: 跳过覆盖有本地待推送编辑的记忘看板日期: ' + Array.from(pendingDates).join(','));
+                        _dbgLog('pullFromCloud: 跳过覆盖有本地待推送编辑的记忘看板日期: ' + Array.from(pendingDates).join(','));
                     }
                 } catch(tableErr) {
                     console.warn('jiwang_data 表拉取失败，回退到内存缓存:', tableErr.message);
+                    _dbgLog('pullFromCloud: jiwang_data 表拉取失败: ' + (tableErr && tableErr.message));
                 }
+
 
                 // 观察组可能受云端数据影响（上一交易日"竞/昨"达标股票可能变化），清除标记重新计算
                 try { localStorage.removeItem('obsEnsured_' + currentDate); } catch(e) {}
@@ -10776,6 +10801,7 @@
             currentDate = `${year}-${month}-${day}`;
         }
         if (currentDate < '2025-01-01') currentDate = '2025-01-01';
+        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate);
 
         let isStrengthSortEnabled = false;
 
@@ -29850,15 +29876,22 @@
             if (!date) return;
             const pending = (window._jiwangDirtyDates && window._jiwangDirtyDates.has(date)) ||
                 (window._jiwangPushTimers && window._jiwangPushTimers[date]);
-            if (pending) return;
+            if (pending) {
+                _dbgLog('refreshJiwangForDateSwitch: ' + date + ' 有本地待推送编辑，跳过拉取');
+                return;
+            }
+            const _beforePull = JSON.stringify(getJiwangData()[date] || null).slice(0, 200);
+            _dbgLog('refreshJiwangForDateSwitch: 开始拉取 ' + date + ', 拉取前缓存=' + _beforePull);
             pullJiwangForDate(date).then(function() {
+                const _afterPull = JSON.stringify(getJiwangData()[date] || null).slice(0, 200);
+                _dbgLog('refreshJiwangForDateSwitch: ' + date + ' 拉取完成, 拉取后缓存=' + _afterPull);
                 if (date === currentDate) {
                     renderJiwang();
                     if (typeof renderMarketStage === 'function') renderMarketStage();
                 }
             }).catch(function(e) {
                 console.warn('切换日期补拉 jiwang 失败:', e.message);
-                _dbgLog && _dbgLog('refreshJiwangForDateSwitch: ' + date + ' 拉取失败: ' + (e && e.message));
+                _dbgLog('refreshJiwangForDateSwitch: ' + date + ' 拉取失败: ' + (e && e.message));
                 showWarningToast('⚠️ 记忘看板拉取失败，当前显示的可能是过期数据。原因: ' + (e && e.message || e), 8000);
             });
         }
@@ -32024,7 +32057,11 @@
 
             // 获取最后编辑的日期，如果有则跳转
             const lastEditedDate = localStorage.getItem('lastEditedDate_' + DATA_VERSION);
+            _dbgLog('_appInit: 启动时 currentDate=' + currentDate + ', localStorage 记录的 lastEditedDate=' + lastEditedDate);
             if (lastEditedDate && lastEditedDate >= '2025-01-01') {
+                if (lastEditedDate !== currentDate) {
+                    _dbgLog('_appInit: currentDate 从 ' + currentDate + ' 跳转为 lastEditedDate=' + lastEditedDate);
+                }
                 currentDate = lastEditedDate;
             }
 
@@ -32044,6 +32081,7 @@
             // 监听页面可见性变化，当切换回页面时重新加载数据（避免多标签页数据不同步）
             document.addEventListener('visibilitychange', function() {
                 if (document.visibilityState === 'visible') {
+                    _dbgLog('visibilitychange: 切回前台, currentDate=' + currentDate);
                     // 强制重新从localStorage加载数据
                     allData = null;
                     loadAllData();
@@ -32064,15 +32102,21 @@
                     // 跳过本地有未推送完成编辑的日期，避免用云端旧值覆盖刚编辑的内容。
                     const jiwangPending = (window._jiwangDirtyDates && window._jiwangDirtyDates.has(currentDate)) ||
                         (window._jiwangPushTimers && window._jiwangPushTimers[currentDate]);
+                    const _beforePull = JSON.stringify(getJiwangData()[currentDate] || null).slice(0, 200);
+                    _dbgLog('visibilitychange: jiwangPending=' + jiwangPending + ', 拉取前 ' + currentDate + ' 缓存=' + _beforePull);
                     if (!jiwangPending) {
                         pullJiwangForDate(currentDate).then(function() {
+                            const _afterPull = JSON.stringify(getJiwangData()[currentDate] || null).slice(0, 200);
+                            _dbgLog('visibilitychange: 拉取完成, ' + currentDate + ' 拉取后缓存=' + _afterPull);
                             renderJiwang();
                             if (typeof renderMarketStage === 'function') renderMarketStage();
                         }).catch(function(e) {
                             console.warn('切回前台重新拉取 jiwang 失败:', e.message);
-                            _dbgLog && _dbgLog('切回前台重新拉取 jiwang 失败: ' + (e && e.message));
+                            _dbgLog('visibilitychange: 切回前台重新拉取 jiwang 失败: ' + (e && e.message));
                             showWarningToast('⚠️ 记忘看板拉取失败，当前显示的可能是过期数据。原因: ' + (e && e.message || e), 8000);
                         });
+                    } else {
+                        _dbgLog('visibilitychange: ' + currentDate + ' 有本地待推送编辑，跳过拉取覆盖');
                     }
                 }
             });
