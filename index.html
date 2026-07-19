@@ -8258,6 +8258,7 @@
         let _hotAuctionData = {}; // 热门股票本地缓存 {date: [items]}，结构与 getAuctionData() 返回一致
         let _hotAuctionTableAvailable = false; // 运行时标记：hot_stocks 表是否可用
         let _hotAuctionRealtimeChannel = null; // hot_stocks 表的 Realtime 订阅
+        let _hotTrendsRealtimeChannel = null; // hot_stock_trends 表的 Realtime 订阅（原缺失声明，导致 stopHotTrendsRealtime 首次调用时 ReferenceError，打断 checkPassword() 后续流程）
 
         function generateToken() {
             const arr = new Uint8Array(16);
