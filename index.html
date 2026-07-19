@@ -8968,6 +8968,16 @@
         // 拉取单日 jiwang 数据并合并到内存缓存（Realtime 收到变更时用）
         async function pullJiwangForDate(date) {
             if (!date) return;
+            // 防御性检查：如果这天还有本地编辑没真正推送成功（排队中/防抖定时器还没触发），
+            // 不要用云端数据覆盖——调用方大多已经各自检查过一次，这里再兜底一层，
+            // 避免以后新增调用点时忘记加这个判断，导致重新引入"覆盖未推送编辑"的问题。
+            const pending = (window._jiwangDirtyDates && window._jiwangDirtyDates.has(date)) ||
+                (window._jiwangPushTimers && window._jiwangPushTimers[date]) ||
+                (_justPushedJiwang && date === currentDate);
+            if (pending) {
+                _dbgLog && _dbgLog('pullJiwangForDate: ' + date + ' 有本地待推送编辑，跳过覆盖');
+                return;
+            }
             const sb = getSupabase();
             const { data, error } = await sb.from('jiwang_data')
                 .select('diezhang,qingxu,jujiao,"whoIncrease","kxianPrefix",kxian,guancha,"guochengJieguo","shouguJieguo",jielun,chushou,stats')
@@ -9038,26 +9048,42 @@
         // 防抖推送 jiwang 到云端（2秒无新改动后才真正推送，避免连续操作时频繁请求）
         // 按日期独立计时，避免同一批 saveData() 里同时标脏多个日期（如回填下一天K线时）
         // 互相 clearTimeout 导致只有最后一个日期被推送。
+        // 仅用于"非用户主动点保存"的联动场景（比如自动回填K线）；用户明确点击的保存
+        // 按钮/选择框，一律走下面的 pushJiwangNow()——立即推送，不等 2 秒防抖，
+        // 否则"保存后马上刷新/切页"会导致请求根本没来得及发出去，且没有任何报错。
         function scheduleJiwangPush(date) {
             if (!date) return;
             _dbgLog('scheduleJiwangPush: 排队 ' + date + '（2秒防抖）');
             clearTimeout(_jiwangPushTimers[date]);
             _jiwangPushTimers[date] = setTimeout(function() {
                 delete _jiwangPushTimers[date];
-                // jiwang 已经是纯云端数据源，这次推送如果失败，意味着这次编辑
-                // 实际上没有真正保存下来（内存里的显示只是暂时的，一刷新就会
-                // 恢复成云端旧值）。因此失败时必须用醒目的方式告知用户，
-                // 不能只在控制台 warn——手机上没法看控制台，只能靠 toast 才能
-                // 看到真实错误信息（而不是笼统地说"检查网络"）。
-                pushJiwangToCloud(date).then(function() {
-                    showToast('☁️ 记忘看板已同步到云端');
-                }).catch(function(e) {
+                pushJiwangToCloud(date).catch(function(e) {
                     console.warn('pushJiwangToCloud 失败:', e);
                     const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
                     _dbgLog('scheduleJiwangPush: ' + date + ' 推送失败: ' + detail);
                     showWarningToast('⚠️ 记忘看板云端同步失败，本次修改未保存！原因: ' + detail, 10000);
                 });
             }, 2000);
+        }
+
+        // 立即推送 jiwang 到云端（不等 2 秒防抖），用于所有用户明确触发的"保存"动作
+        // （编辑弹窗保存、圆圈统计保存、评论保存、行情/仓位选择、三个勾选框等——这些都是
+        // "一次操作即完成"，没有额外的确认步骤，如果还走 2 秒防抖，用户保存完立刻刷新页面
+        // 或切换日期，请求可能根本没发出去，且 catch 不会触发、不会有任何报错提示。
+        // successMsg 为空则不弹成功提示（用于像勾选框这种高频操作，避免 toast 刷屏）。
+        function pushJiwangNow(date, successMsg) {
+            if (!date) return;
+            clearTimeout(_jiwangPushTimers[date]);
+            delete _jiwangPushTimers[date];
+            _dbgLog('pushJiwangNow: 立即推送 ' + date);
+            pushJiwangToCloud(date).then(function() {
+                if (successMsg) showToast(successMsg);
+            }).catch(function(e) {
+                console.warn('pushJiwangNow 失败:', e);
+                const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
+                _dbgLog('pushJiwangNow: ' + date + ' 推送失败: ' + detail);
+                showWarningToast('⚠️ 记忘看板云端同步失败，本次修改未保存！原因: ' + detail, 10000);
+            });
         }
 
         // 删除某天的 jiwang 云端行（例如清空复盘数据时）
@@ -11063,7 +11089,7 @@
             saveData();
             renderComment();
             closeCommentModal();
-            showToast('✅ 评论已保存！');
+            pushJiwangNow(currentDate, '✅ 评论已保存并同步到云端');
         }
 
         // 渲染评论
@@ -21201,6 +21227,7 @@
             const stats = getStats();
             stats.marketStage = value;
             saveData();
+            pushJiwangNow(currentDate);
             
             // 更新选择框样式：空仓行情和主跌行情时变绿色
             const selectElement = document.getElementById('marketStageSelect');
@@ -21224,6 +21251,7 @@
             const stats = getStats();
             stats.position = value;
             saveData();
+            pushJiwangNow(currentDate);
             
             // 更新选择框样式
             const selectElement = document.getElementById('positionSelect');
@@ -21285,6 +21313,7 @@
             }
             
             saveData();
+            pushJiwangNow(currentDate);
         }
 
         // 在编辑模态框中切换复选框
@@ -22487,6 +22516,7 @@
             jiwangData[nextDate].kxian = kxianValue;
             markJiwangDirty(nextDate);
             saveData();
+            pushJiwangNow(nextDate);
 
             // 如果下一交易日就是当前显示的日期，重新渲染
             if (nextDate === currentDate) {
@@ -22891,7 +22921,7 @@
             
             renderCircleStats();
             closeCircleStatsModal();
-            showToast('✅ 统计数据已保存！');
+            pushJiwangNow(currentDate, '✅ 统计数据已保存并同步到云端');
             
             // 实时更新连涨连跌天数柱状图
             autoCalculateConsecutiveDays();
@@ -22923,7 +22953,7 @@
             
             renderCircleStats();
             closeCircleStatsModal();
-            showToast('✅ 统计数据已清除！');
+            pushJiwangNow(currentDate, '✅ 统计数据已清除并同步到云端');
             
             // 实时更新连涨连跌天数柱状图
             autoCalculateConsecutiveDays();
@@ -24441,6 +24471,7 @@
                 jiwangData[currentDate].kxian = kxianValue;
                 markJiwangDirty(currentDate);
                 saveData();
+                pushJiwangNow(currentDate);
                 renderJiwang();
             }
             
@@ -24636,9 +24667,9 @@
             markJiwangDirty(currentDate);
             _dbgLog('saveJiwang: 保存 ' + currentDate + ' 到内存, data=' + JSON.stringify(data).slice(0, 300));
             saveData();
+            pushJiwangNow(currentDate, '✅ 记忘看板已保存并同步到云端');
             renderJiwang();
             closeJiwangModal();
-            showToast('✅ 已保存，正在同步到云端...');
             
             autoCalculateRecentMultiScore();
             autoCalculateConsecutiveDays();
@@ -29765,6 +29796,25 @@
             }
         }, { passive: true });
 
+        // 切换日期后，防御性地从云端补拉一次该日期的记忘看板数据。
+        // 原因：_jiwangMemCache 只在"密码验证/整页刷新时的 pullFromCloud()"和
+        // Realtime 订阅收到变化时更新，如果这条日期的数据是在本次会话开始前、
+        // 从另一台设备写入的，而 Realtime 订阅当时恰好断线（手机切后台很常见），
+        // 内存缓存里就完全没有这条数据——不是"丢失"，而是"从未拉取过"。
+        // 跳过本地有未推送完成编辑的日期，避免用云端旧值覆盖刚编辑的内容。
+        function refreshJiwangForDateSwitch(date) {
+            if (!date) return;
+            const pending = (window._jiwangDirtyDates && window._jiwangDirtyDates.has(date)) ||
+                (window._jiwangPushTimers && window._jiwangPushTimers[date]);
+            if (pending) return;
+            pullJiwangForDate(date).then(function() {
+                if (date === currentDate) {
+                    renderJiwang();
+                    if (typeof renderMarketStage === 'function') renderMarketStage();
+                }
+            }).catch(function(e) { console.warn('切换日期补拉 jiwang 失败:', e.message); });
+        }
+
         // 改变日期
         function changeDate(days) {
             // 隐藏月统计看板
@@ -29795,6 +29845,7 @@
                 autoCalculateRecentMultiScore();
                 renderAuctionPage4();
             });
+            refreshJiwangForDateSwitch(newDate);
             showHint(days > 0 ? '明天' : '昨天');
         }
 
@@ -29819,6 +29870,7 @@
                 autoCalculateRecentMultiScore();
                 renderAuctionPage4();
             });
+            refreshJiwangForDateSwitch(date);
         }
 
         // 回到今天
@@ -29844,6 +29896,7 @@
                 autoCalculateRecentMultiScore();
                 renderAuctionPage4();
             });
+            refreshJiwangForDateSwitch(today);
             showHint('今天');
         }
 
@@ -29873,6 +29926,7 @@
             renderList();
             // 重新计算评分
             autoCalculateRecentMultiScore();
+            refreshJiwangForDateSwitch(beforeDate);
             showHint('已返回');
         }
 
@@ -29962,6 +30016,7 @@
             setFilter('all');
             renderList();
             autoCalculateRecentMultiScore();
+            refreshJiwangForDateSwitch(dateStr);
         }
 
         // 上个月
@@ -31934,6 +31989,19 @@
                     pullBiddingForDate(currentDate).then(function() {
                         renderBidding();
                     }).catch(function(e) { console.warn('切回前台重新拉取 bidding 失败:', e.message); });
+                    // jiwang 同理：也是纯云端表 + Realtime 订阅，手机切后台一段时间
+                    // WebSocket 断线后不一定自动重连，之前这里漏掉了 jiwang 的补拉，
+                    // 导致"切回前台一段时间后再操作/翻页"看到的是过期的内存缓存
+                    // （表现为"记忘看板"和"空仓行情"卡片数据像是丢失了）。
+                    // 跳过本地有未推送完成编辑的日期，避免用云端旧值覆盖刚编辑的内容。
+                    const jiwangPending = (window._jiwangDirtyDates && window._jiwangDirtyDates.has(currentDate)) ||
+                        (window._jiwangPushTimers && window._jiwangPushTimers[currentDate]);
+                    if (!jiwangPending) {
+                        pullJiwangForDate(currentDate).then(function() {
+                            renderJiwang();
+                            if (typeof renderMarketStage === 'function') renderMarketStage();
+                        }).catch(function(e) { console.warn('切回前台重新拉取 jiwang 失败:', e.message); });
+                    }
                 }
             });
             
