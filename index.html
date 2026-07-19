@@ -8993,8 +8993,15 @@
             clearTimeout(_jiwangPushTimers[date]);
             _jiwangPushTimers[date] = setTimeout(function() {
                 delete _jiwangPushTimers[date];
+                // jiwang 已经是纯云端数据源，这次推送如果失败，意味着这次编辑
+                // 实际上没有真正保存下来（内存里的显示只是暂时的，一刷新就会
+                // 恢复成云端旧值）。因此失败时必须用醒目的方式告知用户，
+                // 不能只在控制台 warn——手机上没法看控制台，只能靠 toast 才能
+                // 看到真实错误信息（而不是笼统地说"检查网络"）。
                 pushJiwangToCloud(date).catch(function(e) {
                     console.warn('pushJiwangToCloud 失败:', e);
+                    const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
+                    showWarningToast('⚠️ 记忘看板云端同步失败，本次修改未保存！原因: ' + detail, 10000);
                 });
             }, 2000);
         }
