@@ -15236,8 +15236,10 @@
                     <div class="auction-placeholder">暂无数据，双击导入</div>
                 `;
                 // 没有数据时显示 -
-                const strengthValueEl = document.getElementById(_p + 'StrengthValue');
-                const strengthArrowEl = document.getElementById(_p + 'StrengthArrow');
+                // 注：强度显示（auctionStrengthValue/auctionStrengthArrow）是"早盘竞价"和"热门股票"两个 tab 共用的同一套 DOM
+                // （标题栏文字本身就会随 switchGroup 切换），因此这里固定写这一套，而不是按 _p 拼接（HTML 里并不存在 hotStrengthValue）
+                const strengthValueEl = document.getElementById('auctionStrengthValue');
+                const strengthArrowEl = document.getElementById('auctionStrengthArrow');
                 if (strengthValueEl) strengthValueEl.textContent = '-';
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
                 // 没有数据时，"竞放量数"、"竞/昨数"也要重置为 -，避免残留上一个有数据日期的数值
@@ -15337,8 +15339,9 @@
                 
                 const yesterdayStrength = yesterdayTotalCount > 0 ? Math.round((yesterdayStrongCount / yesterdayTotalCount) * 100) : null;
                 
-                const strengthValueEl = document.getElementById(_p + 'StrengthValue');
-                const strengthArrowEl = document.getElementById(_p + 'StrengthArrow');
+                // 同上：强度显示是两个 tab 共用的同一套 DOM，固定读写 auctionStrengthValue/auctionStrengthArrow
+                const strengthValueEl = document.getElementById('auctionStrengthValue');
+                const strengthArrowEl = document.getElementById('auctionStrengthArrow');
                 
                 if (strengthValueEl) {
                     strengthValueEl.textContent = todayStrength + '% ';
@@ -15357,8 +15360,8 @@
                     }
                 }
             } else {
-                const strengthValueEl = document.getElementById(_p + 'StrengthValue');
-                const strengthArrowEl = document.getElementById(_p + 'StrengthArrow');
+                const strengthValueEl = document.getElementById('auctionStrengthValue');
+                const strengthArrowEl = document.getElementById('auctionStrengthArrow');
                 if (strengthValueEl) strengthValueEl.textContent = '-';
                 if (strengthArrowEl) strengthArrowEl.textContent = '-';
             }
@@ -17624,7 +17627,8 @@
                 offsetAcc += c.count;
             });
 
-            // 读取早盘竞价强度（复用页面顶部已计算好的强度数值与箭头，不改变原有逻辑）
+            // 读取标题栏强度数值与箭头（auctionStrengthValue/auctionStrengthArrow 是"早盘竞价"和"热门股票"
+            // 两个 tab 共用的同一套 DOM，renderAuction 内部已按当前 dataSource 各自算好并写入，这里直接复用即可）
             const strengthValueEl = document.getElementById('auctionStrengthValue');
             const strengthArrowEl = document.getElementById('auctionStrengthArrow');
             const strengthText = strengthValueEl ? strengthValueEl.textContent.trim() : '-';
