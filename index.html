@@ -15551,6 +15551,10 @@
                             clearTimeout(pressTimer);
                             return;
                         }
+                        // 右键按下不启动长按计时器，避免和右键单击打开编辑弹窗冲突
+                        if (e.button === 2) {
+                            return;
+                        }
                         isLongPress = false;
                         isMoved = false;
                         pressTimer = setTimeout(() => {
@@ -15592,15 +15596,10 @@
                             showAuctionNotePopup(element, note);
                         }
                     });
+                    // 右键单击打开编辑弹窗（电脑端鼠标操作）：contextmenu 是独立事件，
+                    // 不会和上面的 click 处理器冲突，比双击更可靠
                     element.addEventListener('contextmenu', function(e) {
                         e.preventDefault();
-                    });
-                    // 双击打开编辑弹窗（电脑端鼠标操作）：因为上面的 click 处理器会
-                    // stopPropagation，双击时外层 #auctionContent/#hotContent 的
-                    // dblclick 收不到冒泡事件，这里单独绑定 dblclick 直接调用，不依赖冒泡
-                    element.addEventListener('dblclick', function(e) {
-                        e.preventDefault();
-                        e.stopPropagation();
                         clearTimeout(pressTimer);
                         if (dataSource === 'hot') { openHotEdit(); } else { openAuctionEdit(); }
                     });
