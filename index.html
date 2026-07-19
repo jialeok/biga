@@ -8259,6 +8259,10 @@
         let _hotAuctionTableAvailable = false; // 运行时标记：hot_stocks 表是否可用
         let _hotAuctionRealtimeChannel = null; // hot_stocks 表的 Realtime 订阅
         let _hotTrendsRealtimeChannel = null; // hot_stock_trends 表的 Realtime 订阅（原缺失声明，导致 stopHotTrendsRealtime 首次调用时 ReferenceError，打断 checkPassword() 后续流程）
+        let _hotTrendsTableAvailable = false; // 运行时标记：hot_stock_trends 表是否可用（原同样缺失声明，导致 clearAllHotRows/pushHotTrendsToCloud 等函数在表未就绪前读取时 ReferenceError 而中途崩溃）
+        let _hotTrendsCache = {}; // hot_stock_trends 表本地缓存 {date: [items]}（原缺失声明）
+        let _hotTrendsReloadTimer = null; // hot_stock_trends Realtime 收到变更后的防抖重载定时器（原缺失声明）
+        let _justPushedHotTrends = false; // 标记刚推送过 hot_stock_trends，忽略自己触发的 Realtime 通知（原缺失声明，loadHotTrendsFromCloud 第一行就读取它，若在赋值前被调用会 ReferenceError）
 
         function generateToken() {
             const arr = new Uint8Array(16);
