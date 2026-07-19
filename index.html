@@ -9193,25 +9193,50 @@
             _hotHighlightsCache[date] = new Set(stockNames);
         }
 
-        // hot_stocks 表 Realtime 订阅（抓取程序同步后自动刷新热门股票数据）
+        // ===== 热门股票tap：三张表（hot_stocks / hot_stocks_highlights / hot_stock_trends）的
+        // Realtime 订阅共用同一个"统一防抖池"。
+        // 背景：这三张表各自有独立订阅，一次补数据操作（如"两全昨日成交量"）常常同时
+        // 触发 hot_stocks 和 hot_stock_trends 两张表的变化，若各自独立 800ms 防抖、各自独立
+        // 调用 renderHotStocks()，会导致极短时间内热门股票列表的 DOM 被连续整体重建 2~3 次。
+        // 用户点击"序号"展开趋势图的瞬间，若恰好撞上这类连锁重渲染，点击的目标节点已被替换，
+        // 事件效果丢失，表现为"卡顿、有时点不出来"。而早盘竞价 tap 只有 auction_data 一张表、
+        // 一个订阅，不会有这个问题，所以体验更流畅。
+        // 统一后：不论哪张表先收到变化通知，都汇入同一个定时器，到点后按需重新拉取各自数据，
+        // 最后只调用一次 renderHotStocks()。
         var _hotAuctionRealtimeTimer = null;
         var _pendingHotRealtimeDates = new Set();
-        function _debounceHotAuctionRealtime(date) {
-            _pendingHotRealtimeDates.add(date);
+        var _pendingHotReload = { stocks: false, highlights: false, trends: false };
+        function _scheduleHotRealtimeReload() {
             if (_hotAuctionRealtimeTimer) clearTimeout(_hotAuctionRealtimeTimer);
             _hotAuctionRealtimeTimer = setTimeout(function() {
-                var dates = Array.from(_pendingHotRealtimeDates);
-                _pendingHotRealtimeDates.clear();
+                var need = _pendingHotReload;
+                _pendingHotReload = { stocks: false, highlights: false, trends: false };
                 _hotAuctionRealtimeTimer = null;
-                var tasks = dates.map(function(d) {
-                    return loadHotStocksFromCloud().catch(function(e) {
+                var tasks = [];
+                if (need.stocks) {
+                    tasks.push(loadHotStocksFromCloud().catch(function(e) {
                         console.warn('Realtime loadHotStocksFromCloud 失败:', e);
-                    });
-                });
+                    }));
+                }
+                if (need.highlights) {
+                    tasks.push(pullHotStocksHighlights().catch(function(e) {
+                        console.warn('hot_stocks_highlights Realtime 重载失败:', e);
+                    }));
+                }
+                if (need.trends) {
+                    tasks.push(loadHotTrendsFromCloud().catch(function(e) {
+                        console.warn('hot_stock_trends Realtime 重载失败:', e);
+                    }));
+                }
                 Promise.all(tasks).then(function() {
-                    if (typeof renderHotStocks === 'function') renderHotStocks();
+                    if (typeof renderHotStocks === 'function') renderHotStocks(); // 三张表变化只触发这一次整体重渲染
                 });
             }, 800);
+        }
+        function _debounceHotAuctionRealtime(date) {
+            _pendingHotRealtimeDates.add(date);
+            _pendingHotReload.stocks = true;
+            _scheduleHotRealtimeReload();
         }
 
         function startHotStocksRealtime() {
@@ -9255,13 +9280,9 @@
                     }, function(payload) {
                         var row = payload.new || payload.old;
                         if (!row || !row.date) return;
-                        // 防抖：收到变更后重新加载 hot highlights 缓存并刷新
-                        if (_hotHighlightsReloadTimer) clearTimeout(_hotHighlightsReloadTimer);
-                        _hotHighlightsReloadTimer = setTimeout(function() {
-                            pullHotStocksHighlights().then(function() {
-                                if (typeof renderHotStocks === 'function') renderHotStocks();
-                            }).catch(function(e) { console.warn('hot_stocks_highlights Realtime 重载失败:', e); });
-                        }, 800);
+                        // 汇入统一防抖池，避免和 hot_stocks / hot_stock_trends 各自独立触发重渲染
+                        _pendingHotReload.highlights = true;
+                        _scheduleHotRealtimeReload();
                     })
                     .subscribe();
                 console.log('hot_stocks_highlights Realtime 订阅已启动');
@@ -9412,12 +9433,9 @@
                         if (_justPushedHotTrends) return;
                         var row = payload.new || payload.old;
                         if (!row || !row.date) return;
-                        if (_hotTrendsReloadTimer) clearTimeout(_hotTrendsReloadTimer);
-                        _hotTrendsReloadTimer = setTimeout(function() {
-                            loadHotTrendsFromCloud().then(function() {
-                                if (typeof renderHotStocks === 'function') renderHotStocks();
-                            }).catch(function(e) { console.warn('hot_stock_trends Realtime 重载失败:', e); });
-                        }, 800);
+                        // 汇入统一防抖池，避免和 hot_stocks / hot_stocks_highlights 各自独立触发重渲染
+                        _pendingHotReload.trends = true;
+                        _scheduleHotRealtimeReload();
                     })
                     .subscribe();
                 console.log('hot_stock_trends Realtime 订阅已启动');
