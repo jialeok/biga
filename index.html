@@ -17498,6 +17498,13 @@
             const container = document.getElementById('starStatsContent');
             if (!container) return;
 
+            // 分组守卫：星标签统计看板只有一份 DOM，但"早盘竞价"和"热门股票"是两个独立 tab，
+            // 各自有自己的云端 Realtime 订阅，会在后台异步触发渲染。
+            // 如果不加这层判断，不管用户停留在哪个 tab，两边的数据都会抢占同一块看板，
+            // 表现为看板内容在两组不同统计结果之间来回跳变（闪烁、颜色/数字忽变）。
+            // 因此：只有当本次渲染请求的分组等于用户当前正在查看的分组时，才允许更新看板。
+            if (dataSource !== currentGroup) return;
+
             const todayAuction = getTodayGroupList(dataSource);
             const yesterdayDate = getYesterdayDate(currentDate);
             const yesterdayAuction = yesterdayDate ? (getGroupData(dataSource)[yesterdayDate] || []) : [];
