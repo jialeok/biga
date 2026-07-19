@@ -8933,16 +8933,30 @@
         async function pullJiwangFromTable() {
             const sb = getSupabase();
             const result = {};
+            // 记录每个 date 已经放进 result 的那一行的 updated_at，方便碰到重复日期时
+            // 判断该保留哪一条——如果 jiwang_data.date 缺唯一约束，同一天可能有多行，
+            // Postgres 在没有 .order() 时行返回顺序未定义，直接"后来者覆盖前者"会
+            // 出现"这次是新数据、下次刷新又变旧数据"的不确定表现。
+            const resultUpdatedAt = {};
+            let duplicateDates = null;
             let offset = 0;
             const pageSize = 1000;
             while (true) {
                 const { data, error } = await sb.from('jiwang_data')
-                    .select('"date",diezhang,qingxu,jujiao,"whoIncrease","kxianPrefix",kxian,guancha,"guochengJieguo","shouguJieguo",jielun,chushou,stats')
+                    .select('"date",diezhang,qingxu,jujiao,"whoIncrease","kxianPrefix",kxian,guancha,"guochengJieguo","shouguJieguo",jielun,chushou,stats,updated_at')
                     .range(offset, offset + pageSize - 1);
                 if (error) throw error;
                 if (!data || data.length === 0) break;
                 data.forEach(function(row) {
                     if (!row || !row.date) return;
+                    if (result.hasOwnProperty(row.date)) {
+                        if (!duplicateDates) duplicateDates = [];
+                        duplicateDates.push(row.date);
+                        const existingTime = new Date(resultUpdatedAt[row.date] || 0);
+                        const rowTime = new Date(row.updated_at || 0);
+                        if (rowTime <= existingTime) return; // 已有的那条更新，跳过这条更旧的重复行
+                    }
+                    resultUpdatedAt[row.date] = row.updated_at;
                     result[row.date] = {
                         diezhang: row.diezhang || '',
                         qingxu: row.qingxu || '',
@@ -8960,6 +8974,10 @@
                 });
                 if (data.length < pageSize) break;
                 offset += pageSize;
+            }
+            if (duplicateDates) {
+                console.warn('pullJiwangFromTable: 发现重复日期行: ' + duplicateDates.join(', ') + '（建议在 Supabase 给 jiwang_data.date 加唯一约束）');
+                _dbgLog && _dbgLog('pullJiwangFromTable: 发现重复日期行: ' + duplicateDates.join(', '));
             }
             _jiwangTableAvailable = true;
             return result;
@@ -8979,17 +8997,30 @@
                 return;
             }
             const sb = getSupabase();
-            const { data, error } = await sb.from('jiwang_data')
-                .select('diezhang,qingxu,jujiao,"whoIncrease","kxianPrefix",kxian,guancha,"guochengJieguo","shouguJieguo",jielun,chushou,stats')
-                .eq('"date"', date)
-                .maybeSingle();
+            // 注意：这里故意不用 .maybeSingle()。如果 jiwang_data 表在 date 列上
+            // 缺少唯一约束，同一天可能存在重复行——.maybeSingle() 在命中多行时会
+            // 直接抛错，而调用方大多只是 console.warn 静默吞掉，表现为"切换日期/
+            // 切回前台后记忘看板一片空白，且没有任何报错提示"。改用普通 .select()
+            // 取回该日期的所有行，即使有重复也不报错；再按 updated_at 挑最新的一条，
+            // 保证结果确定、可预期（而不是像全量拉取那样依赖未定义的行返回顺序）。
+            const { data: rows, error } = await sb.from('jiwang_data')
+                .select('diezhang,qingxu,jujiao,"whoIncrease","kxianPrefix",kxian,guancha,"guochengJieguo","shouguJieguo",jielun,chushou,stats,updated_at')
+                .eq('"date"', date);
             if (error) throw error;
             const jiwangData = getJiwangData();
-            if (!data) {
+            if (!rows || rows.length === 0) {
                 delete jiwangData[date];
                 _jiwangTableAvailable = true;
                 return;
             }
+            if (rows.length > 1) {
+                console.warn('pullJiwangForDate: ' + date + ' 在云端存在 ' + rows.length + ' 条重复行，已按 updated_at 取最新一条（建议在 Supabase 给 jiwang_data.date 加唯一约束）');
+                _dbgLog && _dbgLog('pullJiwangForDate: ' + date + ' 发现 ' + rows.length + ' 条重复行');
+            }
+            const data = rows.reduce(function(latest, r) {
+                if (!latest) return r;
+                return (new Date(r.updated_at || 0) > new Date(latest.updated_at || 0)) ? r : latest;
+            }, null);
             jiwangData[date] = {
                 diezhang: data.diezhang || '',
                 qingxu: data.qingxu || '',
@@ -9036,10 +9067,23 @@
                 updated_at: new Date().toISOString()
             };
             _dbgLog('pushJiwangToCloud: 开始 upsert ' + date);
-            const { error } = await sb.from('jiwang_data').upsert(row, { onConflict: 'date' });
+            // 用 .select() 拿回实际写入/更新的行，用来验证这次 upsert 是否真的生效——
+            // 如果 date 列缺少唯一约束，onConflict:'date' 不会报错，但也不会真正更新
+            // 已有行，而是插入一条新行，写入"看起来成功"但可能出现重复行/顺序问题；
+            // 如果命中 RLS 规则被过滤，upsert 同样不报错但什么也没真正持久化。
+            // 两种情况都会让用户看到"同步成功"提示，之后却读到旧值/空值。
+            const { data: upserted, error } = await sb.from('jiwang_data').upsert(row, { onConflict: 'date' }).select('"date"');
             if (error) {
                 _dbgLog('pushJiwangToCloud: ' + date + ' upsert 失败: ' + (error.message || JSON.stringify(error)));
                 throw error;
+            }
+            if (!upserted || upserted.length === 0) {
+                const msg = 'upsert 未返回任何行，写入可能未真正生效（检查 jiwang_data.date 是否有唯一约束、以及 RLS 策略）';
+                _dbgLog('pushJiwangToCloud: ' + date + ' ' + msg);
+                throw new Error(msg);
+            }
+            if (upserted.length > 1) {
+                _dbgLog('pushJiwangToCloud: ' + date + ' upsert 返回了 ' + upserted.length + ' 行，说明 date 列缺少唯一约束，onConflict 未生效，产生了重复行——请在 Supabase 给 jiwang_data.date 加唯一约束');
             }
             _dbgLog('pushJiwangToCloud: ' + date + ' upsert 成功');
             _jiwangTableAvailable = true;
@@ -10514,27 +10558,27 @@
                 // 从 jiwang_data 独立表拉取记忘看板数据（云端表是唯一权威来源）
                 try {
                     const tableJiwang = await pullJiwangFromTable();
-                    if (Object.keys(tableJiwang).length > 0) {
-                        // 原地更新持久内存缓存（不写 localStorage，也不重置 allData）
-                        // 重要：不能无条件清空重建 —— 如果本地某天的编辑还没真正推送成功
-                        // （在 _jiwangDirtyDates 里排队 / 防抖定时器还没触发 / 刚推送 5 秒保护期内），
-                        // 此时用云端旧值覆盖会把用户刚保存的编辑静默丢弃（且没有任何提示）。
-                        // 因此：这些"还在飞"的日期跳过覆盖，保留本地当前值。
-                        if (!_jiwangMemCache) _jiwangMemCache = {};
-                        const pendingDates = new Set();
-                        if (window._jiwangDirtyDates) window._jiwangDirtyDates.forEach(function(d) { pendingDates.add(d); });
-                        if (window._jiwangPushTimers) Object.keys(window._jiwangPushTimers).forEach(function(d) { pendingDates.add(d); });
-                        if (_justPushedJiwang) pendingDates.add(currentDate);
-                        Object.keys(_jiwangMemCache).forEach(function(d) {
-                            if (!pendingDates.has(d)) delete _jiwangMemCache[d];
-                        });
-                        Object.keys(tableJiwang).forEach(function(d) {
-                            if (!pendingDates.has(d)) _jiwangMemCache[d] = tableJiwang[d];
-                        });
-                        if (allData) allData.jiwang = _jiwangMemCache;
-                        if (pendingDates.size > 0) {
-                            _dbgLog && _dbgLog('pullFromCloud: 跳过覆盖有本地待推送编辑的记忘看板日期: ' + Array.from(pendingDates).join(','));
-                        }
+                    if (!_jiwangMemCache) _jiwangMemCache = {};
+                    // 重要修复：以前这里会把"这次没在 pendingDates 里的本地日期"全部删掉，
+                    // 再用 tableJiwang 里有的日期重新填回来。问题是——如果某个日期的数据
+                    // 已经真正保存成功（三个 pending 标记都已清空），但这次 pullJiwangFromTable()
+                    // 由于任何原因（网络抖动、分页边界、云端读取瞬时延迟等）没有把该日期的行
+                    // 带回来，这段代码会把本地这条已保存的数据直接删掉——即"明明保存成功，
+                    // 一下拉刷新就变空白"。
+                    // 现在改为：只用 tableJiwang 里实际返回的日期去覆盖/更新本地缓存，
+                    // 云端这次没返回的日期一律保留本地原值，不做任何删除——真正的删除
+                    // 场景（用户主动清空当天数据）由 deleteJiwangFromCloud() 单独处理，
+                    // 不需要也不应该依赖这里的"全量拉取"来清理。
+                    const pendingDates = new Set();
+                    if (window._jiwangDirtyDates) window._jiwangDirtyDates.forEach(function(d) { pendingDates.add(d); });
+                    if (window._jiwangPushTimers) Object.keys(window._jiwangPushTimers).forEach(function(d) { pendingDates.add(d); });
+                    if (_justPushedJiwang) pendingDates.add(currentDate);
+                    Object.keys(tableJiwang).forEach(function(d) {
+                        if (!pendingDates.has(d)) _jiwangMemCache[d] = tableJiwang[d];
+                    });
+                    if (allData) allData.jiwang = _jiwangMemCache;
+                    if (pendingDates.size > 0) {
+                        _dbgLog && _dbgLog('pullFromCloud: 跳过覆盖有本地待推送编辑的记忘看板日期: ' + Array.from(pendingDates).join(','));
                     }
                 } catch(tableErr) {
                     console.warn('jiwang_data 表拉取失败，回退到内存缓存:', tableErr.message);
@@ -29812,7 +29856,11 @@
                     renderJiwang();
                     if (typeof renderMarketStage === 'function') renderMarketStage();
                 }
-            }).catch(function(e) { console.warn('切换日期补拉 jiwang 失败:', e.message); });
+            }).catch(function(e) {
+                console.warn('切换日期补拉 jiwang 失败:', e.message);
+                _dbgLog && _dbgLog('refreshJiwangForDateSwitch: ' + date + ' 拉取失败: ' + (e && e.message));
+                showWarningToast('⚠️ 记忘看板拉取失败，当前显示的可能是过期数据。原因: ' + (e && e.message || e), 8000);
+            });
         }
 
         // 改变日期
@@ -32000,7 +32048,11 @@
                         pullJiwangForDate(currentDate).then(function() {
                             renderJiwang();
                             if (typeof renderMarketStage === 'function') renderMarketStage();
-                        }).catch(function(e) { console.warn('切回前台重新拉取 jiwang 失败:', e.message); });
+                        }).catch(function(e) {
+                            console.warn('切回前台重新拉取 jiwang 失败:', e.message);
+                            _dbgLog && _dbgLog('切回前台重新拉取 jiwang 失败: ' + (e && e.message));
+                            showWarningToast('⚠️ 记忘看板拉取失败，当前显示的可能是过期数据。原因: ' + (e && e.message || e), 8000);
+                        });
                     }
                 }
             });
