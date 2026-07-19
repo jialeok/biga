@@ -9732,7 +9732,7 @@
         // 与 pushAuctionDataToCloud 对称，只是表名换成 hot_stocks、缓存换成 _hotFullRowCache
         // 用途：补全成交量/竞价量/涨幅/题材/监管等按钮把字段写入云端 hot_stocks 表
         // 注意：syncHotStocksListForDate 只同步状态/增删，不更新已有股票的 volume 等字段，故需要本函数
-        async function pushHotStocksDataToCloud(date, items) {
+        async function pushHotStocksDataToCloud(date, items, watchlistSnapshot) {
             // 原逻辑：表未就绪（loadHotStocksFromCloud 尚未跑完）时直接静默 return，
             // 会导致"登录/刷新后立刻点击同花顺接口按钮"时数据被无声丢弃、云端完全没写入。
             // 改为：最多等待 5 秒（loadHotStocksFromCloud 正常几百毫秒~1秒内完成），
@@ -9752,13 +9752,24 @@
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
+            // in_watchlist 判断依据：该股票是否已经是"当前 hotAuctionData[date] 正式列表"的成员。
+            // 正式列表成员（用户在该日期 tap 页面真实看到的股票）→ in_watchlist=true，照常显示。
+            // 不在正式列表里的股票（例如"两全昨日成交量"等补数据按钮，为了给趋势图凑对比日数值，
+            // 临时用 buildYesterdayListFromToday 造出来的同名股票行）→ in_watchlist=false，
+            // 只写入全量快照缓存供趋势图查询，不会出现在 tap 页面的第一页列表里。
+            const existingWatchlistNames = {};
+            const _watchlistSourceList = watchlistSnapshot !== undefined ? watchlistSnapshot : (getHotAuctionData()[date] || []);
+            (_watchlistSourceList || []).forEach(function(s) {
+                if (s && s.stock) existingWatchlistNames[s.stock.trim()] = true;
+            });
             const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
+                const nameTrim = item.stock.trim();
                 return {
-                    date: date, stock: item.stock.trim(),
-                    code: scMap[item.stock.trim()] || item.code || '',
+                    date: date, stock: nameTrim,
+                    code: scMap[nameTrim] || item.code || '',
                     volume: item.volume || '', yest_volume: item.yestVolume || '', note: item.note || '',
                     change_pct: item.changePct || '', topics: item.topics || '',
-                    in_watchlist: true,
+                    in_watchlist: !!existingWatchlistNames[nameTrim],
                     selected: item.selected || false, bought: item.bought || false,
                     sold: item.sold || false, fixed: item.fixed || false,
                     updated_at: now, updated_by: 'main'
@@ -9778,7 +9789,9 @@
                     stock: row.stock, code: row.code,
                     volume: row.volume, yest_volume: row.yest_volume, note: row.note,
                     change_pct: row.change_pct, topics: row.topics,
-                    in_watchlist: existing ? existing.in_watchlist : true,
+                    // 已有云端行的 in_watchlist 状态优先保留（避免补数据操作意外把已有正式股票的状态改掉），
+                    // 全新行则按本次刚写入的 in_watchlist 值
+                    in_watchlist: existing ? existing.in_watchlist : row.in_watchlist,
                     selected: row.selected, bought: row.bought, sold: row.sold, fixed: row.fixed
                 };
                 if (idx >= 0) {
@@ -13667,9 +13680,16 @@
                         yesterdaySkipped++;
                     }
                 });
+                // 关键：必须在 hotAuctionData[yesterday] 被下面这行覆盖赋值之前，
+                // 就把"本来就已经在对比日正式列表里的股票"记下来，并原样保留到 pushHotStocksDataToCloud
+                // 用来判断 in_watchlist 的那份数据里 —— 否则推送函数事后再查 getHotAuctionData()[yesterday]，
+                // 读到的已经是这里刚赋值的 yesterdayList 本身，会把所有股票误判成"已存在"，
+                // 导致本该标记为仅供趋势图使用（in_watchlist=false）的影子股票被错误标记为 true，
+                // 从而"补数据"变成了"新增股票"，污染对比日 tap 页面第一页的展示列表。
+                const preExistingYesterdaySnapshot = (hotAuctionData[yesterday] || []).slice();
                 hotAuctionData[yesterday] = yesterdayList;
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                pushHotStocksDataToCloud(yesterday, yesterdayList, preExistingYesterdaySnapshot).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
                 pushHotTrendsToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
 
                 // 刷新表单和看板
@@ -13820,9 +13840,14 @@
                         skipped++;
                     }
                 });
+                // 同「两全昨日成交量」：必须在覆盖赋值前先留一份事前快照，
+                // 让 pushHotStocksDataToCloud 能正确区分"本来就在对比日正式列表里的股票"
+                // 和"这次为了补成交量临时造出来的影子股票"，避免后者被误标记为 in_watchlist=true
+                // 而出现在对比日 tap 页面第一页。
+                const preExistingYesterdaySnapshot = (hotAuctionData[yesterday] || []).slice();
                 hotAuctionData[yesterday] = yesterdayList;
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                pushHotStocksDataToCloud(yesterday, yesterdayList, preExistingYesterdaySnapshot).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
                 pushHotTrendsToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
 
                 renderHotForm();
