@@ -21938,9 +21938,13 @@
             // 实际上没有真正保存下来（内存里的显示只是暂时的，一刷新就会
             // 恢复成云端旧值）。因此失败时必须用醒目的方式告知用户，
             // 不能只在控制台 warn——那样用户完全不会发现数据其实没保存成功。
+            // 直接把真实错误信息显示出来（而不是笼统地说"检查网络"），
+            // 因为手机上没法看控制台，只能靠这个 toast 才能确诊真正原因
+            // （比如权限/约束问题，而不一定是网络）。
             pushBiddingToCloud(currentDate).catch(function(e) {
                 console.warn('saveBidding pushBiddingToCloud 失败:', e);
-                showWarningToast('⚠️ 云端同步失败，本次修改可能未保存！请检查网络后重新保存');
+                const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
+                showWarningToast('⚠️ 云端同步失败，本次修改未保存！原因: ' + detail, 10000);
             });
             
             // Fix Bug5: iOS上点"保存"时oninput可能来不及触发syncBiddingCloseToEtf
@@ -30711,7 +30715,8 @@
         }
 
         // 显示黄色警示Toast（屏幕正中间），与通用showToast独立，专用于"竞/昨零命中"等警示场景
-        function showWarningToast(message) {
+        // durationMs 可选，默认 2000（保持原有场景不变）；需要用户看清/截图技术性错误信息时可传更长的值
+        function showWarningToast(message, durationMs) {
             const toast = document.createElement('div');
             toast.className = 'toast-warning';
             toast.textContent = message;
@@ -30721,7 +30726,7 @@
                 toast.style.opacity = '0';
                 toast.style.transition = 'opacity 0.3s';
                 setTimeout(() => toast.remove(), 300);
-            }, 2000);
+            }, durationMs || 2000);
         }
 
         // "竞/昨零命中"警示Toast的防抖标记：第一页renderAuction()和第二页renderAuctionPage2()
