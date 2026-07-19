@@ -11156,6 +11156,7 @@
             const comment = document.getElementById('commentInput').value.trim();
             const stats = getStats();
             stats.comment = comment;
+            markJiwangDirty(currentDate);
             saveData();
             renderComment();
             closeCommentModal();
@@ -21280,6 +21281,19 @@
         }
 
         // 获取统计数据
+        // 注意：这里不再无条件 markJiwangDirty(currentDate)！
+        // 原因（真实事故复盘）：renderMarketStage()/renderCircleStats() 等纯展示函数
+        // 也会调用 getStats() 来读取数据渲染界面，之前每次调用都会把 currentDate 标脏。
+        // 刷新页面时，_appInit() 里的 renderMarketStage() 会在 pullFromCloud() 从云端
+        // 拉回真实数据之前就先执行一次（此时 _jiwangMemCache 是刚重置的空对象），
+        // getStats() 因此会为 currentDate 创建一个空占位对象并标脏；紧接着
+        // autoCalculateConsecutiveDays()/autoTagShunshiNishi() 等初始化函数调用的
+        // saveData() 看到这个"脏"标记，会用这个空占位对象去 scheduleJiwangPush()。
+        // 如果这个 2 秒防抖推送恰好在 pullFromCloud() 拉回真实数据之前触发，
+        // 就会把云端的真实数据覆盖成空白——表现为"保存后一刷新，数据就没了"。
+        // 现在改为只在真正修改 stats 字段的地方显式调用 markJiwangDirty()
+        // （见 updateMarketStage/updatePosition/toggleCheckbox/saveCircleStats 等），
+        // 单纯读取渲染不再有副作用。
         function getStats() {
             const jiwangData = getJiwangData();
             if (!jiwangData[currentDate]) {
@@ -21288,7 +21302,6 @@
             if (!jiwangData[currentDate].stats) {
                 jiwangData[currentDate].stats = {};
             }
-            markJiwangDirty(currentDate);
             return jiwangData[currentDate].stats;
         }
 
@@ -21296,6 +21309,7 @@
         function updateMarketStage(value) {
             const stats = getStats();
             stats.marketStage = value;
+            markJiwangDirty(currentDate);
             saveData();
             pushJiwangNow(currentDate);
             
@@ -21320,6 +21334,7 @@
         function updatePosition(value) {
             const stats = getStats();
             stats.position = value;
+            markJiwangDirty(currentDate);
             saveData();
             pushJiwangNow(currentDate);
             
@@ -21382,6 +21397,7 @@
                 }
             }
             
+            markJiwangDirty(currentDate);
             saveData();
             pushJiwangNow(currentDate);
         }
@@ -21416,6 +21432,7 @@
                 }
             }
             
+            markJiwangDirty(currentDate);
             saveData();
             renderMarketStage();
         }
@@ -22050,12 +22067,14 @@
                         const profitNum = parseFloat(closeValue);
                         if (!isNaN(profitNum)) {
                             stats.profit = profitNum;
+                            markJiwangDirty(currentDate);
                             saveData();
                             renderCircleStats();
                         }
                     } else {
                         // 清空账号溢价时，同步清空圆形统计的今日盈亏
                         stats.profit = '';
+                        markJiwangDirty(currentDate);
                         saveData();
                         renderCircleStats();
                     }
@@ -22204,6 +22223,7 @@
             // 同步清除圆形统计的今日盈亏
             const stats = getStats();
             stats.profit = '';
+            markJiwangDirty(currentDate);
             saveData();
             renderCircleStats();
             
@@ -22451,6 +22471,7 @@
                 if (!isNaN(profitNum)) {
                     const stats = getStats();
                     stats.profit = profitNum;
+                    markJiwangDirty(currentDate);
                     saveData();
                     renderCircleStats();
                 }
@@ -22970,6 +22991,7 @@
                 stats.sectorEtf = sectorEtfCheck.classList.contains('checked');
             }
             
+            markJiwangDirty(currentDate);
             saveData();
             
             // 同步今日盈亏到竞价变化中的账号溢价
@@ -23006,6 +23028,7 @@
             stats.marketStage = '';
             stats.recentMulti = false;
             stats.topicDirection = false;
+            markJiwangDirty(currentDate);
             saveData();
             
             // 同步清除竞价变化中的账号溢价
