@@ -29864,6 +29864,17 @@
         }
 
         // 改变日期
+        // 记录"通过翻页/选择日期/回到今天等导航方式切换了 currentDate"，同步写入
+        // lastEditedDate_v42。之前只有 saveData() 会写这个 key——如果用户切换日期后
+        // 没有紧接着编辑保存就下拉刷新（页面整个重新加载），_appInit() 会用旧的
+        // lastEditedDate_v42 把 currentDate 悄悄跳回切换前的日期，渲染的就是那天的
+        // 记忘看板，而不是用户切换后正在看的那天——表现就是"明明才输入保存的数据，
+        // 一刷新就不见了"，其实是刷新后根本没停留在同一天。
+        function _persistCurrentDateAsLastEdited(date) {
+            if (!date || date < '2025-01-01') return;
+            try { localStorage.setItem('lastEditedDate_' + DATA_VERSION, date); } catch (e) {}
+        }
+
         function changeDate(days) {
             // 隐藏月统计看板
             const monthlyBoard = document.getElementById('monthlyStatsBoard');
@@ -29885,6 +29896,7 @@
             }
             
             currentDate = newDate;
+            _persistCurrentDateAsLastEdited(newDate);
             allData = null;
             setFilter('all');
             // 使用 requestAnimationFrame 延迟渲染，提高翻页响应速度
@@ -29911,6 +29923,7 @@
             }
             
             currentDate = date;
+            _persistCurrentDateAsLastEdited(date);
             allData = null;
             setFilter('all');
             requestAnimationFrame(() => {
@@ -29937,6 +29950,7 @@
             if (today < '2025-01-01') today = '2025-01-01';
             
             currentDate = today;
+            _persistCurrentDateAsLastEdited(today);
             allData = null;
             setFilter('all');
             requestAnimationFrame(() => {
@@ -29969,6 +29983,7 @@
             if (beforeDate < '2025-01-01') beforeDate = '2025-01-01';
             
             currentDate = beforeDate;
+            _persistCurrentDateAsLastEdited(beforeDate);
             allData = null;
             setFilter('all');
             renderList();
@@ -30059,6 +30074,7 @@
                 return;
             }
             currentDate = dateStr;
+            _persistCurrentDateAsLastEdited(dateStr);
             allData = null;
             renderPickerCalendar();
             setFilter('all');
@@ -30238,6 +30254,7 @@
                 // 找到交易日
                 if (isTradingDay(prevDateStr)) {
                     currentDate = prevDateStr;
+                    _persistCurrentDateAsLastEdited(prevDateStr);
                     allData = null;
                     showHint('上一交易日');
                     // 使用 requestAnimationFrame 延迟渲染，先显示提示
@@ -30247,6 +30264,7 @@
                         autoCalculateRecentMultiScore();
                         renderAuctionPage4();
                     });
+                    refreshJiwangForDateSwitch(prevDateStr);
                     return;
                 }
             }
@@ -30275,6 +30293,7 @@
                 // 找到交易日
                 if (isTradingDay(nextDateStr)) {
                     currentDate = nextDateStr;
+                    _persistCurrentDateAsLastEdited(nextDateStr);
                     allData = null;
                     showHint('下一交易日');
                     // 使用 requestAnimationFrame 延迟渲染，先显示提示
@@ -30284,6 +30303,7 @@
                         autoCalculateRecentMultiScore();
                         renderAuctionPage4();
                     });
+                    refreshJiwangForDateSwitch(nextDateStr);
                     return;
                 }
             }
