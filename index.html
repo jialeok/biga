@@ -8336,6 +8336,7 @@
             stopHighlightsRealtime();
             stopHotStocksRealtime();
             stopHotHighlightsRealtime();
+            stopHotTrendsRealtime();
         }
 
         // 启动 auction_data 表的 Realtime 订阅（抓取程序同步后自动刷新行情数据）
@@ -11608,6 +11609,9 @@
             }
             getHotAuctionData()[targetDate] = targetList;
             invalidateTopicCache();
+            saveData();
+            pushHotStocksDataToCloud(targetDate, targetList).catch(function(e) { console.warn('pushHotStocksDataToCloud ' + targetDate + ' 失败:', e); });
+            pushHotTrendsToCloud(targetDate, targetList).catch(function(e) { console.warn('pushHotTrendsToCloud ' + targetDate + ' 失败:', e); });
             syncHotStocksListForDate(targetDate).catch(function(err) {
                 console.error('importHotHistoryFill syncHotStocksListForDate 失败:', err);
             });
@@ -13546,9 +13550,9 @@
                     setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先导入股票到表格', false);
                     return;
                 }
-                // yesterdayList 直接读 hotAuctionData[yesterday] 已有列表，不复制 todayList（避免污染历史日期）
-                const yesterdayList = (hotAuctionData[yesterday] || []).slice();
-                const yesterdayListWasEmpty = yesterdayList.length === 0;
+                // yesterdayList 始终基于 todayList（当前显示的表格），保留 hotAuctionData[yesterday] 原有同名股票的业务字段
+                const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
+                const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 // 收集需要查询的股票代码（today + yesterday 合并去重）
@@ -13593,14 +13597,6 @@
                 pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
 
                 // ===== 第二批：调取对比日的昨日成交量（yesterday.yestVolume ← dayBefore 的 volume）=====
-                if (yesterdayList.length === 0) {
-                    setApiStatus('thsApiStatusHot',
-                        '✅ 今日填 ' + todayFilled + '/' + todayList.length + '，对比日列表为空已跳过',
-                        true);
-                    renderHotForm();
-                    renderHotStocks();
-                    return;
-                }
                 setApiStatus('thsApiStatusHot', '【2/2】正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
 
@@ -13644,7 +13640,13 @@
         }
 
         // ---------- 同花顺（热门股票）：当天昨日成交量（单独调 yesterday 单天，只填 today.yestVolume） ----------
-        async function fillHotTodayYesterdayVolumeFromThs(btn) {
+        function fillHotTodayYesterdayVolumeFromThs(btn) {
+            showNumcatChoiceModal('当天昨日成交量模式（热门股票）', function(overwrite) {
+                _fillHotTodayYesterdayVolumeFromThsImpl(btn, overwrite);
+            });
+        }
+
+        async function _fillHotTodayYesterdayVolumeFromThsImpl(btn, overwrite) {
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -13678,7 +13680,7 @@
                 let filled = 0, skipped = 0;
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (getNumericVolume(s.yestVolume) !== null) return; // 已有值，跳过
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式跳过已有值
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
@@ -13696,7 +13698,7 @@
                 renderHotStocks();
 
                 setApiStatus('thsApiStatusHot',
-                    '✅ 当天昨日成交量填 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ ' + (overwrite ? '覆盖' : '补全') + ' 当天昨日成交量 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
                 console.error('fillHotTodayYesterdayVolumeFromThs 失败:', err);
@@ -13709,7 +13711,13 @@
         }
 
         // ---------- 同花顺（热门股票）：对比日昨成交量（单独调 dayBefore 单天，只填 yesterday.yestVolume） ----------
-        async function fillHotYesterdayYesterdayVolumeFromThs(btn) {
+        function fillHotYesterdayYesterdayVolumeFromThs(btn) {
+            showNumcatChoiceModal('对比日昨成交量模式（热门股票）', function(overwrite) {
+                _fillHotYesterdayYesterdayVolumeFromThsImpl(btn, overwrite);
+            });
+        }
+
+        async function _fillHotYesterdayYesterdayVolumeFromThsImpl(btn, overwrite) {
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -13720,12 +13728,14 @@
                     return;
                 }
                 const hotAuctionData = getHotAuctionData();
-                // yesterdayList 直接读 hotAuctionData[yesterday] 已有列表，不复制 todayList（避免污染历史日期）
-                const yesterdayList = (hotAuctionData[yesterday] || []).slice();
-                if (yesterdayList.length === 0) {
-                    setApiStatus('thsApiStatusHot', '❌ 对比日列表为空，请先在对比日导入股票', false);
+                const todayList = (hotAuctionData[today] || []).slice();
+                if (todayList.length === 0) {
+                    setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先导入股票到表格', false);
                     return;
                 }
+                // yesterdayList 始终基于 todayList（当前显示的表格），保留 hotAuctionData[yesterday] 原有同名股票的业务字段
+                const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
+                const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
                 const codeToName = {};
                 yesterdayList.forEach(function(s) {
@@ -13745,7 +13755,7 @@
                 let filled = 0, skipped = 0;
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (getNumericVolume(s.yestVolume) !== null) return;
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式跳过已有值
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
@@ -13762,8 +13772,11 @@
                 renderHotForm();
                 renderHotStocks();
 
+                const yesterdaySource = yesterdayListWasEmpty
+                    ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
+                    : '';
                 setApiStatus('thsApiStatusHot',
-                    '✅ 对比日昨成交量填 ' + filled + '/' + yesterdayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ ' + (overwrite ? '覆盖' : '补全') + ' 对比日昨成交量 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
                 console.error('fillHotYesterdayYesterdayVolumeFromThs 失败:', err);
