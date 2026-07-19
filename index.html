@@ -10242,6 +10242,7 @@
                 const m = String(_now.getMonth() + 1).padStart(2, '0');
                 const d = String(_now.getDate()).padStart(2, '0');
                 currentDate = y + '-' + m + '-' + d;
+                localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
             }
             // 触发原有的 DOMContentLoaded 逻辑（已绑定在页面底部）
             _appInit();
@@ -10272,6 +10273,9 @@
                 const _m = String(_now.getMonth() + 1).padStart(2, '0');
                 const _d = String(_now.getDate()).padStart(2, '0');
                 currentDate = _y + '-' + _m + '-' + _d;
+                // 写回 localStorage，从源头清除这个陈旧值，避免后续 initApp()/_appInit() 等
+                // 其他读取点（它们各自独立读取同一个 key）又把旧值捡回来
+                localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
             }
         }
 
@@ -31184,6 +31188,23 @@
             if (lastEditedDate && lastEditedDate >= '2025-01-01') {
                 currentDate = lastEditedDate;
             }
+            // 365 天阈值保护：防止陈旧的 lastEditedDate（如很早期测试时留下的 2025-01-02）
+            // 把 initApp() 里已经做过一次的保护又覆盖回去。两处保护必须保持一致。
+            {
+                const _now2 = new Date();
+                const _threshold2 = new Date(_now2.getTime() - 365 * 24 * 60 * 60 * 1000);
+                const _thresholdStr2 = _threshold2.getFullYear() + '-' +
+                    String(_threshold2.getMonth() + 1).padStart(2, '0') + '-' +
+                    String(_threshold2.getDate()).padStart(2, '0');
+                if (currentDate < _thresholdStr2) {
+                    const _y2 = _now2.getFullYear();
+                    const _m2 = String(_now2.getMonth() + 1).padStart(2, '0');
+                    const _d2 = String(_now2.getDate()).padStart(2, '0');
+                    currentDate = _y2 + '-' + _m2 + '-' + _d2;
+                    // 同时把纠正后的日期写回 localStorage，避免下次读取又是旧值
+                    localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
+                }
+            }
 
             // 延迟执行数据初始化和渲染
             setTimeout(function() {
@@ -31298,7 +31319,13 @@
             }
 
             if (localStorage.getItem('unlocked') === '1') {
-                // 已解锁：恢复 session token，但先向云端校验是否仍然有效（防止被踢下线后刷新绕过）
+                // 已解锁：直接恢复 session token 并重启轮询。
+                // 注：不在此处向云端主动校验 token 是否被顶替——那样做会形成自我放大的问题
+                // （只要有一次因任何原因重新登录生成新 token，本地保留旧 token 的会话就会被
+                // 误判为"已被踢"而强制重新登录，越用越容易弹密码框）。
+                // "被其他设备登录后本会话被踢出"这件事，已经由 startSessionPoll() 里的
+                // Realtime 订阅实时处理（对方一登录，这边会立刻收到通知并登出），
+                // 不需要在每次刷新时再做一次主动网络校验。
                 const savedToken = localStorage.getItem('sessionToken');
                 if (!savedToken) {
                     localStorage.removeItem('unlocked');
@@ -31306,17 +31333,6 @@
                     setTimeout(function() { document.getElementById('pwdInput').focus(); }, 300);
                     return;
                 }
-
-                const remoteToken = await readSessionToken();
-                if (remoteToken !== undefined && remoteToken !== null && remoteToken !== savedToken) {
-                    // 云端 token 与本地不一致 → 已被其他设备踢下线，要求重新登录
-                    localStorage.removeItem('unlocked');
-                    localStorage.removeItem('sessionToken');
-                    document.getElementById('passwordOverlay').style.display = 'flex';
-                    setTimeout(function() { document.getElementById('pwdInput').focus(); }, 300);
-                    return;
-                }
-                // remoteToken === undefined 表示网络/读取失败，此时不阻断登录，按原 token 继续（避免离线时无法使用）
 
                 _sessionToken = savedToken;
                 startSessionPoll();
