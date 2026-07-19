@@ -8257,6 +8257,14 @@
         let _biddingRealtimeChannel = null; // bidding_data 表的 Realtime 订阅
         let _justPushedBidding = false; // 刚推送 bidding_data，忽略自己触发的 Realtime 通知
 
+        // jiwang（记忘看板/昨日复盘）持久内存缓存，做法与 _biddingMemCache 一致：
+        // 不随 allData=null 重置而清空，只由 pullJiwangFromTable()/本地编辑保存来更新。
+        let _jiwangMemCache = null;
+        let _jiwangTableAvailable = false; // jiwang_data 表是否可用
+        let _jiwangRealtimeChannel = null; // jiwang_data 表的 Realtime 订阅
+        let _justPushedJiwang = false; // 刚推送 jiwang_data，忽略自己触发的 Realtime 通知
+        let _jiwangPushTimers = {}; // jiwang 按日期各自防抖推送计时器（独立于全量 blob 的 _pushDebounceTimer）
+
         // ===== 热门股票分组（hot_stocks / hot_stocks_highlights）全局变量 =====
         // 与早盘竞价侧对应变量完全独立，通过 dataSource 参数切换
         let hotStockList = [];        // 热门股票当前渲染中的股票数组，与 auctionList 平行
@@ -8316,6 +8324,7 @@
             startAuctionRealtime(); // 同时启动 auction_data 表的 Realtime 订阅
             startStockTopicsRealtime(); // 同时启动 stock_topics 表的 Realtime 订阅（题材库）
             startBiddingRealtime(); // 同时启动 bidding_data 表的 Realtime 订阅（竞价变化看板）
+            startJiwangRealtime(); // 同时启动 jiwang_data 表的 Realtime 订阅（记忘看板）
             startHighlightsRealtime(); // 同时启动 daily_highlights 表的 Realtime 订阅（竞/昨高光）
             startHotStocksRealtime(); // 同时启动 hot_stocks 表的 Realtime 订阅（热门股票）
             startHotHighlightsRealtime(); // 同时启动 hot_stocks_highlights 表的 Realtime 订阅（热门股票竞/昨高光）
@@ -8366,6 +8375,7 @@
             stopAuctionRealtime();
             stopStockTopicsRealtime();
             stopBiddingRealtime();
+            stopJiwangRealtime();
             stopHighlightsRealtime();
             stopHotStocksRealtime();
             stopHotHighlightsRealtime();
@@ -8869,6 +8879,230 @@
             if (_biddingRealtimeChannel) {
                 try { getSupabase().removeChannel(_biddingRealtimeChannel); } catch(e) {}
                 _biddingRealtimeChannel = null;
+            }
+        }
+
+        // ===== jiwang_data 表操作（记忘看板/昨日复盘独立表）=====
+        // 字段说明：diezhang/qingxu/jujiao/whoIncrease/kxianPrefix/kxian/guancha/
+        // guochengJieguo/shouguJieguo/jielun/chushou 为核心文本字段，stats 是弹性
+        // jsonb（行情阶段/仓位/勾选项等，字段还在持续增加，不逐个拆列）。
+
+        // 从 jiwang_data 表全量读取，返回 {date: {...}}
+        async function pullJiwangFromTable() {
+            const sb = getSupabase();
+            const result = {};
+            let offset = 0;
+            const pageSize = 1000;
+            while (true) {
+                const { data, error } = await sb.from('jiwang_data')
+                    .select('"date",diezhang,qingxu,jujiao,"whoIncrease","kxianPrefix",kxian,guancha,"guochengJieguo","shouguJieguo",jielun,chushou,stats')
+                    .range(offset, offset + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                data.forEach(function(row) {
+                    if (!row || !row.date) return;
+                    result[row.date] = {
+                        diezhang: row.diezhang || '',
+                        qingxu: row.qingxu || '',
+                        jujiao: row.jujiao || '',
+                        whoIncrease: row.whoIncrease || '',
+                        kxianPrefix: row.kxianPrefix || '',
+                        kxian: row.kxian || '',
+                        guancha: row.guancha || '',
+                        guochengJieguo: row.guochengJieguo || '',
+                        shouguJieguo: row.shouguJieguo || '',
+                        jielun: row.jielun || '',
+                        chushou: row.chushou || '',
+                        stats: row.stats || {}
+                    };
+                });
+                if (data.length < pageSize) break;
+                offset += pageSize;
+            }
+            _jiwangTableAvailable = true;
+            return result;
+        }
+
+        // 拉取单日 jiwang 数据并合并到内存缓存（Realtime 收到变更时用）
+        async function pullJiwangForDate(date) {
+            if (!date) return;
+            const sb = getSupabase();
+            const { data, error } = await sb.from('jiwang_data')
+                .select('diezhang,qingxu,jujiao,"whoIncrease","kxianPrefix",kxian,guancha,"guochengJieguo","shouguJieguo",jielun,chushou,stats')
+                .eq('"date"', date)
+                .maybeSingle();
+            if (error) throw error;
+            const jiwangData = getJiwangData();
+            if (!data) {
+                delete jiwangData[date];
+                _jiwangTableAvailable = true;
+                return;
+            }
+            jiwangData[date] = {
+                diezhang: data.diezhang || '',
+                qingxu: data.qingxu || '',
+                jujiao: data.jujiao || '',
+                whoIncrease: data.whoIncrease || '',
+                kxianPrefix: data.kxianPrefix || '',
+                kxian: data.kxian || '',
+                guancha: data.guancha || '',
+                guochengJieguo: data.guochengJieguo || '',
+                shouguJieguo: data.shouguJieguo || '',
+                jielun: data.jielun || '',
+                chushou: data.chushou || '',
+                stats: data.stats || {}
+            };
+            _jiwangTableAvailable = true;
+        }
+
+        // 当日 jiwang 数据 UPSERT 到 jiwang_data 表（防抖调用，2秒无新改动后推送）
+        async function pushJiwangToCloud(date) {
+            if (!date) return;
+            const jiwangData = getJiwangData();
+            const item = jiwangData[date];
+            if (!item) return; // 本地这天没有数据（可能已被清空），交给 deleteJiwangFromCloud 处理
+            _justPushedJiwang = true;
+            setTimeout(function() { _justPushedJiwang = false; }, 5000);
+            const sb = getSupabase();
+            const row = {
+                date: date,
+                diezhang: item.diezhang || '',
+                qingxu: item.qingxu || '',
+                jujiao: item.jujiao || '',
+                whoIncrease: item.whoIncrease || '',
+                kxianPrefix: item.kxianPrefix || '',
+                kxian: item.kxian || '',
+                guancha: item.guancha || '',
+                guochengJieguo: item.guochengJieguo || '',
+                shouguJieguo: item.shouguJieguo || '',
+                jielun: item.jielun || '',
+                chushou: item.chushou || '',
+                stats: item.stats || {},
+                updated_at: new Date().toISOString()
+            };
+            const { error } = await sb.from('jiwang_data').upsert(row, { onConflict: 'date' });
+            if (error) throw error;
+            _jiwangTableAvailable = true;
+        }
+
+        // 防抖推送 jiwang 到云端（2秒无新改动后才真正推送，避免连续操作时频繁请求）
+        // 按日期独立计时，避免同一批 saveData() 里同时标脏多个日期（如回填下一天K线时）
+        // 互相 clearTimeout 导致只有最后一个日期被推送。
+        function scheduleJiwangPush(date) {
+            if (!date) return;
+            clearTimeout(_jiwangPushTimers[date]);
+            _jiwangPushTimers[date] = setTimeout(function() {
+                delete _jiwangPushTimers[date];
+                pushJiwangToCloud(date).catch(function(e) {
+                    console.warn('pushJiwangToCloud 失败:', e);
+                });
+            }, 2000);
+        }
+
+        // 删除某天的 jiwang 云端行（例如清空复盘数据时）
+        async function deleteJiwangFromCloud(date) {
+            if (!date) return;
+            _justPushedJiwang = true;
+            setTimeout(function() { _justPushedJiwang = false; }, 5000);
+            const sb = getSupabase();
+            const { error } = await sb.from('jiwang_data').delete().eq('"date"', date);
+            if (error) throw error;
+        }
+
+        // 一次性迁移：将本地旧快照（stockApp_v42_jiwang）灌入 jiwang_data 表
+        async function migrateJiwangToTable() {
+            if (localStorage.getItem('_jiwang_table_migrated') === '1') {
+                _jiwangTableAvailable = true;
+                return;
+            }
+            let jiwangData = {};
+            try {
+                const raw = localStorage.getItem(_moduleKey('jiwang'));
+                if (raw) jiwangData = JSON.parse(raw) || {};
+            } catch (e) { jiwangData = {}; }
+            const dates = Object.keys(jiwangData).filter(function(d) {
+                return jiwangData[d] && typeof jiwangData[d] === 'object';
+            });
+            if (dates.length === 0) {
+                try {
+                    const sb = getSupabase();
+                    const { error } = await sb.from('jiwang_data').select('"date"').limit(1);
+                    if (!error) {
+                        _jiwangTableAvailable = true;
+                        localStorage.setItem('_jiwang_table_migrated', '1');
+                        console.log('[迁移] 本地无 jiwang 数据，jiwang_data 表已就绪');
+                    }
+                } catch(e) { console.warn('[迁移] jiwang_data 表不可用:', e.message); }
+                return;
+            }
+            const sb = getSupabase();
+            const now = new Date().toISOString();
+            const rows = dates.map(function(date) {
+                var item = jiwangData[date] || {};
+                return {
+                    date: date,
+                    diezhang: item.diezhang || '',
+                    qingxu: item.qingxu || '',
+                    jujiao: item.jujiao || '',
+                    whoIncrease: item.whoIncrease || '',
+                    kxianPrefix: item.kxianPrefix || '',
+                    kxian: item.kxian || '',
+                    guancha: item.guancha || '',
+                    guochengJieguo: item.guochengJieguo || '',
+                    shouguJieguo: item.shouguJieguo || '',
+                    jielun: item.jielun || '',
+                    chushou: item.chushou || '',
+                    stats: item.stats || {},
+                    updated_at: now
+                };
+            });
+            try {
+                const { error } = await sb.from('jiwang_data')
+                    .upsert(rows, { onConflict: 'date', ignoreDuplicates: true });
+                if (error) {
+                    console.warn('[迁移] jiwang_data 失败:', error.message);
+                    return;
+                }
+                _jiwangTableAvailable = true;
+                localStorage.setItem('_jiwang_table_migrated', '1');
+                // 迁移确认成功后清除本地旧快照，云端表从此是唯一数据源
+                try { localStorage.removeItem(_moduleKey('jiwang')); } catch (e) {}
+                console.log('[迁移] jiwang_data 迁移完成:', rows.length, '行');
+            } catch(e) {
+                console.warn('[迁移] jiwang_data 异常:', e.message);
+            }
+        }
+
+        // 启动 jiwang_data 表的 Realtime 订阅（其它设备保存时自动刷新）
+        function startJiwangRealtime() {
+            stopJiwangRealtime();
+            try {
+                const sb = getSupabase();
+                _jiwangRealtimeChannel = sb
+                    .channel('jiwang_data_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'jiwang_data'
+                    }, function(payload) {
+                        if (_justPushedJiwang) return; // 自己刚推的，忽略
+                        const row = payload.new || payload.old;
+                        if (!row || !row.date) return;
+                        const changedDate = row.date;
+                        pullJiwangForDate(changedDate).then(function() {
+                            if (changedDate === currentDate) {
+                                renderJiwang();
+                                if (typeof renderMarketStage === 'function') renderMarketStage();
+                            }
+                        }).catch(function(e) { console.warn('Jiwang Realtime 拉取失败:', e); });
+                    })
+                    .subscribe();
+                console.log('Jiwang Realtime 订阅已启动');
+            } catch (e) { console.error('Jiwang Realtime 订阅失败:', e); }
+        }
+
+        function stopJiwangRealtime() {
+            if (_jiwangRealtimeChannel) {
+                try { getSupabase().removeChannel(_jiwangRealtimeChannel); } catch(e) {}
+                _jiwangRealtimeChannel = null;
             }
         }
 
@@ -10107,6 +10341,8 @@
                 moduleKeys.forEach(key => {
                     if (cloudObj[key] !== undefined) {
                         // 已拆到独立表的模块：blob 中如果是空对象，不覆盖本地（数据在独立表中，空对象是拆表后的正常状态）
+                        // jiwang 已完全脱离 localStorage（云端表是唯一数据源），一律跳过，不再写入
+                        if (key === 'jiwang') return;
                         if ((key === 'bidding' || key === 'auction') &&
                             cloudObj[key] && typeof cloudObj[key] === 'object' &&
                             Object.keys(cloudObj[key]).length === 0) {
@@ -10187,6 +10423,20 @@
                     console.warn('bidding_data 表拉取失败，回退到内存缓存:', tableErr.message);
                 }
 
+                // 从 jiwang_data 独立表拉取记忘看板数据（云端表是唯一权威来源）
+                try {
+                    const tableJiwang = await pullJiwangFromTable();
+                    if (Object.keys(tableJiwang).length > 0) {
+                        // 原地更新持久内存缓存（不写 localStorage，也不重置 allData）
+                        if (!_jiwangMemCache) _jiwangMemCache = {};
+                        Object.keys(_jiwangMemCache).forEach(function(d) { delete _jiwangMemCache[d]; });
+                        Object.assign(_jiwangMemCache, tableJiwang);
+                        if (allData) allData.jiwang = _jiwangMemCache;
+                    }
+                } catch(tableErr) {
+                    console.warn('jiwang_data 表拉取失败，回退到内存缓存:', tableErr.message);
+                }
+
                 // 观察组可能受云端数据影响（上一交易日"竞/昨"达标股票可能变化），清除标记重新计算
                 try { localStorage.removeItem('obsEnsured_' + currentDate); } catch(e) {}
 
@@ -10233,6 +10483,14 @@
             if (date) window._auctionDirtyDates.add(date);
         }
 
+        // 记录"jiwang 数据确实被改动过"的日期，saveData() 据此判断是否需要
+        // 推送该日期到 jiwang_data 表，避免每次 saveData()（可能因为改股票、改题材等
+        // 与 jiwang 无关的操作触发）都无谓地 upsert 一次 jiwang_data。
+        if (!window._jiwangDirtyDates) window._jiwangDirtyDates = new Set();
+        function markJiwangDirty(date) {
+            if (date) window._jiwangDirtyDates.add(date);
+        }
+
         async function pushToCloud() {
             updateCloudSyncUI('syncing');
             try {
@@ -10267,7 +10525,7 @@
 
                 const payload = {
                     stocks: allData.stocks || {},
-                    jiwang: allData.jiwang || {},
+                    jiwang: _jiwangTableAvailable ? {} : (allData.jiwang || {}),
                     rank: allData.rank || {},
                     multi: allData.multi || {},
                     hotspot: allData.hotspot || {},
@@ -10450,6 +10708,12 @@
                             allData[key] = _biddingMemCache;
                             return;
                         }
+                        // jiwang 同理，已改为纯云端表（jiwang_data）+ 内存缓存
+                        if (key === 'jiwang') {
+                            if (!_jiwangMemCache) _jiwangMemCache = {};
+                            allData[key] = _jiwangMemCache;
+                            return;
+                        }
                         const raw = localStorage.getItem(_moduleKey(key));
                         if (raw !== null) {
                             try {
@@ -10468,8 +10732,9 @@
                     }
                 } else {
                     if (!_biddingMemCache) _biddingMemCache = {};
+                    if (!_jiwangMemCache) _jiwangMemCache = {};
                     allData = {
-                        stocks: {}, jiwang: {}, rank: {}, multi: {},
+                        stocks: {}, jiwang: _jiwangMemCache, rank: {}, multi: {},
                         hotspot: {}, pattern: {}, bidding: _biddingMemCache, tagTitles: {},
                         auction: {}, holidays: [], stockCodeMap: {}
                     };
@@ -10672,6 +10937,8 @@
                 // bidding 已改为纯云端表（bidding_data）+ 内存缓存，不再落 localStorage，
                 // 避免本地旧/空快照在下次保存或导入时把云端数据覆盖掉
                 if (key === 'bidding') return;
+                // jiwang 同理，已改为纯云端表（jiwang_data）+ 内存缓存
+                if (key === 'jiwang') return;
                 if (allData && allData[key] !== undefined) {
                     try {
                         localStorage.setItem(_moduleKey(key), JSON.stringify(allData[key]));
@@ -10684,6 +10951,15 @@
                 }
             });
             localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
+            // jiwang 数据独立防抖推送到 jiwang_data 表：遍历所有被标记为脏的日期
+            // （不能只推 currentDate —— 例如"昨多板K线"回填是写 nextDate，
+            // 若只看 currentDate 会漏推）
+            if (window._jiwangDirtyDates && window._jiwangDirtyDates.size > 0) {
+                Array.from(window._jiwangDirtyDates).forEach(function(d) {
+                    scheduleJiwangPush(d);
+                });
+                window._jiwangDirtyDates.clear();
+            }
             // 已解锁状态下，触发防抖云同步（2秒后推送）
             if (localStorage.getItem('unlocked') === '1') {
                 scheduleCloudPush();
@@ -20839,6 +21115,7 @@
             if (!jiwangData[currentDate].stats) {
                 jiwangData[currentDate].stats = {};
             }
+            markJiwangDirty(currentDate);
             return jiwangData[currentDate].stats;
         }
 
@@ -22131,6 +22408,7 @@
 
             // 更新K线值
             jiwangData[nextDate].kxian = kxianValue;
+            markJiwangDirty(nextDate);
             saveData();
 
             // 如果下一交易日就是当前显示的日期，重新渲染
@@ -24084,6 +24362,7 @@
                     jiwangData[currentDate] = {};
                 }
                 jiwangData[currentDate].kxian = kxianValue;
+                markJiwangDirty(currentDate);
                 saveData();
                 renderJiwang();
             }
@@ -24277,6 +24556,7 @@
                 stats: stats
             };
             getJiwangData()[currentDate] = data;
+            markJiwangDirty(currentDate);
             saveData();
             renderJiwang();
             closeJiwangModal();
@@ -30998,9 +31278,16 @@
                         // bidding 字段，也不再读取/覆盖，避免旧/损坏的备份把云端数据冲掉。
                         // allData.bidding 继续指向持久内存缓存 _biddingMemCache。
                         if (!_biddingMemCache) _biddingMemCache = {};
+                        // jiwang 同理，已改为纯云端表 + 内存缓存。导入文件里的 jiwang 数据
+                        // 合并进 _jiwangMemCache（而不是替换整个对象引用），并在下面把
+                        // 涉及的日期标脏，交给 saveData()/scheduleJiwangPush() 推送到云端表。
+                        if (!_jiwangMemCache) _jiwangMemCache = {};
+                        if (imported.jiwang && typeof imported.jiwang === 'object') {
+                            Object.assign(_jiwangMemCache, imported.jiwang);
+                        }
                         allData = {
                             stocks: imported.stocks || {},
-                            jiwang: imported.jiwang || {},
+                            jiwang: _jiwangMemCache,
                             rank: imported.rank || {},
                             multi: imported.multi || {},
                             hotspot: imported.hotspot || {},
@@ -31016,6 +31303,10 @@
                         // "以云端为基准"的保护逻辑会反过来用云端（可能是脏数据）
                         // 把刚导入的干净数据覆盖掉，导致"导入了但多余股票还在"。
                         Object.keys(allData.auction).forEach(function(d) { markAuctionDirty(d); });
+                        // jiwang 同理：导入的日期都标脏，确保 saveData() 会把它们推送到 jiwang_data 表
+                        if (imported.jiwang) {
+                            Object.keys(imported.jiwang).forEach(function(d) { markJiwangDirty(d); });
+                        }
                         
                         if (imported.duibanData) {
                             localStorage.setItem('duibanData', JSON.stringify(imported.duibanData));
@@ -31265,9 +31556,16 @@
                     // bidding 字段，也不再读取/覆盖，避免旧/损坏的备份把云端数据冲掉。
                     // allData.bidding 继续指向持久内存缓存 _biddingMemCache。
                     if (!_biddingMemCache) _biddingMemCache = {};
+                    // jiwang 同理，已改为纯云端表 + 内存缓存，合并进 _jiwangMemCache
+                    // 并把涉及日期标脏，交给 saveData()/scheduleJiwangPush() 推送到云端表。
+                    if (!_jiwangMemCache) _jiwangMemCache = {};
+                    if (imported.jiwang && typeof imported.jiwang === 'object') {
+                        Object.assign(_jiwangMemCache, imported.jiwang);
+                        Object.keys(imported.jiwang).forEach(function(d) { markJiwangDirty(d); });
+                    }
                     allData = {
                         stocks: imported.stocks || {},
-                        jiwang: imported.jiwang || {},
+                        jiwang: _jiwangMemCache,
                         rank: imported.rank || {},
                         multi: imported.multi || {},
                         hotspot: imported.hotspot || {},
@@ -31514,6 +31812,8 @@
             migrateAuctionToTable();
             // 迁移 bidding 数据到独立表（拆表后新增，首次运行时自动执行）
             migrateBiddingToTable();
+            // 迁移 jiwang 数据到独立表（拆表后新增，首次运行时自动执行）
+            migrateJiwangToTable();
             // 迁移旧 note 到 changePct + topics 字段（note 拆字段后新增，首次运行时自动执行）
             migrateNoteToFields();
 
