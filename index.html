@@ -8682,6 +8682,30 @@
         }
 
         // 当日竞价变化数据 UPSERT 到 bidding_data 表
+        // 把 time930_initial_modifiedAt / time930_modifiedAt 这类"修改时间"字段
+        // 统一转成 Postgres timestamp 能接受的 ISO 字符串。
+        // 这两个字段在本地历史上一直用 Date.now() 赋值（纯数字毫秒时间戳），
+        // 直接传给云端 timestamp 字段会报 "date/time field value out of range"。
+        // 这里做兼容处理：数字/数字字符串 -> 转 ISO；已经是合法日期字符串 -> 原样返回；
+        // 无法识别 -> 返回 null，避免再次把脏数据带进 upsert 导致同一行报错。
+        function toIsoTimestamp(v) {
+            if (v === undefined || v === null || v === '') return null;
+            if (typeof v === 'number') {
+                var d = new Date(v);
+                return isNaN(d.getTime()) ? null : d.toISOString();
+            }
+            if (typeof v === 'string') {
+                // 纯数字字符串（例如旧数据被 JSON 序列化后变成字符串）也当毫秒时间戳处理
+                if (/^\d+$/.test(v)) {
+                    var dNum = new Date(Number(v));
+                    return isNaN(dNum.getTime()) ? null : dNum.toISOString();
+                }
+                var dStr = new Date(v);
+                return isNaN(dStr.getTime()) ? null : dStr.toISOString();
+            }
+            return null;
+        }
+
         async function pushBiddingToCloud(date) {
             // 注：不再用 _biddingTableAvailable 做早退保护。该表已长期稳定使用，
             // 之前"表不可用时跳过"是为了兼容表还没建好的过渡期，但这个标记要等
@@ -8710,10 +8734,10 @@
                     row.time930_initial = item.time930_initial;
                 }
                 if (item.time930_initial_modifiedAt !== undefined && item.time930_initial_modifiedAt !== null) {
-                    row.time930_initial_modifiedAt = item.time930_initial_modifiedAt;
+                    row.time930_initial_modifiedAt = toIsoTimestamp(item.time930_initial_modifiedAt);
                 }
                 if (item.time930_modifiedAt !== undefined && item.time930_modifiedAt !== null) {
-                    row.time930_modifiedAt = item.time930_modifiedAt;
+                    row.time930_modifiedAt = toIsoTimestamp(item.time930_modifiedAt);
                 }
                 return row;
             });
@@ -8786,10 +8810,10 @@
                         row.time930_initial = item.time930_initial;
                     }
                     if (item.time930_initial_modifiedAt !== undefined && item.time930_initial_modifiedAt !== null) {
-                        row.time930_initial_modifiedAt = item.time930_initial_modifiedAt;
+                        row.time930_initial_modifiedAt = toIsoTimestamp(item.time930_initial_modifiedAt);
                     }
                     if (item.time930_modifiedAt !== undefined && item.time930_modifiedAt !== null) {
-                        row.time930_modifiedAt = item.time930_modifiedAt;
+                        row.time930_modifiedAt = toIsoTimestamp(item.time930_modifiedAt);
                     }
                     return row;
                 });
