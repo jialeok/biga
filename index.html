@@ -10422,6 +10422,10 @@
             } else {
                 const row = Object.assign({ stock: nameTrim, in_watchlist: false }, cleanPatch);
                 list.push(row);
+                // 阶段五 影子清单 调试2：追踪影子记录新建路径，定位是否有"目标日期写错"的 bug
+                _dbgLog('[SHADOW-WRITE] date=' + date + ' stock=' + nameTrim
+                    + ' in_watchlist=false | fields=' + Object.keys(cleanPatch).join(',')
+                    + ' | 来源=' + ((new Error()).stack.split('\n')[2] || '').trim());
             }
         }
 
@@ -11648,17 +11652,47 @@
 
         // 获取今日早盘竞价数据
         // 返回数组的浅拷贝，防止外部修改意外影响原始数据，确保日期间数据隔离
+        // 阶段五 影子清单修复：过滤 in_watchlist=false 的影子记录，只返回当天正式列表成员。
+        // _auctionMemCache[date] 会同时存 in_watchlist=true（正式列表）和 in_watchlist=false
+        // （影子记录，仅供趋势图历史查询）两类行，渲染/统计/批量操作都只应看到正式列表。
         function getTodayAuction() {
-            const list = getAuctionData()[currentDate];
-            return list ? list.slice() : [];
+            const list = getAuctionData()[currentDate] || [];
+            return list.filter(function(r) { return r.in_watchlist !== false; });
         }
 
         // 获取今日指定分组（早盘竞价 / 热门股票）数据，供渲染函数按 dataSource 复用
         // 返回数组的浅拷贝，防止外部修改意外影响原始数据，确保日期间数据隔离
+        // 阶段五 影子清单修复：auction 分组过滤 in_watchlist=false 影子记录；
+        // hot 分组的 _hotAuctionData 本身只含 in_watchlist=true 行（影子记录存在独立的 _hotFullRowCache），
+        // 但其行对象没有 in_watchlist 字段（undefined），用 !== false 兼容判断避免误杀。
         function getTodayGroupList(dataSource='auction') {
-            const list = getGroupData(dataSource)[currentDate];
-            return list ? list.slice() : [];
+            const list = getGroupData(dataSource)[currentDate] || [];
+            return list.filter(function(r) { return r.in_watchlist !== false; });
         }
+
+        // 阶段五 影子清单 调试3：手动排查入口，控制台执行 debugAuctionStock('股票名')
+        // 返回该股票在所有日期下的记录（date / in_watchlist / volume / note），用 console.table 展示
+        window.debugAuctionStock = function(stockName) {
+            if (!stockName) { console.warn('用法: debugAuctionStock("股票名")'); return []; }
+            const result = [];
+            Object.keys(_auctionMemCache).sort().forEach(function(date) {
+                const rows = (_auctionMemCache[date] || []).filter(function(r) {
+                    return r && r.stock && r.stock.trim() === String(stockName).trim();
+                });
+                rows.forEach(function(r) {
+                    result.push({
+                        date: date,
+                        in_watchlist: r.in_watchlist,
+                        volume: r.volume || '',
+                        yest_volume: r.yest_volume || r.yestVolume || '',
+                        note: r.note || '',
+                        change_pct: r.change_pct || r.changePct || ''
+                    });
+                });
+            });
+            console.table(result);
+            return result;
+        };
 
         function buildTopicCache() {
             if (_topicCacheBuilt && _topicCache) return _topicCache;
@@ -16388,6 +16422,14 @@
             if (dataSource === 'hot') _lastHotRenderDate = currentDate; else _lastAuctionRenderDate = currentDate;
 
             const auctionList = getTodayGroupList(dataSource);
+            // 阶段五 影子清单 调试1：渲染前打印数据来源统计，确认 in_watchlist=false 影子记录已被过滤
+            const _rawPartition = (getGroupData(dataSource)[currentDate] || []);
+            const _shadowCount = _rawPartition.filter(function(r) { return r.in_watchlist === false; }).length;
+            _dbgLog('[AUCTION-DEBUG] currentDate=' + currentDate
+                + ' | 渲染条数=' + auctionList.length
+                + ' | 原始分区总条数=' + _rawPartition.length
+                + ' | in_watchlist=false条数=' + _shadowCount
+                + ' | dataSource=' + dataSource);
 
             // 实时检查股票列表中的标签，自动标记颜色并锁定（早盘竞价专属：写回 auction 本地存储）
             if (dataSource === 'auction') {
