@@ -10399,9 +10399,53 @@
             // 只写入全量快照缓存供趋势图查询，不会出现在 tap 页面的第一页列表里。
             const existingWatchlistNames = {};
             const _watchlistSourceList = watchlistSnapshot !== undefined ? watchlistSnapshot : (getHotAuctionData()[date] || []);
+            // 🔍[调试-影子记录混入排查] 统计本次构建 existingWatchlistNames 时，
+            // _watchlistSourceList 里 in_watchlist=true / false / 字段缺失 的行数，
+            // 以及被记入 existingWatchlistNames 的股票名单中，有多少其实是 in_watchlist!==true 的影子记录。
+            (function() {
+                var trueCount = 0, falseCount = 0, undefinedCount = 0;
+                var shadowNamesLeaking = [];
+                (_watchlistSourceList || []).forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    if (s.in_watchlist === true) trueCount++;
+                    else if (s.in_watchlist === false) { falseCount++; shadowNamesLeaking.push(s.stock.trim()); }
+                    else { undefinedCount++; shadowNamesLeaking.push(s.stock.trim() + '(undefined)'); }
+                });
+                if (shadowNamesLeaking.length > 0) {
+                    console.warn('[调试-pushHotStocksDataToCloud] 日期=' + date +
+                        ' | existingWatchlistNames 来源列表共 ' + (_watchlistSourceList || []).length + ' 行' +
+                        ' | in_watchlist=true: ' + trueCount +
+                        ' | in_watchlist=false: ' + falseCount +
+                        ' | 字段缺失: ' + undefinedCount +
+                        ' | ⚠️即将被当作"正式成员名单"混入 existingWatchlistNames 的影子/异常记录(' + shadowNamesLeaking.length + '只): ' +
+                        shadowNamesLeaking.join('、'));
+                }
+                if (typeof _dbgLog === 'function') {
+                    _dbgLog('[调试-pushHotStocksDataToCloud] ' + date + ' 来源共' + (_watchlistSourceList || []).length +
+                        '行，true=' + trueCount + ' false=' + falseCount + ' undefined=' + undefinedCount +
+                        '，泄漏影子名单=' + shadowNamesLeaking.join('、'));
+                }
+            })();
             (_watchlistSourceList || []).forEach(function(s) {
                 if (s && s.stock) existingWatchlistNames[s.stock.trim()] = true;
             });
+            // 🔍[调试-影子记录混入排查] 检查本次 items 中，有哪些股票原本不是正式列表(existingWatchlistNames 未记录)，
+            // 却因为上面的泄漏被误判为 in_watchlist=true，即将写入云端第一页。
+            (function() {
+                var wronglyPromoted = [];
+                (items || []).forEach(function(item) {
+                    if (!item || !item.stock) return;
+                    var nameTrim = item.stock.trim();
+                    if (existingWatchlistNames[nameTrim]) {
+                        wronglyPromoted.push(nameTrim);
+                    }
+                });
+                if (wronglyPromoted.length > 0) {
+                    console.warn('[调试-pushHotStocksDataToCloud] 日期=' + date +
+                        ' | 本次 items 中将被写为 in_watchlist=true 的股票共' + wronglyPromoted.length + '只: ' +
+                        wronglyPromoted.join('、'));
+                }
+            })();
             const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
                 const nameTrim = item.stock.trim();
                 return {
