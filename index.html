@@ -8595,14 +8595,26 @@
             if (error) throw error;
 
             // 全量快照缓存：包含该日期所有行（in_watchlist true/false），供历史行情查询
+            // 阶段四 Bug 6 修复：删除旧的字段级合并逻辑（原本服务于已脱节的 allData.auction），
+            // 改为整段替换 _auctionMemCache（对齐 bidding 模式 pullBiddingForDate）。
+            // 字段级保护已在 patchAuctionFieldBatch 的 upsert SET 子句层面根治（只写 patch 携带的列）。
+            // 同时为兼容现有渲染代码（读 camelCase 字段），每行同时携带 snake_case 和 camelCase 别名。
+            const cloudNames = new Set((data || []).map(function(r) { return (r.stock || '').trim(); }));
+            // 保留本地 obsAutoAdded=true 的观察组继承股票（云端没有的），追加到云端列表末尾
+            const prePullList = _auctionMemCache[date] || [];
+            const localObsStocks = prePullList.filter(function(s) {
+                return s && s.stock && s.obsAutoAdded && !cloudNames.has(s.stock.trim());
+            });
             const normalizedRows = (data || []).map(function(row) {
                 return {
                     stock: row.stock,
                     code: row.code || '',
                     volume: row.volume || '',
                     yest_volume: row.yest_volume || '',
+                    yestVolume: row.yest_volume || '', // camelCase 别名，供渲染代码兼容
                     note: row.note || '',
                     change_pct: row.change_pct || '',
+                    changePct: row.change_pct || '', // camelCase 别名，供渲染代码兼容
                     topics: row.topics || '',
                     in_watchlist: row.in_watchlist || false,
                     selected: row.selected || false,
@@ -8610,56 +8622,13 @@
                     sold: row.sold || false,
                     fixed: row.fixed || false
                 };
-            });
-            // 阶段三 E：_auctionFullRowCache 已退场，_auctionMemCache 整段替换（对齐 bidding 模式 pullBiddingForDate），
-            // 不再做字段级合并猜测——字段级保护已在 patchAuctionFieldBatch 的 upsert SET 子句层面根治
-            // （只写 patch 携带的列，不会带旧值），这里再合并只会引入"本地旧值覆盖云端新值"的新竞态。
-            _auctionMemCache[date] = normalizedRows;
-
-            const auctionData = getAuctionData();
-            const localList = auctionData[date] || [];
-            const localMap = {};
-            localList.forEach(function(s) { if (s && s.stock) localMap[s.stock.trim()] = s; });
-
-            // 合并策略：以云端 in_watchlist=true 的行为准替换本地列表
-            // （让抓取程序的"最近多板名单更新+同步"能反映到主程序：38→50只全替换，重复的保留云端行情数据）
-            // 但保留本地 obsAutoAdded=true 的观察组继承股票（云端没有的），不被替换掉。
-            // 状态列（selected/bought/sold/fixed）保留本地，行情列（volume/yestVolume/note/changePct/topics）用云端。
-            const cloudWatchlist = (data || []).filter(function(row) { return row.in_watchlist; });
-            const cloudNames = new Set(cloudWatchlist.map(function(r) { return (r.stock || '').trim(); }));
-            // 本地观察组继承股票（云端没有的）保留下来，追加到云端列表末尾
-            const localObsStocks = localList.filter(function(s) {
-                return s && s.stock && s.obsAutoAdded && !cloudNames.has(s.stock.trim());
-            });
-            const mergedList = cloudWatchlist.map(function(row) {
-                var local = localMap[(row.stock || '').trim()];
-                // volume/yestVolume/note/changePct/topics：云端有值才覆盖，否则保留本地
-                // （避免"补全昨日竞价量"和"补全/对比日昨成交量"等只更新单个字段的操作，
-                // 被随后的云端拉取用另一字段的旧/空值把刚写入的本地字段冲掉——
-                // 两个按钮各自只 upsert 自己关心的字段时，upsert 整行仍会带上当时读到的
-                // 另一字段旧值，若不在这里做字段级保护，会互相清空对方的结果）
-                return {
-                    stock: row.stock,
-                    code: row.code || (local ? (local.code || '') : ''),
-                    volume: getNumericVolume(row.volume) !== null ? row.volume : (local ? (local.volume || '') : ''),
-                    yestVolume: getNumericVolume(row.yest_volume) !== null ? row.yest_volume : (local ? (local.yestVolume || '') : ''),
-                    note: (row.note && row.note.trim()) ? row.note : (local ? (local.note || '') : ''),
-                    changePct: (row.change_pct && String(row.change_pct).trim()) ? row.change_pct : (local ? (local.changePct || '') : ''),
-                    topics: (row.topics && row.topics.trim()) ? row.topics : (local ? (local.topics || '') : ''),
-                    selected: local ? (local.selected || false) : (row.selected || false),
-                    bought: local ? (local.bought || false) : (row.bought || false),
-                    sold: local ? (local.sold || false) : (row.sold || false),
-                    fixed: local ? (local.fixed || false) : (row.fixed || false)
-                };
             }).concat(localObsStocks);
-
-            auctionData[date] = mergedList;
-            saveModule('auction');
-            allData = null; // 重置内存
+            _auctionMemCache[date] = normalizedRows;
 
             // 更新状态签名，避免 pull 后立即触发无意义的 push
             if (date === currentDate) {
-                _lastPushedAuctionStatus = JSON.stringify(mergedList.map(function(s) {
+                const watchlistRows = normalizedRows.filter(function(r) { return r.in_watchlist; });
+                _lastPushedAuctionStatus = JSON.stringify(watchlistRows.map(function(s) {
                     return { s: s.stock, sel: s.selected || false, b: s.bought || false,
                              so: s.sold || false, f: s.fixed || false };
                 }));
@@ -8924,6 +8893,22 @@
             const sb = getSupabase();
             const { error } = await sb.from('bidding_data').delete().eq('"date"', date);
             if (error) throw error;
+        }
+
+        // 删除 auction_data 表中某天的全部数据（阶段四 Bug 3 修复：与 bidding 对齐，
+        // "清空当日数据"原本只 delete allData.auction[currentDate]，云端行还在，
+        // 下次刷新/Realtime 会把数据"复活"）
+        async function deleteAuctionFromCloud(date) {
+            if (!date) return;
+            if (!_auctionTableAvailable) return;
+            _openAuctionShield();
+            try {
+                const sb = getSupabase();
+                const { error } = await sb.from('auction_data').delete().eq('"date"', date);
+                if (error) throw error;
+            } finally {
+                _closeAuctionShield(2000);
+            }
         }
 
         // 一次性迁移：将本地 allData.bidding 灌入 bidding_data 表
@@ -9441,13 +9426,16 @@
         async function pullAuctionFromTable() {
             const sb = getSupabase();
             const result = {};
-            _auctionMemCache = {};
-            // 旧本地数据：用于给 volume/yestVolume 做"云端有效值优先，否则保留本地"的合并保护。
-            // 这是整表刷新路径（pullFromCloud → pullAuctionFromTable，触发于重连/其它设备推送等），
-            // 与 pullAuctionMarketDataForDate（单日期 Realtime 增量更新）是同一类 bug 的另一个触发口：
-            // 若两个只更新单个字段（volume 或 yestVolume）的补全按钮之间恰好插入一次整表刷新，
-            // 刷新时如果无条件用云端值覆盖，会把云端当时还没来得及写入的那个字段冲空。
-            const oldLocalAuction = (loadAllData().auction) || {};
+            // 阶段四 Bug 6 收尾修复：不能 _auctionMemCache = {} 重新赋值，否则会切断
+            // allData.auction 与 _auctionMemCache 的引用关系（同 Bug 3 整体导入的坑）。
+            // 改为清空 keys 保持引用不变。同时给 _auctionMemCache 行补 camelCase 别名
+            // （yestVolume/changePct），与 pullAuctionMarketDataForDate 保持一致，
+            // 避免渲染代码（读 camelCase）在整表刷新后取不到值。
+            if (_auctionMemCache) {
+                Object.keys(_auctionMemCache).forEach(function(d) { delete _auctionMemCache[d]; });
+            } else {
+                _auctionMemCache = {};
+            }
             let offset = 0;
             const pageSize = 1000;
             while (true) {
@@ -9457,15 +9445,18 @@
                 if (error) throw error;
                 if (!data || data.length === 0) break;
                 data.forEach(function(row) {
-                    // 全量快照缓存：包含所有行（in_watchlist true/false），忠实反映云端真实数据，不做本地合并
+                    // 全量快照缓存：包含所有行（in_watchlist true/false），忠实反映云端真实数据，不做本地合并。
+                    // 同时携带 snake_case 和 camelCase 别名（与 pullAuctionMarketDataForDate 对齐）。
                     if (!_auctionMemCache[row.date]) _auctionMemCache[row.date] = [];
                     _auctionMemCache[row.date].push({
                         stock: row.stock,
                         code: row.code || '',
                         volume: row.volume || '',
                         yest_volume: row.yest_volume || '',
+                        yestVolume: row.yest_volume || '', // camelCase 别名，供渲染代码兼容
                         note: row.note || '',
                         change_pct: row.change_pct || '',
+                        changePct: row.change_pct || '', // camelCase 别名，供渲染代码兼容
                         topics: row.topics || '',
                         in_watchlist: row.in_watchlist || false,
                         selected: row.selected || false,
@@ -9473,16 +9464,17 @@
                         sold: row.sold || false,
                         fixed: row.fixed || false
                     });
-                    // 返回值只含 in_watchlist=true 行（供 allData.auction 渲染）
+                    // 返回值只含 in_watchlist=true 行，供调用方做 length 检查
+                    // （Bug 1+2 修好后渲染读 _auctionMemCache，不再依赖此返回值；
+                    // 旧路径的 oldLocalAuction 合并保护已失效——_auctionMemCache 即唯一本地存储，
+                    // 在函数开头被清空，没有"旧本地数据"可保留——故直接删除该合并逻辑）
                     if (row.in_watchlist) {
                         if (!result[row.date]) result[row.date] = [];
-                        const localList = oldLocalAuction[row.date] || [];
-                        const local = localList.find(function(s) { return s && s.stock && s.stock.trim() === (row.stock || '').trim(); });
                         result[row.date].push({
                             stock: row.stock,
                             code: row.code || '',
-                            volume: getNumericVolume(row.volume) !== null ? row.volume : (local ? (local.volume || '') : ''),
-                            yestVolume: getNumericVolume(row.yest_volume) !== null ? row.yest_volume : (local ? (local.yestVolume || '') : ''),
+                            volume: row.volume || '',
+                            yestVolume: row.yest_volume || '',
                             note: row.note || '',
                             changePct: row.change_pct || '',
                             topics: row.topics || '',
@@ -10767,14 +10759,16 @@
                 // 若新表不可用或为空，保留本地数据（不清空）
                 try {
                     const tableAuction = await pullAuctionFromTable();
+                    // 阶段四 Bug 6 收尾修复：auction 已改为纯内存缓存（_auctionMemCache）+ 云端表，
+                    // 不再落 localStorage（Bug 4），也不需要 allData = null 重置——
+                    // pullAuctionFromTable 内部已原地清空+灌入 _auctionMemCache，
+                    // 而 allData.auction 即 _auctionMemCache（Bug 1+2），引用自动同步。
                     if (Object.keys(tableAuction).length > 0) {
-                        // 新表有数据，覆盖本地 auction（新表是 source of truth）
-                        localStorage.setItem('stockApp_v42_auction', JSON.stringify(tableAuction));
-                        allData = null; // 重置内存，让下次读取用新数据
+                        // 数据已灌入 _auctionMemCache，无需额外动作
                     }
                     // 新表为空时：保留本地数据，不清空（可能是迁移未完成或表刚创建）
                     // 更新状态签名，避免 pull 后立即触发无意义的 push
-                    const todayList = (loadAllData().auction || {})[currentDate] || [];
+                    const todayList = (_auctionMemCache[currentDate]) || [];
                     _lastPushedAuctionStatus = JSON.stringify(todayList.map(function(s) {
                         return { s: s.stock, sel: s.selected || false, b: s.bought || false,
                                  so: s.sold || false, f: s.fixed || false };
@@ -11081,7 +11075,8 @@
                 });
             });
             if (hasChanges) {
-                saveModule('auction');
+                // 阶段四 Bug 4 修复：auction 不再落 localStorage，saveModule('auction') 已是 no-op，
+                // 这里只需刷新本地缓存标记
                 invalidateTopicCache();
             }
         }
@@ -11111,6 +11106,13 @@
                             allData[key] = _jiwangMemCache;
                             return;
                         }
+                        // auction（阶段四 Bug 2 修复）：与 bidding/jiwang 同样改为纯云端表（auction_data）+ 内存缓存，
+                        // 不再从 localStorage 读取旧快照，避免旧/空本地数据在刷新时顶替云端数据，
+                        // 也避免与 _auctionMemCache 形成两份不同步的状态（这是阶段四审核发现的核心问题）。
+                        if (key === 'auction') {
+                            allData[key] = _auctionMemCache;
+                            return;
+                        }
                         const raw = localStorage.getItem(_moduleKey(key));
                         if (raw !== null) {
                             try {
@@ -11125,7 +11127,6 @@
                     if (!allData.notesNormalized) {
                         normalizeAuctionNotes();
                         allData.notesNormalized = true;
-                        saveModule('auction');
                     }
                 } else {
                     if (!_biddingMemCache) _biddingMemCache = {};
@@ -11133,7 +11134,7 @@
                     allData = {
                         stocks: {}, jiwang: _jiwangMemCache, rank: {}, multi: {},
                         hotspot: {}, pattern: {}, bidding: _biddingMemCache, tagTitles: {},
-                        auction: {}, holidays: [], stockCodeMap: {}
+                        auction: _auctionMemCache, holidays: [], stockCodeMap: {}
                     };
                 }
             }
@@ -11290,17 +11291,41 @@
             }
 
             // 恢复备份数据：只精准覆盖被备份的那一天，其它日期完全不动
-            allData.auction = allData.auction || {};
+            // 阶段四 Bug 3 修复：allData.auction 即 _auctionMemCache（Bug 1+2 修好后），
+            // 直接操作即可；同时走 patchAuctionFieldBatch 把数据字段同步到云端，
+            // 不再依赖 saveData() 落 localStorage（auction 已不落地，见 Bug 4）
             if (backupDayData === null) {
                 // 备份时这一天本来就没有数据，撤回即恢复为"没有"
-                delete allData.auction[backupDate];
+                delete _auctionMemCache[backupDate];
             } else {
-                allData.auction[backupDate] = backupDayData;
+                _auctionMemCache[backupDate] = backupDayData;
+                // 把这一天的所有数据字段 patch 到云端（camelCase → snake_case）
+                const scMap = (allData && allData.stockCodeMap) || {};
+                const patches = (Array.isArray(backupDayData) ? backupDayData : [])
+                    .filter(function(s) { return s && s.stock; })
+                    .map(function(item) {
+                        const nameTrim = item.stock.trim();
+                        return {
+                            stock: nameTrim,
+                            code: scMap[nameTrim] || item.code || '',
+                            volume: item.volume || '',
+                            yest_volume: item.yestVolume || '',
+                            note: item.note || '',
+                            change_pct: item.changePct || '',
+                            topics: item.topics || '',
+                            selected: item.selected || false,
+                            bought: item.bought || false,
+                            sold: item.sold || false,
+                            fixed: item.fixed || false
+                        };
+                    });
+                if (patches.length > 0) {
+                    patchAuctionFieldBatch(backupDate, patches).catch(function(e) { console.warn('patchAuctionFieldBatch backup-revert 失败:', e); });
+                }
             }
             // 用户主动确认"撤回"了 backupDate 这一天的数据，标记为脏日期，
             // 允许下次推送时用撤回后的本地状态覆盖云端该日期
             markAuctionDirty(backupDate);
-            saveData();
 
             // 撤回后清除全部备份，避免下次撤回到错误状态
             localStorage.removeItem('auctionData_import_backup');
@@ -11319,6 +11344,10 @@
             if (!allData || !allData[name]) return;
             // bidding 已改为纯云端表 + 内存缓存，不再落 localStorage
             if (name === 'bidding') return;
+            // 阶段四 Bug 4 修复：auction 同样改为纯云端表（auction_data）+ 内存缓存（_auctionMemCache），
+            // 不再落 localStorage，避免本地旧/空快照在下次保存或导入时把云端数据覆盖掉，
+            // 也避免与 _auctionMemCache 形成两份不同步的状态
+            if (name === 'auction') return;
             try {
                 localStorage.setItem(_moduleKey(name), JSON.stringify(allData[name]));
             } catch (e) {
@@ -11336,6 +11365,8 @@
                 if (key === 'bidding') return;
                 // jiwang 同理，已改为纯云端表（jiwang_data）+ 内存缓存
                 if (key === 'jiwang') return;
+                // 阶段四 Bug 4 修复：auction 同样不再落 localStorage
+                if (key === 'auction') return;
                 if (allData && allData[key] !== undefined) {
                     try {
                         localStorage.setItem(_moduleKey(key), JSON.stringify(allData[key]));
@@ -11601,10 +11632,13 @@
         }
 
         // 获取分组数据（早盘竞价 / 热门股票），通过 dataSource 切换数据源
-        // 'auction' 读 allData.auction（loadAllData），'hot' 读 _hotAuctionData 本地缓存
+        // 'auction' 直接返回模块级独立内存缓存 _auctionMemCache（阶段四 Bug 1 修复），
+        // 不再走 loadAllData().auction —— 后者虽然阶段四 Bug 2 修好后也指向 _auctionMemCache，
+        // 但这里直接返回可以避开 loadAllData 的初始化副作用，并明确"渲染读的就是 patch 写的那份"。
+        // 'hot' 读 _hotAuctionData 本地缓存
         function getGroupData(dataSource='auction') {
             if (dataSource === 'hot') return _hotAuctionData || {};
-            return loadAllData().auction || {};
+            return _auctionMemCache;
         }
 
         // 获取早盘竞价数据（向后兼容：所有现有调用点不传参，行为不变）
@@ -12732,21 +12766,32 @@
             // 同步到今日竞价列表：将导入的名称追加到 auction[currentDate]（已存在的不重复添加）
             let addedToAuction = 0;
             if (newNames.length > 0) {
-                const auctionData = loadAllData().auction || {};
+                // 阶段四 Bug 3 修复：getAuctionData() 已直接返回 _auctionMemCache，
+                // 直接操作它即可，不再需要 allData.auction = auctionData 这种重赋值（原本是为了触发 localStorage 落地，现已不落地）
+                const auctionData = getAuctionData();
                 if (!Array.isArray(auctionData[currentDate])) auctionData[currentDate] = [];
                 const list = auctionData[currentDate];
+                const newStocksAdded = [];
                 newNames.forEach(name => {
                     const exists = list.some(item => item && item.stock && item.stock.trim() === name);
                     if (!exists) {
                         list.push({ stock: name, volume: '', yestVolume: '', note: '', selected: false, bought: false, sold: false, fixed: false });
+                        newStocksAdded.push(name);
                         addedToAuction++;
                     }
                 });
-                allData.auction = auctionData;
-                saveModule('auction');
                 // 主动往 auction[currentDate] 增加了股票，标记为脏日期，
                 // 允许下次推送时用本地（含新增股票）的名单覆盖云端该日期
                 markAuctionDirty(currentDate);
+                // 阶段四 Bug 3 修复：新增的股票也走 patchAuctionFieldBatch 上报到云端（带 code 字段），
+                // 不再依赖 saveModule('auction') 落 localStorage
+                if (newStocksAdded.length > 0) {
+                    const scMap = allData.stockCodeMap || {};
+                    const patches = newStocksAdded.map(function(name) {
+                        return { stock: name, code: scMap[name] || '', volume: '', yest_volume: '', note: '', change_pct: '', topics: '', selected: false, bought: false, sold: false, fixed: false };
+                    });
+                    patchAuctionFieldBatch(currentDate, patches).catch(function(e) { console.warn('patchAuctionFieldBatch code-map-import 失败:', e); });
+                }
                 // 刷新后台编辑表单和前台看板
                 renderAuctionForm();
                 renderAuction();
@@ -13744,6 +13789,11 @@
                 // ===== 分两批调用 fuyao historical（每批用单天时间窗口，避免跨天窗口只返回最新一根 K 线）=====
                 let todayFilled = 0, todaySkipped = 0;
                 let yesterdayFilled = 0, yesterdaySkipped = 0;
+                // 阶段四 Bug 5 收尾：改用字段级 patch 上报，只携带本次真正改动的 yest_volume，
+                // 不再像 pushAuctionDataToCloud 那样把整行（含 volume/change_pct/note/topics 等）一起带上——
+                // 这是原 bug（先点同花顺再点猫抓互相覆盖）的触发点之一。
+                const todayYestVolPatches = [];
+                const yesterdayYestVolPatches = [];
 
                 // ===== 第一批：调取当日的昨日成交量（today.yestVolume ← yesterday 的 volume）=====
                 setApiStatus('thsApiStatus', '【1/2】正在获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
@@ -13755,6 +13805,7 @@
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
+                        todayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         todayFilled++;
                     } else {
                         todaySkipped++;
@@ -13762,7 +13813,9 @@
                 });
                 auctionData[today] = todayList;
                 saveModule('auction');
-                pushAuctionDataToCloud(today, todayList).catch(function(e) { console.warn('pushAuctionDataToCloud today 失败:', e); });
+                if (todayYestVolPatches.length > 0) {
+                    patchAuctionFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchAuctionFieldBatch today yest_volume 失败:', e); });
+                }
 
                 // ===== 第二批：调取对比日的昨日成交量（yesterday.yestVolume ← dayBefore 的 volume）=====
                 setApiStatus('thsApiStatus', '【2/2】正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
@@ -13774,6 +13827,10 @@
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
+                        // patch 只携带 yest_volume（正式列表成员和影子记录都走同一个 patches 数组，
+                        // 对 patchAuctionFieldBatch 而言都是 upsert(date,stock) + 只写 yest_volume；
+                        // in_watchlist 不通过 patch 上报，由 syncAuctionListForDate 单独管理）
+                        yesterdayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         yesterdayFilled++;
                     } else {
                         yesterdaySkipped++;
@@ -13787,7 +13844,7 @@
                 // 原有股票被静默移除（表现为"股票变少了"）。
                 // 正确做法：真正需要覆盖式更新的，只有"对比日原本就存在的股票"（合并 yestVolume 补全结果）；
                 // 对比日原本没有的股票（本次为了凑对比而临时造出的影子行），不写回本地正式列表 auctionData[yesterday]，
-                // 只单独传给 pushAuctionDataToCloud 标记为 in_watchlist=false，仅供趋势图查询。
+                // 它们的 yest_volume 通过 patchAuctionFieldBatch 上报（in_watchlist 默认 false，仅供趋势图查询）。
                 const existingYesterdayList = (auctionData[yesterday] || []).slice();
                 const existingYesterdayNames = {};
                 existingYesterdayList.forEach(function(s) {
@@ -13801,19 +13858,13 @@
                     const target = existingYesterdayList.find(function(e) { return e.stock && e.stock.trim() === name; });
                     if (target) target.yestVolume = s.yestVolume;
                 });
-                // 对比日本来没有的股票（影子记录），单独收集，只用于推送时标记 in_watchlist=false
-                const shadowOnlyYesterdayStocks = yesterdayList.filter(function(s) {
-                    return s && s.stock && !existingYesterdayNames[s.stock.trim()];
-                });
 
                 auctionData[yesterday] = existingYesterdayList; // 正式列表：只包含对比日原有股票，数量不变
                 saveModule('auction');
                 invalidateTopicCache();
-                pushAuctionDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
-                if (shadowOnlyYesterdayStocks.length > 0) {
-                    // 影子记录单独推送，且推送前 auctionData[yesterday] 已经是"不含它们"的正式列表，
-                    // pushAuctionDataToCloud 内部会按"是否在当前正式列表"判断 in_watchlist，天然落到 false
-                    pushAuctionDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday(影子) 失败:', e); });
+                // 正式列表成员 + 影子记录统一走 patchAuctionFieldBatch（只写 yest_volume）
+                if (yesterdayYestVolPatches.length > 0) {
+                    patchAuctionFieldBatch(yesterday, yesterdayYestVolPatches).catch(function(e) { console.warn('patchAuctionFieldBatch yesterday yest_volume 失败:', e); });
                 }
 
                 // 刷新表单和看板
@@ -13881,12 +13932,15 @@
                 const volYesterday = await fetchDayVolumes(allCodes, yesterday); // ticker -> volume(股)
 
                 let filled = 0, skipped = 0;
+                // 阶段四 Bug 5 收尾：改用字段级 patch 上报，只携带本次真正改动的 yest_volume
+                const todayYestVolPatches = [];
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
+                        todayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         filled++;
                     } else {
                         skipped++;
@@ -13895,7 +13949,9 @@
                 auctionData[today] = todayList;
                 saveModule('auction');
                 invalidateTopicCache();
-                pushAuctionDataToCloud(today, todayList).catch(function(e) { console.warn('pushAuctionDataToCloud today 失败:', e); });
+                if (todayYestVolPatches.length > 0) {
+                    patchAuctionFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchAuctionFieldBatch today yest_volume 失败:', e); });
+                }
 
                 renderAuctionForm();
                 renderAuction();
@@ -13999,7 +14055,8 @@
                 });
 
                 auctionData[yesterday] = existingYesterdayList;
-                saveModule('auction');
+                // 阶段四 Bug 5 修复：saveModule('auction') 已是 no-op（Bug 4），删除避免误导；
+                // auctionData 即 _auctionMemCache（Bug 1+2），本地状态已由上面赋值更新
                 invalidateTopicCache();
                 // 阶段二 B：改用字段级 patch 上报，不再走整段 pushAuctionDataToCloud。
                 // yesterdayPatches 同时包含正式列表成员和影子记录，对 patch 函数而言都是
@@ -14073,6 +14130,10 @@
                 const batchSize = 40;
                 let filledCount = 0;
                 let skippedCount = 0;
+                // 阶段四 Bug 5 收尾：改用字段级 patch 上报，只携带本次真正改动的 change_pct + note，
+                // 不再像 pushAuctionDataToCloud 那样把整行（含 volume/yest_volume/topics 等）一起带上——
+                // 这是原 bug（先点同花顺再点猫抓互相覆盖）的触发点之一。
+                const changePctPatches = [];
 
                 for (let i = 0; i < thscodes.length; i += batchSize) {
                     const chunk = thscodes.slice(i, i + batchSize);
@@ -14101,6 +14162,8 @@
                         }
                         stock.changePct = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
                         stock.note = buildNoteFromFields(stock.changePct, stock.topics);
+                        // patch 只携带本次改动的字段：change_pct + note
+                        changePctPatches.push({ stock: stock.stock, change_pct: stock.changePct, note: stock.note });
                         filledCount++;
                     });
                 }
@@ -14112,10 +14175,12 @@
                 renderAuction();
                 renderList();
 
-                // 同步到云端
-                pushAuctionDataToCloud(today, todayList).catch(function(e) {
-                    console.warn('pushAuctionDataToCloud 失败:', e);
-                });
+                // 同步到云端（字段级 patch，不再走整段 pushAuctionDataToCloud）
+                if (changePctPatches.length > 0) {
+                    patchAuctionFieldBatch(today, changePctPatches).catch(function(e) {
+                        console.warn('patchAuctionFieldBatch changePct 失败:', e);
+                    });
+                }
 
                 const action = overwrite ? '覆盖' : '补全';
                 setApiStatus('thsApiStatus',
@@ -14215,6 +14280,8 @@
 
                 let filledCount = 0;
                 let skippedCount = 0;
+                // 阶段四 Bug 5 收尾：改用字段级 patch 上报，只携带本次真正改动的 topics 字段
+                const topicsPatches = [];
                 items.forEach(function(row) {
                     const code = String(row[symIdx] || '').trim();
                     const themeNames = String(row[themeIdx] || '').trim();
@@ -14228,6 +14295,7 @@
                     const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) { return t; });
                     const top3 = topicList.slice(0, 3).join('，');
                     stock.topics = top3;
+                    topicsPatches.push({ stock: stock.stock, topics: top3 });
                     filledCount++;
                 });
 
@@ -14239,10 +14307,12 @@
                 renderAuction();
                 renderList();
 
-                // 同步到云端
-                pushAuctionDataToCloud(today, getAuctionData()[today] || []).catch(function(e) {
-                    console.warn('pushAuctionDataToCloud 失败:', e);
-                });
+                // 同步到云端（字段级 patch，不再走整段 pushAuctionDataToCloud）
+                if (topicsPatches.length > 0) {
+                    patchAuctionFieldBatch(today, topicsPatches).catch(function(e) {
+                        console.warn('patchAuctionFieldBatch topics 失败:', e);
+                    });
+                }
 
                 setApiStatus('numcatApiStatus',
                     '✅ 补全 ' + filledCount + ' 只股票题材，跳过 ' + skippedCount + ' 只无数据或已有题材',
@@ -14333,11 +14403,10 @@
                 saveModule('auction');
                 renderAuction();
                 renderList();
-
-                // 同步到云端
-                pushAuctionDataToCloud(today, getAuctionData()[today] || []).catch(function(e) {
-                    console.warn('pushAuctionDataToCloud 失败:', e);
-                });
+                // 阶段四 Bug 5 收尾：monitorWarning 是纯内存字段（不在 auction_data 表的列里，
+                // 也不在 AUCTION_PATCHABLE_FIELDS 白名单里），无需同步到云端。
+                // 原本的 pushAuctionDataToCloud(today, ...) 会把整行（含 volume/yest_volume 等）
+                // 一起带上，反而会覆盖云端其它字段，属于副作用大于收益的残留代码，直接删除。
 
                 setApiStatus('numcatApiStatus',
                     '✅ 查询到 ' + markedCount + ' 只股票有严重异常波动（最近 5 个交易日）',
@@ -15658,7 +15727,8 @@
                     auctionData[yesterday] = existingYesterdayList;
                 }
 
-                saveModule('auction');
+                // 阶段四 Bug 5 修复：saveModule('auction') 已是 no-op（Bug 4），删除避免误导；
+                // auctionData 即 _auctionMemCache（Bug 1+2），本地状态已由上面赋值更新
                 invalidateTopicCache();
 
                 // 阶段二 B：改用字段级 patch 上报，不再走整段 pushAuctionDataToCloud。
@@ -30978,8 +31048,14 @@
             deleteBiddingFromCloud(currentDate).catch(function(e) {
                 console.warn('deleteBiddingFromCloud 失败:', e.message);
             });
-            if (allData.auction && allData.auction[currentDate]) {
-                delete allData.auction[currentDate];
+            // 阶段四 Bug 3 修复：auction 同步删除云端对应日期的行（与 bidding 对齐），
+            // 原本只 delete allData.auction[currentDate]（即 _auctionMemCache[currentDate]），
+            // 云端行还在，下次刷新/Realtime 会把数据"复活"
+            deleteAuctionFromCloud(currentDate).catch(function(e) {
+                console.warn('deleteAuctionFromCloud 失败:', e.message);
+            });
+            if (_auctionMemCache[currentDate]) {
+                delete _auctionMemCache[currentDate];
             }
             // 用户主动清空了本日数据（含 auction），标记为脏日期，
             // 允许下次推送时以本地（空）状态覆盖云端，而不是被"以云端为基准"保护挡住
@@ -32288,6 +32364,13 @@
                         if (imported.jiwang && typeof imported.jiwang === 'object') {
                             Object.assign(_jiwangMemCache, imported.jiwang);
                         }
+                        // 阶段四 Bug 3 修复：auction 不能用新对象替换，否则会切断 allData.auction 与 _auctionMemCache 的引用关系，
+                        // 重新制造"两份状态不同步"。改为清空 _auctionMemCache 后把导入数据逐日期灌进去，保持引用不变。
+                        Object.keys(_auctionMemCache).forEach(function(d) { delete _auctionMemCache[d]; });
+                        const importedAuctionData = imported.auction || {};
+                        Object.keys(importedAuctionData).forEach(function(d) {
+                            _auctionMemCache[d] = importedAuctionData[d];
+                        });
                         allData = {
                             stocks: imported.stocks || {},
                             jiwang: _jiwangMemCache,
@@ -32296,7 +32379,7 @@
                             hotspot: imported.hotspot || {},
                             pattern: imported.pattern || {},
                             bidding: _biddingMemCache,
-                            auction: imported.auction || {},
+                            auction: _auctionMemCache,
                             tagTitles: imported.tagTitles || {}
                         };
 
@@ -32305,7 +32388,7 @@
                         // 必须把涉及的每个日期都标记为脏，否则 pushToCloud() 里
                         // "以云端为基准"的保护逻辑会反过来用云端（可能是脏数据）
                         // 把刚导入的干净数据覆盖掉，导致"导入了但多余股票还在"。
-                        Object.keys(allData.auction).forEach(function(d) { markAuctionDirty(d); });
+                        Object.keys(_auctionMemCache).forEach(function(d) { markAuctionDirty(d); });
                         // jiwang 同理：导入的日期都标脏，确保 saveData() 会把它们推送到 jiwang_data 表
                         if (imported.jiwang) {
                             Object.keys(imported.jiwang).forEach(function(d) { markJiwangDirty(d); });
@@ -32523,13 +32606,38 @@
                     backupAuctionData('save');
 
                     missingDates.forEach(date => {
-                        allData.auction[date] = importedAuction[date];
+                        // 阶段四 Bug 3 修复：直接写 _auctionMemCache（即 allData.auction），
+                        // 并走 patchAuctionFieldBatch 把数据字段同步到云端
+                        _auctionMemCache[date] = importedAuction[date];
                         // 用户主动确认了"补全缺失日期"操作，标记这些日期为脏，
                         // 允许下次推送时用补全后的本地数据覆盖云端（云端该日期本来就是空的）
                         markAuctionDirty(date);
+                        // 同步数据字段到云端（camelCase → snake_case）
+                        const scMap = (allData && allData.stockCodeMap) || {};
+                        const dayList = Array.isArray(importedAuction[date]) ? importedAuction[date] : [];
+                        const patches = dayList
+                            .filter(function(s) { return s && s.stock; })
+                            .map(function(item) {
+                                const nameTrim = item.stock.trim();
+                                return {
+                                    stock: nameTrim,
+                                    code: scMap[nameTrim] || item.code || '',
+                                    volume: item.volume || '',
+                                    yest_volume: item.yestVolume || '',
+                                    note: item.note || '',
+                                    change_pct: item.changePct || '',
+                                    topics: item.topics || '',
+                                    selected: item.selected || false,
+                                    bought: item.bought || false,
+                                    sold: item.sold || false,
+                                    fixed: item.fixed || false
+                                };
+                            });
+                        if (patches.length > 0) {
+                            patchAuctionFieldBatch(date, patches).catch(function(e) { console.warn('patchAuctionFieldBatch history-fill 失败:', date, e); });
+                        }
                     });
 
-                    saveModule('auction');
                     invalidateTopicCache();
                     renderAuction();
                     showToast(`✅ 已补全 ${missingDates.length} 天早盘竞价数据！`);
