@@ -16165,6 +16165,60 @@
                 });
                 push('');
 
+                // ---- 观察组自动继承排查 ----
+                // 🔍[调试] 专门排查"今日列表里凭空多出的股票"是否来自 ensureObservationStocks
+                // （观察组自动继承：把上一交易日"竞/昨"高光达标股票自动加入今日列表）。
+                // 逐一对照：今日正式列表里带 obsAutoAdded=true 标记的股票 vs 现在实时重新计算一遍
+                // 上一交易日"竞/昨"高光集合，两者是否一致；不一致就说明标记是历史遗留、或计算口径变了。
+                push('【观察组自动继承排查（ensureObservationStocks）】');
+                try {
+                    const obsMarkedRows = todayList.filter(function(s) { return s && s.obsAutoAdded === true; });
+                    push('　　今日正式列表中带 obsAutoAdded=true 标记的股票：' + obsMarkedRows.length + ' 只');
+                    if (obsMarkedRows.length > 0) {
+                        obsMarkedRows.forEach(function(s) {
+                            push('　　  ' + s.stock + ' | pct=' + (s.changePct || '(空)') + ' | volume=' + (s.volume || '(空)'));
+                        });
+                    }
+
+                    if (yesterday && typeof getJingYestHighlightSetForDate === 'function') {
+                        const rawMap = (typeof getJingYestStocksForDate === 'function') ? getJingYestStocksForDate(yesterday) : null;
+                        const highlightSetNow = getJingYestHighlightSetForDate(yesterday);
+                        push('　　现在重新计算 ' + yesterday + ' 的"竞/昨"高光集合（过滤前Tier0 → 过滤后digitGap<=1）：');
+                        push('　　　过滤前(Tier0) 共 ' + (rawMap ? rawMap.size : 0) + ' 只');
+                        if (rawMap && rawMap.size > 0) {
+                            rawMap.forEach(function(info, name) {
+                                push('　　　　' + name + ' | diff=' + (info && info.diff) + ' | digitGap=' + (info && info.digitGap));
+                            });
+                        }
+                        push('　　　过滤后(digitGap<=1，即观察组应继承的名单) 共 ' + (highlightSetNow ? highlightSetNow.size : 0) + ' 只：' +
+                             (highlightSetNow && highlightSetNow.size > 0 ? [...highlightSetNow].join('、') : '(无)'));
+
+                        // 对照：标记为obsAutoAdded的股票，哪些不在"现在重算"的高光集合里（说明是历史遗留/口径变化）
+                        const markedNames = new Set(obsMarkedRows.map(function(s) { return s.stock.trim(); }));
+                        const staleMarked = [...markedNames].filter(function(n) { return !highlightSetNow || !highlightSetNow.has(n); });
+                        const missingFromMarked = highlightSetNow ? [...highlightSetNow].filter(function(n) { return !markedNames.has(n); }) : [];
+                        push('　　带标记但不在"现在重算"高光集合里的股票（' + staleMarked.length + ' 只，疑似历史遗留/口径已变化）：' +
+                             (staleMarked.length > 0 ? staleMarked.join('、') : '(无)'));
+                        push('　　在"现在重算"高光集合里但今日列表未标记obsAutoAdded的股票（' + missingFromMarked.length + ' 只，可能是人工已加入或其它路径加入）：' +
+                             (missingFromMarked.length > 0 ? missingFromMarked.join('、') : '(无)'));
+                    } else {
+                        push('　　（无法重新计算：yesterday 未确定，或 getJingYestHighlightSetForDate 不存在）');
+                    }
+
+                    // localStorage 里记录的 obsAutoAdded_今日 集合，与内存里实际带标记的股票对照
+                    try {
+                        const lsObsAutoAdded = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + today) || '[]'));
+                        push('　　localStorage[obsAutoAdded_' + today + '] 记录：' + lsObsAutoAdded.size + ' 只：' +
+                             (lsObsAutoAdded.size > 0 ? [...lsObsAutoAdded].join('、') : '(无)'));
+                        push('　　localStorage[obsEnsured_' + today + ']（是否已跑过防重复标记）：' + (localStorage.getItem('obsEnsured_' + today) || '(未设置)'));
+                    } catch (e) {
+                        push('　　读取 localStorage obsAutoAdded 记录失败：' + e.message);
+                    }
+                } catch (e) {
+                    push('　　观察组自动继承排查异常：' + e.message);
+                }
+                push('');
+
                 // ---- 对比日列表体检 ----
                 // 对比日同时展示正式列表和全部数据（含影子记录），两个语义都有用
                 const yesterdayListRaw = yesterday ? (auctionData[yesterday] || []).filter(function(s) { return s && s.stock; }) : [];
