@@ -16055,19 +16055,30 @@
                 // 一起带上——这正是原始 bug（先点猫抓再点同花顺互相覆盖）的触发点。
                 const todayPatches = [];
                 const yesterdayPatches = [];
+                // 🔍[调试-诊断报告用] 记录本次猫抓请求，"今天"这个日期下，每只股票命中/未命中的原始情况，
+                // 用于事后在诊断报告里还原"这次点击猫抓时，接口到底有没有给涨幅"，
+                // 不必再靠翻云端历史记录推理。只记录 fillPct=true（即今天）那一轮。
+                const todayFillLog = [];
 
                 const fillVolume = function(list, dateStr, overwrite, fillPct, patchesArr) {
                     const ymd = dateStr.replace(/-/g, '');
                     const dayData = aucByDate[ymd] || {};
                     list.forEach(function(s) {
                         if (!s || !s.stock) return;
-                        if (!overwrite && getNumericVolume(s.volume) !== null) return; // 补全模式：已有值跳过
+                        if (!overwrite && getNumericVolume(s.volume) !== null) {
+                            if (fillPct) {
+                                todayFillLog.push({ stock: s.stock, code: (s.code || scMap[s.stock.trim()] || '').trim(),
+                                    skippedReason: '补全模式-已有volume跳过', hadDayData: !!dayData[(s.code || scMap[s.stock.trim()] || '').trim()] });
+                            }
+                            return; // 补全模式：已有值跳过
+                        }
                         const code = (s.code || scMap[s.stock.trim()] || '').trim();
                         if (code && dayData[code] != null) {
                             s.volume = String(dayData[code].vol);
                             // patch 只携带本次改动的字段：volume 一定有
                             const patch = { stock: s.stock, volume: s.volume };
                             // 只填今天的竞价涨幅；昨日不填涨幅（fillPct=false）
+                            let pctWritten = false;
                             if (fillPct && dayData[code].pct) {
                                 if (overwrite || !((s.changePct || '').trim())) {
                                     s.changePct = dayData[code].pct;
@@ -16075,12 +16086,28 @@
                                     // 今天才顺手把 change_pct/note 也写进 patch（猫抓今天确实改了这两个字段）
                                     patch.change_pct = s.changePct;
                                     patch.note = s.note;
+                                    pctWritten = true;
                                 }
+                            }
+                            if (fillPct) {
+                                todayFillLog.push({
+                                    stock: s.stock, code: code,
+                                    hadDayData: true,
+                                    apiReturnedPct: dayData[code].pct || null, // 猫抓这次原始返回的 pct（转换后），null=接口没给这个字段
+                                    apiReturnedVol: dayData[code].vol,
+                                    pctWrittenThisTime: pctWritten,
+                                    changePctAfter: s.changePct || '',
+                                    reasonNotWritten: pctWritten ? '' : (!dayData[code].pct ? '接口未返回auc_pct_chg' : '已有值且非覆盖模式，未覆盖')
+                                });
                             }
                             patchesArr.push(patch);
                             filledCount++;
                         } else {
                             skippedCount++; // 覆盖模式下也会走到这里：无新数据，保留原值
+                            if (fillPct) {
+                                todayFillLog.push({ stock: s.stock, code: code, hadDayData: false,
+                                    reasonNotWritten: code ? '接口返回结果里完全没有这只股票的数据(symbol未匹配)' : '缺代码映射，无法匹配' });
+                            }
                         }
                     });
                 };
@@ -16088,6 +16115,26 @@
                 if (needToday) {
                     fillVolume(todayList, today, !!opts.overwriteToday, true, todayPatches);   // 今天：填 volume + 涨幅
                     auctionData[today] = todayList;
+                    // 🔍[调试-诊断报告用] 把本次猫抓请求的原始返回 + 逐只处理结果快照存入 localStorage，
+                    // 供"运行诊断"读取展示。只保留最近一次，避免占用过多存储。
+                    try {
+                        localStorage.setItem('lastNumcatFillDebug_' + today, JSON.stringify({
+                            requestedAt: new Date().toISOString(),
+                            today: today,
+                            overwrite: !!opts.overwriteToday,
+                            requestedCodesCount: allCodesSet.size,
+                            apiRawItemsCount: items.length,
+                            apiRawItemsForToday: items.filter(function(row) {
+                                return String(row[tradedateIdx] || '').trim() === todayYMD;
+                            }).map(function(row) {
+                                return { symbol: row[symbolIdx], name: row[1], tradedate: row[tradedateIdx],
+                                    auc_vol: row[aucVolIdx], auc_pct_chg: (aucPctIdx >= 0 ? row[aucPctIdx] : undefined) };
+                            }),
+                            fillLog: todayFillLog
+                        }));
+                    } catch (e) {
+                        console.error('保存 lastNumcatFillDebug 失败:', e);
+                    }
                 }
                 // 同「两全/对比日昨成交量」的修复：needYesterday 场景下 yesterdayList 是
                 // buildYesterdayListFromToday 用 todayList 名单造出来的，不能直接覆盖 auctionData[yesterday]，
@@ -16289,6 +16336,52 @@
                     }
                 } catch (e) {
                     push('　　排查异常：' + (e && e.message ? e.message : String(e)));
+                }
+                push('');
+
+                // ---- 🔍[调试] 最近一次"猫抓补全"请求的原始返回快照 ----
+                // 需要先点一次"猫抓补全"按钮，再点"运行诊断"，此段才有数据。
+                // 直接展示猫抓接口这次对每只股票原始返回了什么（auc_pct_chg 有没有给），
+                // 不再需要事后翻云端历史记录推理，一次性坐实涨幅缺失的真正原因。
+                push('【最近一次猫抓补全请求快照（lastNumcatFillDebug）】');
+                try {
+                    const rawDebug = localStorage.getItem('lastNumcatFillDebug_' + today);
+                    if (!rawDebug) {
+                        push('　　（无记录：本次诊断前尚未点击过"猫抓补全"按钮，或该功能是刚更新的旧版本未生成记录）');
+                    } else {
+                        const dbg = JSON.parse(rawDebug);
+                        push('　　请求时间：' + dbg.requestedAt);
+                        push('　　overwrite模式：' + dbg.overwrite);
+                        push('　　请求的股票代码总数：' + dbg.requestedCodesCount);
+                        push('　　接口返回的原始记录总数（含昨日）：' + dbg.apiRawItemsCount);
+                        push('　　接口返回中"今天"这个交易日的原始记录 ' + (dbg.apiRawItemsForToday || []).length + ' 条：');
+                        (dbg.apiRawItemsForToday || []).forEach(function(r) {
+                            push('　　　[原始] symbol=' + r.symbol + ' name=' + r.name + ' tradedate=' + r.tradedate +
+                                 ' auc_vol=' + r.auc_vol + ' auc_pct_chg=' + (r.auc_pct_chg === undefined ? '(字段不存在)' : (r.auc_pct_chg === null || r.auc_pct_chg === '' ? '(空值)' : r.auc_pct_chg)));
+                        });
+                        push('　　逐只处理结果（fillLog，仅"今天"这一轮，共 ' + (dbg.fillLog || []).length + ' 条）：');
+                        (dbg.fillLog || []).forEach(function(f) {
+                            if (f.hadDayData === false) {
+                                push('　　　✗ ' + f.stock + '(' + (f.code || '无代码') + ') | 未命中接口返回 | 原因：' + f.reasonNotWritten);
+                            } else if (f.skippedReason) {
+                                push('　　　- ' + f.stock + '(' + f.code + ') | 跳过：' + f.skippedReason + ' | 接口本次是否有这只股票的数据：' + f.hadDayData);
+                            } else {
+                                push('　　　' + (f.pctWrittenThisTime ? '✓' : '△') + ' ' + f.stock + '(' + f.code + ') | 接口返回auc_pct_chg=' +
+                                     (f.apiReturnedPct === null ? '(空)' : f.apiReturnedPct) + ' | 接口返回auc_vol=' + f.apiReturnedVol +
+                                     ' | 本次是否写入涨幅=' + f.pctWrittenThisTime + ' | 写入后changePct=' + (f.changePctAfter || '(空)') +
+                                     (f.reasonNotWritten ? ' | 未写入原因：' + f.reasonNotWritten : ''));
+                            }
+                        });
+                        // 专项对照：把这份快照里"接口未返回auc_pct_chg"的股票单独列出来，
+                        // 直接对应截图里"看起来凭空多出来"的那几只，一眼就能看出是否是同一批。
+                        const noApiPct = (dbg.fillLog || []).filter(function(f) { return f.hadDayData === true && !f.apiReturnedPct; });
+                        push('　　★ 本次请求中，接口命中了股票但未返回auc_pct_chg（即涨幅字段本次确实是接口没给）的股票共 ' + noApiPct.length + ' 只：');
+                        if (noApiPct.length > 0) {
+                            push('　　　' + noApiPct.map(function(f) { return f.stock; }).join('、'));
+                        }
+                    }
+                } catch (e) {
+                    push('　　读取猫抓请求快照异常：' + (e && e.message ? e.message : String(e)));
                 }
                 push('');
 
