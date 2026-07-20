@@ -16274,111 +16274,255 @@
             }
             _regularIndices.forEach((i) => { html += _renderAuctionItem(i, _displayNum++); });
             
+            // ===== 增量更新判断 =====
+            // 背景：早盘竞价期间后台数据每隔1~2秒就可能刷新一次（Realtime推送），若每次都用
+            // innerHTML 整体重建 DOM，会导致：① 所有节点重新创建、事件重新绑定，用户点击
+            // 展开的面板要靠 restoreExpandedAuctionTrendPanels() 重新展开，视觉上有明显闪烁/
+            // 卡顿感；② 若点击恰好落在重建的时间窗口，体验上感知不到点击生效，用户会误以为
+            // 没点中而再点一次，反而把刚展开的面板收起。
+            // 大多数刷新场景下，股票列表的"成员和顺序"并没有变化，只是竞价量/成交量/占比等
+            // 数字变了——这种情况下没必要重建整个容器，只需要逐行替换单行内容即可：
+            // 复用同一个 _renderAuctionItem 生成该行最新 HTML，用 outerHTML 局部替换，
+            // 不影响其他行的 DOM 节点、事件监听器；若该行原本展开着趋势面板，替换后立即
+            // 用原逻辑把面板内容重新填回（对用户来说只是同一张图重绘一次，无感知差异），
+            // 不需要经过"重新展开"的整体流程。
+            // 签名 = 观察组+常规组的展示顺序拼接股票名，能反映"这次渲染和上次相比，成员和顺序是否一致"。
+            const _fullOrder = _obsIndices.concat(_regularIndices);
+            const _renderSignature = _fullOrder
+                .map(i => (auctionList[i] && auctionList[i].stock) ? auctionList[i].stock.trim() : '')
+                .join('|');
+            const _prevSignature = auctionContent.dataset.rowSignature;
+            // 全部展开开关打开时不走增量路径：增量逻辑只负责保留"已展开"的行，不会主动展开
+            // 因开关状态变化而应该展开的新行，直接整体重建更简单可靠
+            const _expandAllOn = document.getElementById(_p + 'ExpandAllToggle')?.checked;
+            const _canPatchInPlace = !_expandAllOn && (_prevSignature === _renderSignature) && auctionContent.querySelector('.auction-item');
+
+            if (_canPatchInPlace) {
+                let _di = 1;
+                _fullOrder.forEach((i) => {
+                    const rowEl = auctionContent.querySelector('.auction-item[data-index="' + i + '"]');
+                    const panelEl = document.getElementById(_p + 'TrendPanel-' + i);
+                    const _wasOpen = panelEl && panelEl.style.display !== 'none' && panelEl.innerHTML !== '';
+                    const _itemHtml = _renderAuctionItem(i, _di++);
+                    if (rowEl) {
+                        // _renderAuctionItem 返回"行 + 紧跟的面板占位"两段，用一个临时容器解析后只取第一个元素（行本身）
+                        // 替换，面板节点保持原样不动，避免打断可能存在的展开内容
+                        const _tmp = document.createElement('div');
+                        _tmp.innerHTML = _itemHtml;
+                        const _newRowEl = _tmp.querySelector('.auction-item');
+                        if (_newRowEl) {
+                            rowEl.replaceWith(_newRowEl);
+                            // 复用统一的事件绑定函数（占比/成交量长按/序号/股票名），
+                            // 只对这一行新节点绑定，不影响其他未被替换的行
+                            _bindAuctionRowEvents(_newRowEl);
+                        }
+                    }
+                    if (_wasOpen) {
+                        // 该行原本展开着，行节点已被替换，其后的面板节点本身没变，只需要
+                        // 重新填回面板内容（不走"点击/toggle"逻辑，用户不会感知到差异）
+                        expandAuctionTrendPanel(i);
+                    }
+                });
+                _dbgLog('[PATCH] 命中增量更新路径，跳过整体重建，逐行局部替换（' + _fullOrder.length + '行）');
+                renderAuctionPage2(dataSource);
+                renderAuctionPage3(dataSource);
+                renderAuctionStatsBoard(dataSource);
+                initAuctionSwipe();
+                window.scrollTo(0, _savedScrollY);
+                return;
+            }
+            auctionContent.dataset.rowSignature = _renderSignature;
+
             auctionContent.innerHTML = html;
             
-            // 绑定点击占比事件
-            document.querySelectorAll('.auction-ratio-clickable').forEach(el => {
-                el.addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    const idx = parseInt(this.dataset.index);
-                    toggleAuctionRowSelect(idx);
-                });
-            });
-            
-            // 绑定长按昨日成交量事件
-            document.querySelectorAll('.auction-yest-note').forEach(el => {
-                (function(element) {
-                    let pressTimer;
-                    let isLongPress = false;
-                    let isMoved = false;
-                    let lastTapTime = 0;
-                    
-                    const startHandler = function(e) {
-                        // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
-                        if (e.touches && e.touches.length > 1) {
-                            clearTimeout(pressTimer);
-                            return;
-                        }
-                        // 右键按下不启动长按计时器，避免和右键单击打开编辑弹窗冲突
-                        if (e.button === 2) {
-                            return;
-                        }
-                        isLongPress = false;
-                        isMoved = false;
-                        pressTimer = setTimeout(() => {
-                            isLongPress = true;
-                            const idx = parseInt(element.dataset.index);
-                            showAuctionNoteInput(idx, element);
-                        }, 500);
-                    };
-                    
-                    const moveHandler = function(e) {
-                        isMoved = true;
-                        clearTimeout(pressTimer);
-                    };
-                    
-                    const endHandler = function(e) {
-                        clearTimeout(pressTimer);
-                    };
-                    
-                    const cancelHandler = function(e) {
-                        clearTimeout(pressTimer);
-                    };
-                    
-                    element.addEventListener('mousedown', startHandler);
-                    element.addEventListener('mouseup', endHandler);
-                    element.addEventListener('mouseleave', cancelHandler);
-                    element.addEventListener('touchstart', startHandler, { passive: true });
-                    element.addEventListener('touchmove', moveHandler, { passive: true });
-                    element.addEventListener('touchend', endHandler);
-                    element.addEventListener('touchcancel', cancelHandler);
-                    element.addEventListener('click', function(e) {
-                        e.preventDefault();
+            // ===== 逐行事件绑定：占比点击 / 成交量长按 / 序号点击展开 / 股票名点击跳转 =====
+            // 抽成独立函数是为了让"整体重建路径"和"增量更新路径"（见下方 _canPatchInPlace 分支）
+            // 都能复用同一套绑定逻辑，避免维护两份容易导致遗漏或不一致。
+            // scopeEl：绑定范围，整体重建时传整个 auctionContent 容器；增量更新时传被替换的单行节点。
+            function _bindAuctionRowEvents(scopeEl) {
+                // 绑定点击占比事件
+                scopeEl.querySelectorAll('.auction-ratio-clickable').forEach(el => {
+                    if (el.dataset.boundRatio === '1') return;
+                    el.dataset.boundRatio = '1';
+                    el.addEventListener('click', function(e) {
                         e.stopPropagation();
-                        if (isLongPress || isMoved) return;
-                        const now = Date.now();
-                        if (now - lastTapTime < 300) return;
-                        lastTapTime = now;
-                        const note = element.dataset.note;
-                        if (note) {
-                            showAuctionNotePopup(element, note);
-                        }
+                        const idx = parseInt(this.dataset.index);
+                        toggleAuctionRowSelect(idx);
                     });
-                    // 右键单击打开编辑弹窗（电脑端鼠标操作）：contextmenu 是独立事件，
-                    // 不会和上面的 click 处理器冲突，比双击更可靠
-                    element.addEventListener('contextmenu', function(e) {
-                        e.preventDefault();
-                        clearTimeout(pressTimer);
-                        if (dataSource === 'hot') { openHotEdit(); } else { openAuctionEdit(); }
-                    });
-                })(el);
-            });
-            
-            // 绑定点击序号展开/收起趋势图
-            // 【调试】① 用 document.querySelectorAll 是全局查询，如果"早盘竞价"和"热门股票"两个tab的DOM
-            //         都存在于页面中（只是 display:none 切换），这里可能会绑定到不可见tab的节点上，
-            //         或者对同一批节点重复统计——先记录本次实际绑定的节点数量，与 auctionList.length 比对。
-            const _bindStartTs = performance.now();
-            const _triggerNodes = document.querySelectorAll('.auction-trend-trigger');
-            _dbgLog('[BIND] 准备绑定序号点击事件，找到 .auction-trend-trigger 节点数=' + _triggerNodes.length + '（本次列表股票数=' + auctionList.length + '，dataSource=' + dataSource + '）');
-            _triggerNodes.forEach(el => {
-                el.style.cursor = 'pointer';
-                el.addEventListener('click', function(e) {
-                    // 【调试】② 点击真正触发时记录：点击时刻、目标index、事件绑定时该按钮所在的渲染批次号、
-                    //         以及点击瞬间该节点是否仍然挂载在文档树上（isConnected），
-                    //         如果点击时 isConnected=false，说明这个节点已经被上一次/下一次 renderAuction 的
-                    //         innerHTML 重建操作替换掉了，点击等于打在了"幽灵节点"上，UI 上会显示灰色(active态)
-                    //         但真正绑定在新节点上的监听器根本没被触发——这正是"点了变灰但不展开"的典型成因。
-                    e.stopPropagation();
-                    const idx = parseInt(this.dataset.index);
-                    const _clickTs = performance.now();
-                    const _stockName = this.closest('.auction-item') ? this.closest('.auction-item').dataset.stock : '?';
-                    _dbgLog('[CLICK] 点击序号 index=' + idx + ' 股票=' + _stockName + ' | 节点isConnected=' + this.isConnected + ' | 距本节点绑定耗时点=' + Math.round(_clickTs - _bindStartTs) + 'ms | 距上次renderAuction=' + (window._lastRenderAuctionAt ? Math.round(_clickTs - window._lastRenderAuctionAt) : -1) + 'ms');
-                    toggleAuctionTrendPanel(idx);
                 });
-            });
-            _dbgLog('[BIND] 序号点击事件绑定完成，耗时=' + Math.round(performance.now() - _bindStartTs) + 'ms');
-            
+
+                // 绑定长按昨日成交量事件
+                scopeEl.querySelectorAll('.auction-yest-note').forEach(el => {
+                    if (el.dataset.boundYest === '1') return;
+                    el.dataset.boundYest = '1';
+                    (function(element) {
+                        let pressTimer;
+                        let isLongPress = false;
+                        let isMoved = false;
+                        let lastTapTime = 0;
+
+                        const startHandler = function(e) {
+                            // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
+                            if (e.touches && e.touches.length > 1) {
+                                clearTimeout(pressTimer);
+                                return;
+                            }
+                            // 右键按下不启动长按计时器，避免和右键单击打开编辑弹窗冲突
+                            if (e.button === 2) {
+                                return;
+                            }
+                            isLongPress = false;
+                            isMoved = false;
+                            pressTimer = setTimeout(() => {
+                                isLongPress = true;
+                                const idx = parseInt(element.dataset.index);
+                                showAuctionNoteInput(idx, element);
+                            }, 500);
+                        };
+
+                        const moveHandler = function(e) {
+                            isMoved = true;
+                            clearTimeout(pressTimer);
+                        };
+
+                        const endHandler = function(e) {
+                            clearTimeout(pressTimer);
+                        };
+
+                        const cancelHandler = function(e) {
+                            clearTimeout(pressTimer);
+                        };
+
+                        element.addEventListener('mousedown', startHandler);
+                        element.addEventListener('mouseup', endHandler);
+                        element.addEventListener('mouseleave', cancelHandler);
+                        element.addEventListener('touchstart', startHandler, { passive: true });
+                        element.addEventListener('touchmove', moveHandler, { passive: true });
+                        element.addEventListener('touchend', endHandler);
+                        element.addEventListener('touchcancel', cancelHandler);
+                        element.addEventListener('click', function(e) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (isLongPress || isMoved) return;
+                            const now = Date.now();
+                            if (now - lastTapTime < 300) return;
+                            lastTapTime = now;
+                            const note = element.dataset.note;
+                            if (note) {
+                                showAuctionNotePopup(element, note);
+                            }
+                        });
+                        // 右键单击打开编辑弹窗（电脑端鼠标操作）：contextmenu 是独立事件，
+                        // 不会和上面的 click 处理器冲突，比双击更可靠
+                        element.addEventListener('contextmenu', function(e) {
+                            e.preventDefault();
+                            clearTimeout(pressTimer);
+                            if (dataSource === 'hot') { openHotEdit(); } else { openAuctionEdit(); }
+                        });
+                    })(el);
+                });
+
+                // 绑定点击序号展开/收起趋势图
+                const _bindStartTs = performance.now();
+                const _triggerNodes = scopeEl.querySelectorAll('.auction-trend-trigger');
+                if (_triggerNodes.length > 0) {
+                    _dbgLog('[BIND] 绑定行内事件，本批 .auction-trend-trigger 节点数=' + _triggerNodes.length);
+                }
+                _triggerNodes.forEach(el => {
+                    if (el.dataset.boundTrigger === '1') return;
+                    el.dataset.boundTrigger = '1';
+                    el.style.cursor = 'pointer';
+                    el.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        const idx = parseInt(this.dataset.index);
+                        const _clickTs = performance.now();
+                        const _stockName = this.closest('.auction-item') ? this.closest('.auction-item').dataset.stock : '?';
+                        _dbgLog('[CLICK] 点击序号 index=' + idx + ' 股票=' + _stockName + ' | 节点isConnected=' + this.isConnected + ' | 距本节点绑定耗时点=' + Math.round(_clickTs - _bindStartTs) + 'ms | 距上次renderAuction=' + (window._lastRenderAuctionAt ? Math.round(_clickTs - window._lastRenderAuctionAt) : -1) + 'ms');
+                        toggleAuctionTrendPanel(idx);
+                    });
+                });
+
+                // 绑定股票名称点击弹出注释 + 长按显示买入提示 + 单击跳转到第二页
+                scopeEl.querySelectorAll('.auction-stock-name').forEach(el => {
+                    if (el.dataset.boundName === '1') return;
+                    el.dataset.boundName = '1';
+                    (function(element) {
+                        let pressTimer;
+                        let isMoved = false;
+                        let isLongPress = false;
+
+                        element.style.cursor = 'pointer';
+
+                        element.addEventListener('click', function(e) {
+                            if (!isLongPress && !isMoved) {
+                                // 单击跳转到第二页
+                                const stockName = element.textContent.trim();
+                                if (stockName && stockName !== '-') {
+                                    e.stopPropagation();
+                                    jumpToAuctionPage2(stockName);
+                                }
+                            }
+                        });
+
+                        // 双击显示注释
+                        element.addEventListener('dblclick', function(e) {
+                            e.stopPropagation();
+                            const note = element.dataset.note;
+                            if (note) {
+                                const row = element.closest('.auction-item');
+                                const yestEl = row ? row.querySelector('.auction-yest-note') : null;
+                                if (yestEl) {
+                                    showAuctionNotePopup(yestEl, note);
+                                }
+                            }
+                        });
+
+                        const startHandler = function(e) {
+                            // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
+                            if (e.touches && e.touches.length > 1) {
+                                clearTimeout(pressTimer);
+                                return;
+                            }
+                            isMoved = false;
+                            isLongPress = false;
+                            pressTimer = setTimeout(() => {
+                                isLongPress = true;
+                                const stockName = element.textContent.trim();
+                                if (stockName && stockName !== '-') {
+                                    showAuctionBuyPrompt(stockName);
+                                }
+                            }, 500);
+                        };
+
+                        const moveHandler = function(e) {
+                            isMoved = true;
+                            clearTimeout(pressTimer);
+                        };
+
+                        const endHandler = function(e) {
+                            clearTimeout(pressTimer);
+                        };
+
+                        const cancelHandler = function(e) {
+                            clearTimeout(pressTimer);
+                        };
+
+                        element.addEventListener('mousedown', startHandler);
+                        element.addEventListener('mouseup', endHandler);
+                        element.addEventListener('mouseleave', cancelHandler);
+                        element.addEventListener('touchstart', startHandler, { passive: true });
+                        element.addEventListener('touchmove', moveHandler, { passive: true });
+                        element.addEventListener('touchend', endHandler);
+                        element.addEventListener('touchcancel', cancelHandler);
+                        element.addEventListener('contextmenu', function(e) {
+                            e.preventDefault();
+                        });
+                    })(el);
+                });
+            }
+
+            _bindAuctionRowEvents(auctionContent);
+
             // 若"全部展开"开关已打开，渲染完成后自动展开所有趋势面板
             // 注意：必须用 _p 前缀动态取对应分组的开关（auctionExpandAllToggle / hotExpandAllToggle），
             // 不能硬编码写死 auctionExpandAllToggle —— 否则热门股票tap渲染时会错误地读取
@@ -16390,82 +16534,6 @@
                 // 否则恢复用户此前手动展开过的个别股票的趋势面板（避免刷新/轮询导致展开状态丢失）
                 restoreExpandedAuctionTrendPanels();
             }
-            
-            // 绑定股票名称点击弹出注释 + 长按显示买入提示 + 单击跳转到第二页
-            document.querySelectorAll('.auction-stock-name').forEach(el => {
-                (function(element) {
-                    let pressTimer;
-                    let isMoved = false;
-                    let isLongPress = false;
-                    
-                    element.style.cursor = 'pointer';
-                    
-                    element.addEventListener('click', function(e) {
-                        if (!isLongPress && !isMoved) {
-                            // 单击跳转到第二页
-                            const stockName = element.textContent.trim();
-                            if (stockName && stockName !== '-') {
-                                e.stopPropagation();
-                                jumpToAuctionPage2(stockName);
-                            }
-                        }
-                    });
-                    
-                    // 双击显示注释
-                    element.addEventListener('dblclick', function(e) {
-                        e.stopPropagation();
-                        const note = element.dataset.note;
-                        if (note) {
-                            const row = element.closest('.auction-item');
-                            const yestEl = row ? row.querySelector('.auction-yest-note') : null;
-                            if (yestEl) {
-                                showAuctionNotePopup(yestEl, note);
-                            }
-                        }
-                    });
-                    
-                    const startHandler = function(e) {
-                        // 多指触摸（如三指下滑截图手势）不触发长按，直接跳过
-                        if (e.touches && e.touches.length > 1) {
-                            clearTimeout(pressTimer);
-                            return;
-                        }
-                        isMoved = false;
-                        isLongPress = false;
-                        pressTimer = setTimeout(() => {
-                            isLongPress = true;
-                            const stockName = element.textContent.trim();
-                            if (stockName && stockName !== '-') {
-                                showAuctionBuyPrompt(stockName);
-                            }
-                        }, 500);
-                    };
-                    
-                    const moveHandler = function(e) {
-                        isMoved = true;
-                        clearTimeout(pressTimer);
-                    };
-                    
-                    const endHandler = function(e) {
-                        clearTimeout(pressTimer);
-                    };
-                    
-                    const cancelHandler = function(e) {
-                        clearTimeout(pressTimer);
-                    };
-                    
-                    element.addEventListener('mousedown', startHandler);
-                    element.addEventListener('mouseup', endHandler);
-                    element.addEventListener('mouseleave', cancelHandler);
-                    element.addEventListener('touchstart', startHandler, { passive: true });
-                    element.addEventListener('touchmove', moveHandler, { passive: true });
-                    element.addEventListener('touchend', endHandler);
-                    element.addEventListener('touchcancel', cancelHandler);
-                    element.addEventListener('contextmenu', function(e) {
-                        e.preventDefault();
-                    });
-                })(el);
-            });
             
             // 绑定表头点击事件（显示/隐藏搜索框）- 使用事件委托避免累积
             const headerRow = document.getElementById(_p + 'HeaderRow');
