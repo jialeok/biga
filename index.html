@@ -11885,6 +11885,64 @@
             return { raw: raw.length, filtered: filtered.length, shadow: shadowRows.length, undefinedField: undefinedRows.length };
         };
 
+        // 🔍[调试] 手动排查入口，控制台执行 debugObsAutoAdded('2026-07-20')
+        // 专门回答："当天正式列表里，哪些股票是被 ensureObservationStocks 自动加入的（obsAutoAdded=true）？
+        // 它们是否在 localStorage 的正式名单里？它们是否命中了上一交易日的'竞/昨'高光集合？"
+        window.debugObsAutoAdded = function(date) {
+            date = date || currentDate;
+            const raw = (_auctionMemCache[date] || []);
+            const watchlistRows = raw.filter(function(r) { return r && r.in_watchlist === true; });
+            const obsRows = watchlistRows.filter(function(r) { return r && r.obsAutoAdded === true; });
+            const nonObsRows = watchlistRows.filter(function(r) { return !r || r.obsAutoAdded !== true; });
+
+            // localStorage 里的正式名单（旧存储格式，供对照）
+            let lsStocks = new Set();
+            try {
+                const lsRaw = JSON.parse(localStorage.getItem('stockApp_v42_auction') || '{}');
+                const lsList = (lsRaw[date] || []);
+                lsStocks = new Set(lsList.map(function(s) { return s && s.stock ? s.stock.trim() : ''; }).filter(Boolean));
+            } catch (e) {
+                console.warn('读取 localStorage 正式名单失败:', e.message);
+            }
+
+            // localStorage 里记录的"本函数自动加入"名单
+            const obsAutoAddedLsSet = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]'));
+
+            // 上一交易日"竞/昨"高光集合（obsStocks 的计算口径），重新算一遍核对
+            const prevDay = getPreviousTradingDay(date);
+            const obsStocksNow = prevDay ? getJingYestHighlightSetForDate(prevDay) : new Set();
+
+            console.log('===== debugObsAutoAdded(' + date + ') =====');
+            console.log('云端/内存正式列表(in_watchlist=true)总数: ' + watchlistRows.length);
+            console.log('其中带 obsAutoAdded=true 标记的: ' + obsRows.length);
+            console.log('不带该标记的（人工/其它路径加入）: ' + nonObsRows.length);
+            console.log('localStorage[stockApp_v42_auction][' + date + '] 正式名单数: ' + lsStocks.size);
+            console.log('localStorage[obsAutoAdded_' + date + '] 记录数: ' + obsAutoAddedLsSet.size);
+            console.log('重新计算 prevDay=' + prevDay + ' 的"竞/昨"高光集合，当前共 ' + obsStocksNow.size + ' 只: ' + [...obsStocksNow].join('、'));
+
+            console.log('--- 带 obsAutoAdded=true 标记的股票明细 ---');
+            console.table(obsRows.map(function(r) {
+                const name = r.stock.trim();
+                return {
+                    stock: name,
+                    change_pct: r.change_pct || r.changePct || '(空)',
+                    在localStorage正式名单中: lsStocks.has(name),
+                    在localStorage_obsAutoAdded记录中: obsAutoAddedLsSet.has(name),
+                    命中当前重算的竞昨高光集合: obsStocksNow.has(name)
+                };
+            }));
+
+            return {
+                total: watchlistRows.length,
+                obsAutoAddedCount: obsRows.length,
+                obsAutoAddedNames: obsRows.map(function(r) { return r.stock.trim(); }),
+                lsStockCount: lsStocks.size,
+                lsObsAutoAddedCount: obsAutoAddedLsSet.size,
+                recomputedHighlightCount: obsStocksNow.size,
+                recomputedHighlightNames: [...obsStocksNow]
+            };
+        };
+
         function buildTopicCache() {
             if (_topicCacheBuilt && _topicCache) return _topicCache;
             _topicCache = {};
@@ -21334,15 +21392,37 @@
         function ensureObservationStocks(date) {
             if (!date) return;
             // 防重复：每日期只执行一次
-            if (localStorage.getItem('obsEnsured_' + date) === '1') return;
+            if (localStorage.getItem('obsEnsured_' + date) === '1') {
+                console.warn('[调试-ensureObservationStocks] date=' + date + ' | 已跑过一次（obsEnsured_' + date + '=1），本次直接return，不会新增任何股票。若怀疑本次异常是由此函数产生，请检查该标记是"什么时候"被设置为1的（有没有可能是刷新页面/多tab导致重复触发后又被跳过，实际写入发生在你没注意到的更早一次）。');
+                return;
+            }
 
             const prevDay = getPreviousTradingDay(date);
+            console.warn('[调试-ensureObservationStocks] date=' + date + ' | prevDay(上一交易日)=' + prevDay);
             if (!prevDay) return;
 
             // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
             const obsStocks = getJingYestHighlightSetForDate(prevDay);
+            // 🔍[调试] 把 getJingYestHighlightSetForDate 的返回集合完整打印出来，
+            // 同时单独调用 getJingYestStocksForDate 拿到过滤前的原始 Tier0 结果，
+            // 对比"过滤前有多少只、过滤后（digitGap<=1）剩多少只"，确认高光口径本身算出来的是不是 4 只。
+            (function() {
+                var rawMap = (typeof getJingYestStocksForDate === 'function') ? getJingYestStocksForDate(prevDay) : null;
+                var rawList = [];
+                if (rawMap) {
+                    rawMap.forEach(function(info, name) {
+                        rawList.push(name + '(diff=' + (info && info.diff) + ',digitGap=' + (info && info.digitGap) + ')');
+                    });
+                }
+                console.warn('[调试-ensureObservationStocks] date=' + date + ' prevDay=' + prevDay +
+                    ' | getJingYestStocksForDate 过滤前(Tier0) 共 ' + (rawMap ? rawMap.size : 'null') + ' 只: ' + rawList.join('、'));
+                console.warn('[调试-ensureObservationStocks] date=' + date + ' prevDay=' + prevDay +
+                    ' | getJingYestHighlightSetForDate 过滤后(digitGap<=1，即 obsStocks) 共 ' +
+                    (obsStocks ? obsStocks.size : 'null') + ' 只: ' + (obsStocks ? [...obsStocks].join('、') : '(无)'));
+            })();
             if (!obsStocks || obsStocks.size === 0) {
                 // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionMemCache 会有值）
+                console.warn('[调试-ensureObservationStocks] date=' + date + ' | obsStocks 为空，本次不新增，直接return');
                 return;
             }
 
@@ -21350,12 +21430,18 @@
             const auctionData = getAuctionData();
             const dayList = auctionData[date] || [];
             const existingNames = new Set(dayList.map(function(s) { return s.stock ? s.stock.trim() : ''; }));
+            console.warn('[调试-ensureObservationStocks] date=' + date + ' | 执行前 dayList 共 ' + dayList.length +
+                ' 行，其中 in_watchlist=true 的 existingNames 共 ' + existingNames.size + ' 个: ' + [...existingNames].join('、'));
 
             // 已自动添加的股票名集合
             var autoAdded = JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]');
             var autoAddedSet = new Set(autoAdded);
+            console.warn('[调试-ensureObservationStocks] date=' + date + ' | localStorage 中已记录的 obsAutoAdded_' + date + ' 共 ' +
+                autoAddedSet.size + ' 个: ' + [...autoAddedSet].join('、'));
 
             var hasNew = false;
+            var newlyAddedThisRun = [];
+            var skippedAlreadyExists = [];
             obsStocks.forEach(function(name) {
                 if (!existingNames.has(name)) {
                     // 不在当日列表中 → 自动添加
@@ -21364,14 +21450,21 @@
                     dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true });
                     autoAddedSet.add(name);
                     hasNew = true;
+                    newlyAddedThisRun.push(name);
+                } else {
+                    skippedAlreadyExists.push(name);
                 }
             });
+            console.warn('[调试-ensureObservationStocks] date=' + date +
+                ' | 本次实际新增 ' + newlyAddedThisRun.length + ' 只: ' + newlyAddedThisRun.join('、') +
+                ' | 因已在列表中而跳过 ' + skippedAlreadyExists.length + ' 只: ' + skippedAlreadyExists.join('、'));
 
             if (hasNew) {
                 auctionData[date] = dayList;
                 saveModule('auction');
                 markAuctionDirty(date);
                 scheduleCloudPush();
+                console.warn('[调试-ensureObservationStocks] date=' + date + ' | 已写入 auctionData[' + date + ']，长度变为 ' + dayList.length + '，并已调用 saveModule/markAuctionDirty/scheduleCloudPush');
             }
 
             // 保存 autoAdded 集合（即使没有新增，也要保存空集合以区分 * 标记）
