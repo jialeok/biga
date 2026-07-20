@@ -13606,8 +13606,16 @@
             }
         }
 
-        // ---------- 同花顺：当天昨日成交量（单独调 yesterday 单天，只填 today.yestVolume） ----------
-        async function fillTodayYesterdayVolumeFromThs(btn) {
+        // ---------- 同花顺：当天昨日成交量（单独调 yesterday 单天，只填 today.yestVolume；弹窗选择补全/覆盖） ----------
+        // 早盘竞价 tab 专属实现：只读写 auctionData / thsApiStatus，与热门股票 tab 的
+        // fillHotTodayYesterdayVolumeFromThs 完全独立，不共用任何业务函数或状态。
+        function fillTodayYesterdayVolumeFromThs(btn) {
+            showNumcatChoiceModal('当天昨日成交量模式', function(overwrite) {
+                _fillTodayYesterdayVolumeFromThsImpl(btn, overwrite);
+            });
+        }
+
+        async function _fillTodayYesterdayVolumeFromThsImpl(btn, overwrite) {
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -13641,7 +13649,7 @@
                 let filled = 0, skipped = 0;
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (getNumericVolume(s.yestVolume) !== null) return; // 已有值，跳过
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
@@ -13660,7 +13668,7 @@
                 renderList();
 
                 setApiStatus('thsApiStatus',
-                    '✅ 当天昨日成交量填 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ ' + (overwrite ? '覆盖' : '补全') + ' 当天昨日成交量 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
                 console.error('fillTodayYesterdayVolumeFromThs 失败:', err);
@@ -13672,8 +13680,16 @@
             }
         }
 
-        // ---------- 同花顺：对比日昨成交量（单独调 dayBefore 单天，只填 yesterday.yestVolume） ----------
-        async function fillYesterdayYesterdayVolumeFromThs(btn) {
+        // ---------- 同花顺：对比日昨成交量（单独调 dayBefore 单天，只填 yesterday.yestVolume；弹窗选择补全/覆盖） ----------
+        // 早盘竞价 tab 专属实现：只读写 auctionData / thsApiStatus，与热门股票 tab 的
+        // fillHotYesterdayYesterdayVolumeFromThs 完全独立，不共用任何业务函数或状态。
+        function fillYesterdayYesterdayVolumeFromThs(btn) {
+            showNumcatChoiceModal('对比日昨成交量模式', function(overwrite) {
+                _fillYesterdayYesterdayVolumeFromThsImpl(btn, overwrite);
+            });
+        }
+
+        async function _fillYesterdayYesterdayVolumeFromThsImpl(btn, overwrite) {
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -13711,7 +13727,7 @@
                 let filled = 0, skipped = 0;
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (getNumericVolume(s.yestVolume) !== null) return;
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
@@ -13757,7 +13773,7 @@
                     ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
                     : '';
                 setApiStatus('thsApiStatus',
-                    '✅ 对比日昨成交量填 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）',
+                    '✅ ' + (overwrite ? '覆盖' : '补全') + ' 对比日昨成交量 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）',
                     true);
             } catch (err) {
                 console.error('fillYesterdayYesterdayVolumeFromThs 失败:', err);
