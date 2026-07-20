@@ -8585,14 +8585,43 @@
             }
         }
 
+        // 🔍[调试] 监控名单：这几只股票近期在"早盘竞价"里反复出现"凭空出现在正式列表、
+        // 涨幅字段为空"的现象，怀疑是某条云端写入路径把它们错误标记为 in_watchlist=true。
+        // 只要拉取到这些股票的云端原始行，就把完整字段（含 updated_by/updated_at/obs_auto_added）打印出来，
+        // 用于确定是"谁"、"什么时候"把它们的 in_watchlist 写成了 true。
+        var _WATCHED_SUSPECT_STOCKS = new Set(['华银电力', '中嘉博创', '深南电A', '古井贡酒', '桂冠电力', '金牛化工', '乐山电力', '中曼石油']);
+
         // 拉取某日期的行情数据并合并到本地（只更新行情列，保留本地状态标记）
         async function pullAuctionMarketDataForDate(date) {
             if (!_auctionTableAvailable) return;
             const sb = getSupabase();
             const { data, error } = await sb.from('auction_data')
-                .select('stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed')
+                .select('stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed,updated_at,updated_by,obs_auto_added')
                 .eq('date', date);
             if (error) throw error;
+
+            // 🔍[调试] 打印监控名单中的股票在云端的完整原始行（含 updated_by/updated_at/obs_auto_added），
+            // 帮助确认是谁、什么时候写入/提升了 in_watchlist。
+            (function() {
+                var suspectRows = (data || []).filter(function(row) {
+                    return row && row.stock && _WATCHED_SUSPECT_STOCKS.has(row.stock.trim());
+                });
+                if (suspectRows.length > 0) {
+                    console.warn('[调试-可疑股票云端原始数据] date=' + date + ' | 命中监控名单共 ' + suspectRows.length + ' 只:');
+                    suspectRows.forEach(function(row) {
+                        console.warn('  ' + row.stock + ' | in_watchlist=' + row.in_watchlist +
+                            ' | volume=' + row.volume + ' | yest_volume=' + row.yest_volume +
+                            ' | change_pct=' + row.change_pct + ' | obs_auto_added=' + row.obs_auto_added +
+                            ' | updated_by=' + row.updated_by + ' | updated_at=' + row.updated_at);
+                    });
+                    if (typeof _dbgLog === 'function') {
+                        _dbgLog('[调试-可疑股票云端原始数据] date=' + date + ' 命中' + suspectRows.length + '只: ' +
+                            suspectRows.map(function(r) {
+                                return r.stock + '(in_watchlist=' + r.in_watchlist + ',updated_by=' + r.updated_by + ',updated_at=' + r.updated_at + ',obs_auto_added=' + r.obs_auto_added + ')';
+                            }).join('; '));
+                    }
+                }
+            })();
 
             // 全量快照缓存：包含该日期所有行（in_watchlist true/false），供历史行情查询
             // 阶段四 Bug 6 修复：删除旧的字段级合并逻辑（原本服务于已脱节的 allData.auction），
@@ -9452,10 +9481,25 @@
             const pageSize = 1000;
             while (true) {
                 const { data, error } = await sb.from('auction_data')
-                    .select('date,stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed')
+                    .select('date,stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed,updated_at,updated_by,obs_auto_added')
                     .range(offset, offset + pageSize - 1);
                 if (error) throw error;
                 if (!data || data.length === 0) break;
+                // 🔍[调试] 打印监控名单中的股票在云端的完整原始行（含 updated_by/updated_at/obs_auto_added）
+                (function() {
+                    var suspectRows = data.filter(function(row) {
+                        return row && row.stock && _WATCHED_SUSPECT_STOCKS.has(row.stock.trim());
+                    });
+                    if (suspectRows.length > 0) {
+                        console.warn('[调试-可疑股票云端原始数据/批量拉取pullAuctionFromTable] 命中监控名单共 ' + suspectRows.length + ' 条:');
+                        suspectRows.forEach(function(row) {
+                            console.warn('  date=' + row.date + ' ' + row.stock + ' | in_watchlist=' + row.in_watchlist +
+                                ' | volume=' + row.volume + ' | yest_volume=' + row.yest_volume +
+                                ' | change_pct=' + row.change_pct + ' | obs_auto_added=' + row.obs_auto_added +
+                                ' | updated_by=' + row.updated_by + ' | updated_at=' + row.updated_at);
+                        });
+                    }
+                })();
                 data.forEach(function(row) {
                     // 全量快照缓存：包含所有行（in_watchlist true/false），忠实反映云端真实数据，不做本地合并。
                     // 同时携带 snake_case 和 camelCase 别名（与 pullAuctionMarketDataForDate 对齐）。
@@ -16119,7 +16163,7 @@
         // 与热门股票 tab 的 runHotApiDiagnostics 完全独立，不共用任何函数、
         // 不读写 hotAuctionData / _hotFullRowCache 等热门股票的数据。
         // ================================================================
-        function runAuctionApiDiagnostics() {
+        async function runAuctionApiDiagnostics() {
             const lines = [];
             const push = function(s) { lines.push(s); };
             const now = new Date();
@@ -16310,6 +16354,38 @@
                 push('　　说明：若两次点击补全按钮之间，_justPushedAuction 曾经变回 false 且触发了云端拉取，');
                 push('　　　　 云端当时若还没有另一字段的最新值，理论上会覆盖本地——本次已修复为');
                 push('　　　　「云端有效值才覆盖，否则保留本地」，若仍复现请把本报告完整复制发出。');
+                push('');
+
+                // ---- 可疑股票云端原始数据排查（直接查数据库，不依赖本地缓存）----
+                // 🔍[调试] 针对反复出现"凭空进入正式列表、涨幅为空"的这批股票，直接查询
+                // auction_data 表里它们的完整原始行（含 updated_by/updated_at/obs_auto_added），
+                // 用于确定 in_watchlist=true 是谁、什么时候写入的。
+                push('【可疑股票云端原始数据排查（直接查库）】');
+                try {
+                    const suspectNames = ['华银电力', '中嘉博创', '深南电A', '古井贡酒', '桂冠电力', '金牛化工', '乐山电力', '中曼石油'];
+                    const sb2 = getSupabase();
+                    const { data: suspectData, error: suspectErr } = await sb2.from('auction_data')
+                        .select('date,stock,in_watchlist,volume,yest_volume,change_pct,obs_auto_added,updated_at,updated_by')
+                        .eq('date', today)
+                        .in('stock', suspectNames);
+                    if (suspectErr) {
+                        push('　　查询失败：' + suspectErr.message);
+                    } else if (!suspectData || suspectData.length === 0) {
+                        push('　　未在云端 auction_data 表中查到这些股票（date=' + today + '）的记录。');
+                    } else {
+                        push('　　共查到 ' + suspectData.length + ' 条记录：');
+                        suspectData.forEach(function(row) {
+                            push('　　  ' + row.stock + ' | in_watchlist=' + row.in_watchlist +
+                                 ' | volume=' + row.volume + ' | yest_volume=' + row.yest_volume +
+                                 ' | change_pct=' + (row.change_pct || '(空)') +
+                                 ' | obs_auto_added=' + row.obs_auto_added +
+                                 ' | updated_by=' + row.updated_by +
+                                 ' | updated_at=' + row.updated_at);
+                        });
+                    }
+                } catch (e) {
+                    push('　　排查异常：' + (e && e.message ? e.message : String(e)));
+                }
                 push('');
 
                 push('===== 报告结束 =====');
