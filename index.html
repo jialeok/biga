@@ -8205,7 +8205,18 @@
         let _biddingMemCache = null;
         let _topicCache = null;
         let _topicCacheBuilt = false;
-        let expandedAuctionStocks = new Set(); // 记录当前"早盘竞价"第一页中，用户手动展开的股票（按股票名），用于 renderAuction 重新渲染后恢复展开状态
+        // 记录用户手动展开的股票（按股票名），用于 renderAuction 重新渲染后恢复展开状态。
+        // 按分组（auction / hot）各自独立存储：此前两个tab共用同一个Set，会导致在一个tab
+        // 点开的股票，若在另一个tab恰好同名，切换tab时被莫名展开；且共用同一个"最多记忆8个"
+        // 上限时，在一个tab点得多了还会把另一个tab里已展开的悄悄挤掉——这正是"热门股票tab
+        // 交互感觉不一样/展开状态莫名其妙"的原因。
+        let _expandedAuctionStocksByGroup = { auction: new Set(), hot: new Set() };
+        // 按分组取对应的展开状态 Set；传入 'hot' 得到热门股票分组的，其余（包括 'auction' 或
+        // currentGroup 变量）都得到早盘竞价分组的。
+        function _getExpandedStocksSet(dataSource) {
+            const key = dataSource === 'hot' ? 'hot' : 'auction';
+            return _expandedAuctionStocksByGroup[key];
+        }
 
         // ============================================================
         // Supabase 云同步配置
@@ -19622,8 +19633,9 @@
         // 展开当前列表所有行的趋势面板
         function expandAllAuctionTrendPanels() {
             const auctionList = getTodayGroupList(currentGroup);
+            const _set = _getExpandedStocksSet(currentGroup);
             auctionList.forEach((item, idx) => {
-                if (item && item.stock) expandedAuctionStocks.add(item.stock.trim());
+                if (item && item.stock) _set.add(item.stock.trim());
                 expandAuctionTrendPanel(idx);
             });
         }
@@ -19636,15 +19648,16 @@
                 panel.style.display = 'none';
                 panel.innerHTML = '';
             });
-            expandedAuctionStocks.clear();
+            _getExpandedStocksSet(currentGroup).clear();
         }
 
-        // 根据 expandedAuctionStocks 记录的展开状态，在 renderAuction 重新渲染后恢复各行的趋势面板展开
+        // 根据当前分组的 expandedStocks 记录的展开状态，在 renderAuction 重新渲染后恢复各行的趋势面板展开
         function restoreExpandedAuctionTrendPanels() {
-            if (!expandedAuctionStocks || expandedAuctionStocks.size === 0) return;
+            const _set = _getExpandedStocksSet(currentGroup);
+            if (!_set || _set.size === 0) return;
             const auctionList = getTodayGroupList(currentGroup);
             auctionList.forEach((item, idx) => {
-                if (item && item.stock && expandedAuctionStocks.has(item.stock.trim())) {
+                if (item && item.stock && _set.has(item.stock.trim())) {
                     expandAuctionTrendPanel(idx);
                 }
             });
@@ -20148,24 +20161,25 @@
 
             const isOpen = panel.style.display !== 'none' && panel.innerHTML !== '';
             _dbgLog('[TOGGLE] index=' + index + '→resolvedIndex=' + resolvedIndex + (index !== resolvedIndex ? '（⚠️发生了index错位，说明点击时数据已被重渲染刷新过）' : '') + ' stockKey=' + stockKey + ' 当前面板状态isOpen=' + isOpen + ' | 函数耗时=' + Math.round(performance.now() - _fnStartTs) + 'ms');
+            const _expSet = _getExpandedStocksSet(_tp);
             if (isOpen) {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
-                if (stockKey) expandedAuctionStocks.delete(stockKey);
+                if (stockKey) _expSet.delete(stockKey);
                 return;
             }
 
             if (stockKey) {
                 // 容量保护：手动点开的面板超过上限时，淘汰最早展开的那个（Set 按插入顺序迭代，第一个即最早）。
-                // 原因：expandedAuctionStocks 只增不减（除非用户手动收起），早盘期间点得越多，
+                // 原因：展开状态Set 只增不减（除非用户手动收起），早盘期间点得越多，
                 // 每次后台数据刷新触发 restoreExpandedAuctionTrendPanels() 时要重新计算+重绘的面板就越多，
                 // 是造成长时间使用后越来越卡的主因之一。这里限制同时"记忆"展开的股票数，
                 // 不影响用户当前能展开的数量（仍可以点开任意多个，只是最早点的会在超限时被自动收起）。
                 const _MAX_REMEMBERED_EXPANDED = 8;
-                if (!expandedAuctionStocks.has(stockKey) && expandedAuctionStocks.size >= _MAX_REMEMBERED_EXPANDED) {
-                    const _oldest = expandedAuctionStocks.values().next().value;
+                if (!_expSet.has(stockKey) && _expSet.size >= _MAX_REMEMBERED_EXPANDED) {
+                    const _oldest = _expSet.values().next().value;
                     if (_oldest !== undefined) {
-                        expandedAuctionStocks.delete(_oldest);
+                        _expSet.delete(_oldest);
                         const _oldestIdx = auctionList.findIndex(it => it && it.stock && it.stock.trim() === _oldest);
                         if (_oldestIdx >= 0) {
                             const _oldestPanel = document.getElementById(_tp + 'TrendPanel-' + _oldestIdx);
@@ -20173,7 +20187,7 @@
                         }
                     }
                 }
-                expandedAuctionStocks.add(stockKey);
+                _expSet.add(stockKey);
             }
             expandAuctionTrendPanel(resolvedIndex);
         }
