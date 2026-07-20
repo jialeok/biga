@@ -15654,6 +15654,16 @@
 
         function renderAuction(dataSource='auction') {
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
+            // 【调试】记录每次 renderAuction 调用的时间戳、来源、与上次调用的间隔，用于排查"序号点击后被重渲染打断"问题
+            (function() {
+                const _now = performance.now();
+                const _stack = (new Error()).stack || '';
+                const _callerLine = _stack.split('\n').slice(2, 4).join(' | ').replace(/\s+/g, ' ').trim();
+                const _sinceLast = window._lastRenderAuctionAt ? Math.round(_now - window._lastRenderAuctionAt) : -1;
+                window._lastRenderAuctionAt = _now;
+                window._renderAuctionCallCount = (window._renderAuctionCallCount || 0) + 1;
+                _dbgLog('[RENDER#' + window._renderAuctionCallCount + '] renderAuction(' + dataSource + ') 触发，距上次=' + _sinceLast + 'ms | 调用来源: ' + _callerLine.slice(0, 200));
+            })();
             // 保存滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
             var _savedScrollY = window.scrollY;
             // 确保题材历史缓存可用（内部有幂等保护，重复调用不会重复扫描）
@@ -16328,14 +16338,29 @@
             });
             
             // 绑定点击序号展开/收起趋势图
-            document.querySelectorAll('.auction-trend-trigger').forEach(el => {
+            // 【调试】① 用 document.querySelectorAll 是全局查询，如果"早盘竞价"和"热门股票"两个tab的DOM
+            //         都存在于页面中（只是 display:none 切换），这里可能会绑定到不可见tab的节点上，
+            //         或者对同一批节点重复统计——先记录本次实际绑定的节点数量，与 auctionList.length 比对。
+            const _bindStartTs = performance.now();
+            const _triggerNodes = document.querySelectorAll('.auction-trend-trigger');
+            _dbgLog('[BIND] 准备绑定序号点击事件，找到 .auction-trend-trigger 节点数=' + _triggerNodes.length + '（本次列表股票数=' + auctionList.length + '，dataSource=' + dataSource + '）');
+            _triggerNodes.forEach(el => {
                 el.style.cursor = 'pointer';
                 el.addEventListener('click', function(e) {
+                    // 【调试】② 点击真正触发时记录：点击时刻、目标index、事件绑定时该按钮所在的渲染批次号、
+                    //         以及点击瞬间该节点是否仍然挂载在文档树上（isConnected），
+                    //         如果点击时 isConnected=false，说明这个节点已经被上一次/下一次 renderAuction 的
+                    //         innerHTML 重建操作替换掉了，点击等于打在了"幽灵节点"上，UI 上会显示灰色(active态)
+                    //         但真正绑定在新节点上的监听器根本没被触发——这正是"点了变灰但不展开"的典型成因。
                     e.stopPropagation();
                     const idx = parseInt(this.dataset.index);
+                    const _clickTs = performance.now();
+                    const _stockName = this.closest('.auction-item') ? this.closest('.auction-item').dataset.stock : '?';
+                    _dbgLog('[CLICK] 点击序号 index=' + idx + ' 股票=' + _stockName + ' | 节点isConnected=' + this.isConnected + ' | 距本节点绑定耗时点=' + Math.round(_clickTs - _bindStartTs) + 'ms | 距上次renderAuction=' + (window._lastRenderAuctionAt ? Math.round(_clickTs - window._lastRenderAuctionAt) : -1) + 'ms');
                     toggleAuctionTrendPanel(idx);
                 });
             });
+            _dbgLog('[BIND] 序号点击事件绑定完成，耗时=' + Math.round(performance.now() - _bindStartTs) + 'ms');
             
             // 若"全部展开"开关已打开，渲染完成后自动展开所有趋势面板
             // 注意：必须用 _p 前缀动态取对应分组的开关（auctionExpandAllToggle / hotExpandAllToggle），
@@ -19496,15 +19521,17 @@
         // 切换行选中状态
         // 展开某一行的趋势面板（供"全部展开"复用，不做toggle判断，直接展开）
         function expandAuctionTrendPanel(index) {
+            const _expStartTs = performance.now();
             const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
             const panel = document.getElementById(_tp + 'TrendPanel-' + index);
-            if (!panel) return;
+            if (!panel) { _dbgLog('[EXPAND] ⚠️ expandAuctionTrendPanel 找不到panel节点 index=' + index); return; }
             const auctionList = getTodayGroupList(currentGroup);
             const item = auctionList[index];
-            if (!item || !item.stock) return; // index 已失效（数据在渲染后被刷新过），安全放弃这次展开，不报错
+            if (!item || !item.stock) { _dbgLog('[EXPAND] ⚠️ index=' + index + ' 已失效（该位置数据为空，说明渲染后数组被刷新过），放弃展开'); return; }
             const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5, currentGroup);
             panel.innerHTML = renderAuctionTrendHtml(history);
             panel.style.display = 'block';
+            _dbgLog('[EXPAND] 展开成功 股票=' + item.stock + ' index=' + index + ' | 耗时=' + Math.round(performance.now() - _expStartTs) + 'ms（含历史数据查询+HTML生成）');
         }
 
         // 展开当前列表所有行的趋势面板
@@ -19993,8 +20020,10 @@
         // 因此这里优先按点击当下 DOM 里真实显示的股票名称来定位，而不是完全信任传入的 index，
         // 从而避免出现"点了没反应"的现象。
         function toggleAuctionTrendPanel(index) {
+            const _fnStartTs = performance.now();
             const _tp = currentGroup === 'hot' ? 'hot' : 'auction';
             let panel = document.getElementById(_tp + 'TrendPanel-' + index);
+            _dbgLog('[TOGGLE] toggleAuctionTrendPanel 开始 index=' + index + ' currentGroup=' + currentGroup + ' | 初始panel是否找到=' + !!panel);
 
             // 优先从当前点击所在行的 DOM 结构中读取真实股票名，而不是直接信任 index
             // （index 是渲染那一刻的位置，若渲染与点击之间发生了数据刷新重渲染，两者可能已经错位）
@@ -20027,9 +20056,13 @@
 
             // 面板节点可能因为期间的重渲染已经不是原来那个了，按最终确定的下标重新获取一次
             panel = document.getElementById(_tp + 'TrendPanel-' + resolvedIndex) || panel;
-            if (!panel) return;
+            if (!panel) {
+                _dbgLog('[TOGGLE] ⚠️ 最终未找到panel节点！index=' + index + ' resolvedIndex=' + resolvedIndex + ' stockKey=' + stockKey + ' | 函数耗时=' + Math.round(performance.now() - _fnStartTs) + 'ms —— 这就是"点了没反应"的直接原因');
+                return;
+            }
 
             const isOpen = panel.style.display !== 'none' && panel.innerHTML !== '';
+            _dbgLog('[TOGGLE] index=' + index + '→resolvedIndex=' + resolvedIndex + (index !== resolvedIndex ? '（⚠️发生了index错位，说明点击时数据已被重渲染刷新过）' : '') + ' stockKey=' + stockKey + ' 当前面板状态isOpen=' + isOpen + ' | 函数耗时=' + Math.round(performance.now() - _fnStartTs) + 'ms');
             if (isOpen) {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
