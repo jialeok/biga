@@ -11744,12 +11744,19 @@
         // 阶段六 影子清单修复：auction 分组改用严格判断 r.in_watchlist === true，
         // 堵住 in_watchlist=undefined 的脏数据（如 obsAutoAdded/代码映射导入等写入路径漏填字段）
         // 被 !== false 兼容判断误判为正式成员的漏洞。
+        // 阶段七 修复：真正的影子记录写入路径永远显式置 in_watchlist=false，
+        // 从未出现"undefined 就是影子记录"的合法用法——undefined 只可能是写入路径漏填字段的 bug
+        // （例如"获取最近多板"曾经就漏填，导致拉取成功却不显示）。
+        // 严格过滤会把这类脏数据整批丢弃且界面无提示，用户只会看到"拉取成功但列表是空的"。
+        // 改为：就地自愈——把 undefined 行原地补成 in_watchlist=true 后一并放行，
+        // 这样即使未来某个写入路径又漏填了这个字段，也不会造成数据"凭空消失"。
         function getTodayAuction() {
             const list = getAuctionData()[currentDate] || [];
-            // 调试：检测 in_watchlist 字段缺失的脏数据行
-            const undefinedCount = list.filter(function(r) { return r && r.stock && r.in_watchlist === undefined; }).length;
-            if (undefinedCount > 0) {
-                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 in_watchlist 字段缺失的行：' + undefinedCount + ' 条（已按严格判断过滤掉）');
+            // 自愈：字段缺失的行视为正式列表成员，就地补齐，避免下次又被判定为"脏数据"
+            const undefinedRows = list.filter(function(r) { return r && r.stock && r.in_watchlist === undefined; });
+            if (undefinedRows.length > 0) {
+                undefinedRows.forEach(function(r) { r.in_watchlist = true; });
+                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 in_watchlist 字段缺失的行：' + undefinedRows.length + ' 条（已自动修复为正式列表成员并显示）');
             }
             return list.filter(function(r) { return r && r.in_watchlist === true; });
         }
@@ -11767,9 +11774,12 @@
                 return list.filter(function(r) { return r && r.in_watchlist !== false; });
             }
             // auction 分组：严格判断，只保留 in_watchlist === true 的正式列表成员
-            const undefinedCount = list.filter(function(r) { return r && r.stock && r.in_watchlist === undefined; }).length;
-            if (undefinedCount > 0) {
-                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 in_watchlist 字段缺失的行：' + undefinedCount + ' 条（已按严格判断过滤掉）');
+            // 阶段七修复：undefined 只可能是写入路径漏填字段的 bug（真正的影子记录永远显式
+            // 置 false），就地自愈补成 true 一并放行，避免拉取成功却整批"凭空消失"。
+            const undefinedRows = list.filter(function(r) { return r && r.stock && r.in_watchlist === undefined; });
+            if (undefinedRows.length > 0) {
+                undefinedRows.forEach(function(r) { r.in_watchlist = true; });
+                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 in_watchlist 字段缺失的行：' + undefinedRows.length + ' 条（已自动修复为正式列表成员并显示）');
             }
             return list.filter(function(r) { return r && r.in_watchlist === true; });
         }
@@ -13795,7 +13805,12 @@
                         selected: existing ? existing.selected : false,
                         bought: existing ? existing.bought : false,
                         sold: existing ? existing.sold : false,
-                        fixed: existing ? existing.fixed : false
+                        fixed: existing ? existing.fixed : false,
+                        // 阶段七 影子清单修复补丁：显式标记为正式列表成员。
+                        // 获取最近多板拉回的股票就是当天要展示的正式列表，之前漏填此字段，
+                        // 被 getTodayAuction()/getTodayGroupList() 的严格 in_watchlist===true
+                        // 判断当成"字段缺失"脏数据整批过滤掉，导致提示成功但列表不显示。
+                        in_watchlist: true
                     };
                 });
 
