@@ -13964,8 +13964,16 @@
         }
 
         // ---------- 同花顺：获取最近多板 883410 成分股并导入当日竞价列表 ----------
+        // 【竞态修复】点击这个按钮到接口真正返回之间有网络耗时，这段时间里如果用户切换了
+        // 页面日期（比如从"未来某天"切回今天），原写法全程读全局 currentDate，写入时
+        // 用的就已经是"切换之后"的日期，导致数据写到了错误的一天（例如：在 7-20 当天
+        // 把页面切到 7-21 点击本按钮，接口返回前又切回了 7-20，数据就误写进了 7-20）。
+        // 修复方式：进入函数第一行就把当时的 currentDate 锁存成局部常量 targetDate，
+        // 后续所有写入（内存/本地/云端）一律用 targetDate，不再读可能已变化的全局 currentDate。
         async function fetchLadderConstituentsMain(btn) {
             const statusEl = document.getElementById('thsApiStatus');
+            // 锁定"点击那一刻"的日期，全程只认这一个值，杜绝异步等待期间日期漂移
+            const targetDate = currentDate;
             setBtnLoading(btn, true);
             try {
                 const data = await fuyaoApiGet('/api/a-share-index/constituents/ths-stock-list', { thscode: LADDER_THSCODE });
@@ -13975,11 +13983,11 @@
                     return;
                 }
 
-                // 备份当日数据（用于撤回）
-                backupAuctionData('import');
+                // 备份当日数据（用于撤回）—— 按锁存的 targetDate 备份，而非可能已变化的当前日期
+                backupAuctionData('import', targetDate);
 
                 const auctionData = getAuctionData();
-                const existingList = auctionData[currentDate] || [];
+                const existingList = auctionData[targetDate] || [];
                 const existingMap = {};
                 existingList.forEach(function(s) {
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
@@ -14025,21 +14033,27 @@
                     saveModule('stockCodeMap');
                 }
 
-                auctionData[currentDate] = newList;
+                auctionData[targetDate] = newList;
                 saveModule('auction');
                 invalidateTopicCache();
 
-                // 同步到云端：列表增删 + code 列
-                markAuctionDirty(currentDate);
+                // 同步到云端：列表增删 + code 列 —— 全部按 targetDate，不受期间日期切换影响
+                markAuctionDirty(targetDate);
                 scheduleCloudPush();
-                pushAuctionCodeToCloud(currentDate).catch(function(e) { console.warn('pushAuctionCodeToCloud 失败:', e); });
+                pushAuctionCodeToCloud(targetDate).catch(function(e) { console.warn('pushAuctionCodeToCloud 失败:', e); });
 
-                // 刷新表单和看板
-                renderAuctionForm();
-                renderAuction();
-                renderList();
-
-                setApiStatus('thsApiStatus', '✅ 已获取 ' + newList.length + ' 只最近多板股票', true);
+                // 刷新表单和看板：只有当"接口返回时页面仍停留在 targetDate"才刷新当前视图，
+                // 否则说明用户已经切到别的日期在忙别的事，此时若仍用刚写入的这批数据刷新
+                // 界面上正显示的另一天，等于用错误日期的内容覆盖了正确的渲染，容易造成
+                // "看着是这天的数据、其实是那天的"的混淆——所以此时只提示、不刷新视图。
+                if (currentDate === targetDate) {
+                    renderAuctionForm();
+                    renderAuction();
+                    renderList();
+                    setApiStatus('thsApiStatus', '✅ 已获取 ' + newList.length + ' 只最近多板股票', true);
+                } else {
+                    setApiStatus('thsApiStatus', '✅ 已获取 ' + newList.length + ' 只最近多板股票（写入 ' + targetDate + '，当前页面在 ' + currentDate + '，切回该日期即可看到）', true);
+                }
             } catch (err) {
                 console.error('fetchLadderConstituentsMain 失败:', err);
                 let msg = err && err.message ? err.message : '拉取失败';
@@ -14817,8 +14831,17 @@
         //     会按股票名称做增量合并——已存在的股票保留原有 volume/yestVolume/
         //     note/changePct/选中状态等字段（视为"补全"），新出现的股票才是全新插入。
         //   - 历史日期：调用历史热股榜（hot-stock-list-history，不支持飙升榜）
+        // 【竞态修复】与 fetchLadderConstituentsMain 同一类问题：函数体内有多个 await
+        // （尤其历史榜单分支还要多等一次网络请求），且分支判断（isFutureDate/今天/历史）
+        // 本身也依赖 currentDate——如果只在最后写入时锁一次日期，等待期间日期被切走后，
+        // 会出现"按切换前的日期分支去请求了接口，却因为分支判断本身没锁，产生分支与
+        // 写入目标不一致"的更隐蔽错乱。所以这里在函数最开头、任何 currentDate 相关判断
+        // 之前就立即锁存 targetDate，后续分支判断、接口参数、状态文案、数据读写、
+        // 云端同步全部统一使用 targetDate，不再读取执行期间可能变化的全局 currentDate。
         async function fetchSkyrocketHotStocksMain(btn) {
             setBtnLoading(btn, true);
+            // 锁定"点击那一刻"的日期，全程只认这一个值，杜绝异步等待期间日期漂移
+            const targetDate = currentDate;
             try {
                 // 获取系统今天（Asia/Shanghai 时区，yyyy-MM-dd 格式）
                 const now = new Date();
@@ -14830,13 +14853,13 @@
                 let constituents = [];
                 let statusMsg = '';
 
-                const isFutureDate = currentDate > sysToday;
+                const isFutureDate = targetDate > sysToday;
 
-                if (currentDate >= sysToday) {
+                if (targetDate >= sysToday) {
                     // 今天：实时榜单即为当日数据；未来日期：用实时榜单预置仓位，等次日刷新覆盖
                     setApiStatus('thsApiStatusHot',
                         isFutureDate
-                            ? '正在请求同花顺飙升榜 + A股热股榜单（预置到 ' + currentDate + '）...'
+                            ? '正在请求同花顺飙升榜 + A股热股榜单（预置到 ' + targetDate + '）...'
                             : '正在请求同花顺飙升榜 + A股热股榜单...',
                         true);
                     const [skyrocketData, hotStockData] = await Promise.all([
@@ -14862,12 +14885,12 @@
                         return;
                     }
                     statusMsg = isFutureDate
-                        ? ('✅ 已为 ' + currentDate + ' 预置 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '，明日刷新将增量合并覆盖）')
+                        ? ('✅ 已为 ' + targetDate + ' 预置 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '，明日刷新将增量合并覆盖）')
                         : ('✅ 已获取 ' + constituents.length + ' 只股票（飙升榜 ' + skyrocketItems.length + ' + 热股榜 ' + hotStockItems.length + '，去重后 ' + constituents.length + '）');
                 } else {
-                    // 历史日期：调用历史热股榜（hot-stock-list-history?date=currentDate）
-                    setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + currentDate + '）...', true);
-                    const historyData = await fuyaoApiGet('/api/a-share/special-data/hot-stock-list-history', { date: currentDate });
+                    // 历史日期：调用历史热股榜（hot-stock-list-history?date=targetDate）
+                    setApiStatus('thsApiStatusHot', '正在请求历史热股榜单（' + targetDate + '）...', true);
+                    const historyData = await fuyaoApiGet('/api/a-share/special-data/hot-stock-list-history', { date: targetDate });
                     const historyItems = (historyData && historyData.item) || [];
 
                     // 历史热股榜字段与实时热股榜一致（thscode/ticker/name/rank）
@@ -14878,17 +14901,17 @@
                     constituents = Object.values(mergedMap);
 
                     if (constituents.length === 0) {
-                        setApiStatus('thsApiStatusHot', '历史热股榜单（' + currentDate + '）无数据', false);
+                        setApiStatus('thsApiStatusHot', '历史热股榜单（' + targetDate + '）无数据', false);
                         return;
                     }
                     statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（历史热股榜，不支持飙升榜）';
                 }
 
-                // 备份当日数据（用于撤回）
-                backupHotStocksData('import');
+                // 备份当日数据（用于撤回）—— 按锁存的 targetDate 备份，而非可能已变化的当前日期
+                backupHotStocksData('import', targetDate);
 
                 const hotAuctionData = getHotAuctionData();
-                const existingList = hotAuctionData[currentDate] || [];
+                const existingList = hotAuctionData[targetDate] || [];
                 const existingMap = {};
                 existingList.forEach(function(s) {
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
@@ -14929,19 +14952,23 @@
                     saveModule('stockCodeMap');
                 }
 
-                hotAuctionData[currentDate] = newList;
+                hotAuctionData[targetDate] = newList;
                 invalidateTopicCache();
 
-                // 同步到云端 hot_stocks 表（处理增删 + 新股票的完整字段插入）
-                syncHotStocksListForDate(currentDate).catch(function(e) {
+                // 同步到云端 hot_stocks 表（处理增删 + 新股票的完整字段插入）—— 按 targetDate
+                syncHotStocksListForDate(targetDate).catch(function(e) {
                     console.warn('syncHotStocksListForDate 失败:', e);
                 });
 
-                // 刷新表单和看板
-                renderHotForm();
-                renderHotStocks();
-
-                setApiStatus('thsApiStatusHot', statusMsg, true);
+                // 刷新表单和看板：只有当"接口返回时页面仍停留在 targetDate"才刷新当前视图，
+                // 避免用刚写入的这批数据去刷新界面上正显示的另一天，造成日期混淆。
+                if (currentDate === targetDate) {
+                    renderHotForm();
+                    renderHotStocks();
+                    setApiStatus('thsApiStatusHot', statusMsg, true);
+                } else {
+                    setApiStatus('thsApiStatusHot', statusMsg + '（写入 ' + targetDate + '，当前页面在 ' + currentDate + '，切回该日期即可看到）', true);
+                }
             } catch (err) {
                 console.error('fetchSkyrocketHotStocksMain 失败:', err);
                 let msg = err && err.message ? err.message : '拉取失败';
