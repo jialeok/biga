@@ -16057,6 +16057,30 @@
                     if (cacheRow && ((cacheRow.volume || '') !== (sample.volume || '') || (cacheRow.yest_volume || '') !== (sample.yestVolume || ''))) {
                         push('　　　⚠️ 内存与趋势图快照不一致，趋势图可能显示旧值，建议重新进入该 tab 或等待下次云端同步');
                     }
+                    // ===== 临时调试（阶段八排查用，仅追加输出，不改变任何判断逻辑）=====
+                    // 目的：todayList 和 todayCache 理论上都来自同一个 _auctionMemCache 引用，
+                    // 若真的出现字段不一致，最可能的原因是同一股票名在 auctionData[today] 数组里
+                    // 存在多条行记录（例如一条 in_watchlist=true 正式行 + 一条遗留的重复/影子行），
+                    // 导致 todayList.filter 和 todayCache.find 各自命中了不同的行对象。
+                    // 下面把该股票名在原始数组中的【所有】匹配行都列出来，并标注对象引用是否相同，
+                    // 直接定位是"重复行"问题还是"引用被替换/深拷贝"问题。
+                    push('　　🔍[调试] 「' + sample.stock + '」在 auctionData[' + today + '] 原始数组中的全部匹配行：');
+                    const allMatches = (auctionData[today] || []).filter(function(r) { return r && r.stock === sample.stock; });
+                    allMatches.forEach(function(r, i) {
+                        push('　　　[原始数组#' + i + '] in_watchlist=' + r.in_watchlist
+                            + ' | volume=' + (r.volume || '(空)') + ' | yestVolume=' + (r.yestVolume || '(空)')
+                            + ' | 与sample同一引用=' + (r === sample));
+                    });
+                    push('　　🔍[调试] 「' + sample.stock + '」在 _auctionMemCache[' + today + '] 原始数组中的全部匹配行：');
+                    const allCacheMatches = todayCache.filter(function(r) { return r && r.stock === sample.stock; });
+                    allCacheMatches.forEach(function(r, i) {
+                        push('　　　[快照数组#' + i + '] in_watchlist=' + r.in_watchlist
+                            + ' | volume=' + (r.volume || '(空)') + ' | yest_volume=' + (r.yest_volume || '(空)')
+                            + ' | 与sample同一引用=' + (r === sample));
+                    });
+                    push('　　🔍[调试] auctionData 与 _auctionMemCache 是否为同一引用：' + (auctionData === _auctionMemCache));
+                    push('　　🔍[调试] auctionData[' + today + '] 与 _auctionMemCache[' + today + '] 是否为同一数组引用：' + (auctionData[today] === _auctionMemCache[today]));
+                    // ===== 临时调试结束 =====
                 }
                 push('');
 
