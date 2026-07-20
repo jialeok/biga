@@ -16263,6 +16263,35 @@
                 }
                 push('');
 
+                // ---- 新疑点排查：猫抓/同花顺"竞价量/成交量补全"函数是否遗漏 in_watchlist 过滤 ----
+                // 🔍[调试] 发现 fetchAuctionFromNumcat / fillYesterdayVolumeFromThs 等函数取
+                // todayList 时用的是 (auctionData[today]||[]).slice()，未过滤 in_watchlist===true，
+                // 会连当天的影子记录（in_watchlist=false）一起处理并 patch 上云端。
+                // 如果某只影子记录在云端 auction_data 表里原本没有该日期的行，
+                // patchAuctionFieldBatch 的 upsert 会插入新行，in_watchlist 用数据库默认值填充——
+                // 这可能正是"凭空出现在正式列表、只有 volume/yest_volume 没有 change_pct"的真正成因。
+                push('【疑点排查：竞价量/成交量补全函数是否处理了影子记录（in_watchlist=false）】');
+                try {
+                    const rawList2 = (auctionData[today] || []).filter(function(s) { return s && s.stock; });
+                    const shadowList2 = rawList2.filter(function(s) { return s.in_watchlist === false; });
+                    push('　　当前 auctionData[' + today + '] 原始分区共 ' + rawList2.length + ' 只，其中 in_watchlist=false 影子记录 ' + shadowList2.length + ' 只：');
+                    if (shadowList2.length > 0) {
+                        push('　　　' + shadowList2.map(function(s) { return s.stock + '(vol=' + (s.volume || '空') + ',pct=' + (s.changePct || '空') + ')'; }).join('、'));
+                    }
+                    // 对照：今天正式列表里 pct 为空、但 volume/yestVolume 都有值的股票——
+                    // 这类股票的特征与"竞价量补全函数处理了影子记录"这个疑点完全吻合。
+                    const suspectPattern = todayList.filter(function(s) {
+                        return !(s.changePct || '').trim() && (s.volume || '').trim() && (s.yestVolume || '').trim();
+                    });
+                    push('　　今日正式列表中"涨幅为空但 volume/yestVolume 都有值"的股票共 ' + suspectPattern.length + ' 只（此特征与该疑点吻合）：');
+                    if (suspectPattern.length > 0) {
+                        push('　　　' + suspectPattern.map(function(s) { return s.stock; }).join('、'));
+                    }
+                } catch (e) {
+                    push('　　排查异常：' + (e && e.message ? e.message : String(e)));
+                }
+                push('');
+
                 // ---- 对比日列表体检 ----
                 // 对比日同时展示正式列表和全部数据（含影子记录），两个语义都有用
                 const yesterdayListRaw = yesterday ? (auctionData[yesterday] || []).filter(function(s) { return s && s.stock; }) : [];
@@ -16365,7 +16394,7 @@
                     const suspectNames = ['华银电力', '中嘉博创', '深南电A', '古井贡酒', '桂冠电力', '金牛化工', '乐山电力', '中曼石油'];
                     const sb2 = getSupabase();
                     const { data: suspectData, error: suspectErr } = await sb2.from('auction_data')
-                        .select('date,stock,in_watchlist,volume,yest_volume,change_pct,obs_auto_added,updated_at,updated_by')
+                        .select('date,stock,in_watchlist,volume,yest_volume,change_pct,topics,obs_auto_added,updated_at,updated_by')
                         .eq('date', today)
                         .in('stock', suspectNames);
                     if (suspectErr) {
@@ -16378,10 +16407,47 @@
                             push('　　  ' + row.stock + ' | in_watchlist=' + row.in_watchlist +
                                  ' | volume=' + row.volume + ' | yest_volume=' + row.yest_volume +
                                  ' | change_pct=' + (row.change_pct || '(空)') +
+                                 ' | topics=' + (row.topics || '(空)') +
                                  ' | obs_auto_added=' + row.obs_auto_added +
                                  ' | updated_by=' + row.updated_by +
                                  ' | updated_at=' + row.updated_at);
                         });
+                    }
+
+                    // 🔍[调试] 假设排查：这 8 只是否是"补全题材时首次写入 auction_data 表"
+                    // 导致的新行（即在其它历史日期完全没有记录，且只有 topics/updated_by 相关字段被写过）。
+                    // 查询这 8 只股票在 auction_data 表里全部日期的记录，看历史深度和字段模式。
+                    push('　　--- 历史记录深度排查（验证是否为"题材补全时首次创建"的新行）---');
+                    const { data: histData, error: histErr } = await sb2.from('auction_data')
+                        .select('date,stock,in_watchlist,volume,yest_volume,change_pct,topics,updated_by,updated_at')
+                        .in('stock', suspectNames)
+                        .order('date', { ascending: true });
+                    if (histErr) {
+                        push('　　历史查询失败：' + histErr.message);
+                    } else if (!histData || histData.length === 0) {
+                        push('　　这 8 只股票在 auction_data 表里查无任何历史记录。');
+                    } else {
+                        const byStock = {};
+                        histData.forEach(function(row) {
+                            if (!byStock[row.stock]) byStock[row.stock] = [];
+                            byStock[row.stock].push(row);
+                        });
+                        Object.keys(byStock).forEach(function(name) {
+                            const rows = byStock[name];
+                            push('　　  ' + name + ' | 共 ' + rows.length + ' 条历史记录，日期范围：' +
+                                 rows[0].date + ' ~ ' + rows[rows.length - 1].date);
+                            rows.forEach(function(r) {
+                                push('　　　　' + r.date + ' | in_watchlist=' + r.in_watchlist +
+                                     ' | vol=' + r.volume + ' | yest=' + r.yest_volume +
+                                     ' | pct=' + (r.change_pct || '(空)') + ' | topics=' + (r.topics || '(空)') +
+                                     ' | updated_by=' + r.updated_by + ' | updated_at=' + r.updated_at);
+                            });
+                        });
+                        // 也列出完全没查到历史记录的股票名
+                        const notFoundNames = suspectNames.filter(function(n) { return !byStock[n]; });
+                        if (notFoundNames.length > 0) {
+                            push('　　以下股票在 auction_data 表里完全无任何历史记录：' + notFoundNames.join('、'));
+                        }
                     }
                 } catch (e) {
                     push('　　排查异常：' + (e && e.message ? e.message : String(e)));
