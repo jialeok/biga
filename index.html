@@ -10219,6 +10219,71 @@
             }
         }
 
+        // ============================================================
+        // 阶段六 影子bug6 收尾：一次性对账——用 localStorage 旧正式列表纠正云端已提升的影子记录
+        // 原因：之前的 sync/push 代码未过滤 in_watchlist，把影子记录（in_watchlist=false）当
+        // 正式成员同步到云端（in_watchlist=true），导致回拉后混入第一页。本函数读取 localStorage
+        // （迁移前的正式列表快照）作为权威名单，把 _auctionMemCache 中 in_watchlist=true 但不在
+        // localStorage 名单里的行降级为 in_watchlist=false，并推送纠正结果到云端。
+        // 仅在首次运行时执行一次（用 localStorage 标志位保证不重复执行）。
+        // ============================================================
+        async function reconcileAuctionWatchlistFromLocalStorage() {
+            const RECONCILE_FLAG = 'stockApp_v42_auction_reconciled_v1';
+            try {
+                if (localStorage.getItem(RECONCILE_FLAG)) return { skipped: true, reason: '已执行过' };
+                const raw = localStorage.getItem('stockApp_v42_auction');
+                if (!raw) { localStorage.setItem(RECONCILE_FLAG, '1'); return { skipped: true, reason: 'localStorage 无数据' }; }
+                const parsed = JSON.parse(raw);
+                const sb = getSupabase();
+                if (!sb || !_auctionTableAvailable) { localStorage.setItem(RECONCILE_FLAG, '1'); return { skipped: true, reason: '云端表不可用' }; }
+                const now = new Date().toISOString();
+                const allDemoteUpdates = [];
+                const demoteDetail = [];
+                Object.keys(parsed).forEach(function(date) {
+                    // 兼容旧格式：stock 字段或 name 字段
+                    const lsStocks = new Set((parsed[date] || [])
+                        .filter(function(s) { return s && (s.stock || s.name); })
+                        .map(function(s) { return (s.stock || s.name).trim(); }));
+                    if (lsStocks.size === 0) return;
+                    const memRows = _auctionMemCache[date] || [];
+                    memRows.forEach(function(row) {
+                        if (row && row.stock && row.in_watchlist === true && !lsStocks.has(row.stock.trim())) {
+                            // 不在 localStorage 正式名单里，但被错误提升为 in_watchlist=true → 降级
+                            row.in_watchlist = false;
+                            allDemoteUpdates.push({ date: date, stock: row.stock.trim() });
+                            demoteDetail.push({ date: date, stock: row.stock.trim(), volume: row.volume || '' });
+                        }
+                    });
+                });
+                if (allDemoteUpdates.length > 0) {
+                    // 批量推送到云端（每批 25 个）
+                    const batchSize = 25;
+                    for (let i = 0; i < allDemoteUpdates.length; i += batchSize) {
+                        const batch = allDemoteUpdates.slice(i, i + batchSize);
+                        await Promise.all(batch.map(function(item) {
+                            return sb.from('auction_data')
+                                .update({ in_watchlist: false, updated_at: now, updated_by: 'main-reconcile' })
+                                .eq('date', item.date).eq('stock', item.stock);
+                        }));
+                    }
+                    _dbgLog('[RECONCILE] 影子记录对账完成：降级 ' + allDemoteUpdates.length + ' 只股票');
+                    console.log('[RECONCILE] 影子记录对账完成：降级 ' + allDemoteUpdates.length + ' 只股票', demoteDetail);
+                } else {
+                    _dbgLog('[RECONCILE] 影子记录对账完成：无需降级（内存与 localStorage 一致）');
+                }
+                localStorage.setItem(RECONCILE_FLAG, '1');
+                return { skipped: false, demoted: allDemoteUpdates.length, detail: demoteDetail };
+            } catch (e) {
+                console.warn('[RECONCILE] 影子记录对账失败:', e.message);
+                return { skipped: true, reason: e.message, error: true };
+            }
+        }
+        // 手动触发入口（控制台执行 reconcileAuctionWatchlist() 可重新对账，忽略已执行标志）
+        window.reconcileAuctionWatchlist = async function(force) {
+            if (force) localStorage.removeItem('stockApp_v42_auction_reconciled_v1');
+            return await reconcileAuctionWatchlistFromLocalStorage();
+        };
+
         // 热门股票脏日期全量同步（照抄 syncAuctionListForDate，改表名 hot_stocks、数据源 getGroupData('hot')）
         async function syncHotStocksListForDate(date) {
             _justPushedHotAuction = true; // 标记刚推送，忽略自己触发的 Realtime 通知
@@ -10788,6 +10853,18 @@
                     }));
                 } catch(tableErr) {
                     console.warn('auction_data 表拉取失败，回退到 blob:', tableErr.message);
+                }
+
+                // 阶段六 影子bug6 收尾：拉取完成后立即对账，用 localStorage 旧正式列表纠正云端已提升的影子记录
+                try {
+                    const reconcileResult = await reconcileAuctionWatchlistFromLocalStorage();
+                    if (!reconcileResult.skipped && reconcileResult.demoted > 0) {
+                        _dbgLog('[RECONCILE] 首次对账降级 ' + reconcileResult.demoted + ' 只影子记录，触发重新渲染');
+                        // 对账改了 _auctionMemCache 行的 in_watchlist，需重新渲染当前页
+                        if (typeof renderAuction === 'function') renderAuction(currentGroup);
+                    }
+                } catch(e) {
+                    console.warn('[RECONCILE] 对账调用失败:', e.message);
                 }
 
                 // 从 bidding_data 独立表拉取 bidding 数据（云端表是唯一权威来源）
@@ -16356,13 +16433,16 @@
                         topics = parsed.topics;
                     }
                     
-                    auctionList.push({ 
-                        stock, 
-                        volume, 
+                    auctionList.push({
+                        stock,
+                        volume,
                         yestVolume,
                         note: note,
                         changePct: changePct,
                         topics: topics,
+                        // 阶段六 影子bug6：显式标记 in_watchlist: true（正式列表成员），
+                        // 否则 === true 过滤会把这些股票全部过滤掉，syncAuctionListForDate 还会把云端全部降级
+                        in_watchlist: true,
                         selected: existingItem ? existingItem.selected : false,
                         bought: existingItem ? existingItem.bought : false,
                         sold: existingItem ? existingItem.sold : false,
@@ -16376,8 +16456,13 @@
                 const ratioB = parseFloat(b.volume) / parseFloat(b.yestVolume) || 0;
                 return ratioB - ratioA;
             });
-            
-            getGroupData(currentGroup)[currentDate] = auctionList;
+
+            // 阶段六 影子bug6：保留现有影子记录（in_watchlist=false，供趋势图历史查询），
+            // 只替换正式成员（in_watchlist=true）。直接整组替换会丢掉影子记录，
+            // 且新对象若漏带 in_watchlist 会被 === true 过滤掉。
+            const _existingRows = getGroupData(currentGroup)[currentDate] || [];
+            const _shadowRows = _existingRows.filter(function(r) { return r && r.in_watchlist === false; });
+            getGroupData(currentGroup)[currentDate] = auctionList.concat(_shadowRows);
 
             // 早盘竞价：原有逻辑
             saveData();
