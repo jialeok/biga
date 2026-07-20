@@ -8308,7 +8308,6 @@
         let _highlightsPushTimer = null;
         let _hotHighlightsPushTimer = null; // 热门股票高光推送 debounce timer
         let _highlightsChannel = null; // daily_highlights 表的 Realtime 订阅
-        let _highlightsReloadTimer = null;
         let _stockTopicsChannel = null; // stock_topics 表的 Realtime 订阅
         let _cloudTopicsCache = null; // 从 stock_topics 表加载的题材缓存 {stock: Set(topics)}
         let _biddingTableAvailable = false; // bidding_data 表是否可用
@@ -8442,31 +8441,52 @@
             stopHotTrendsRealtime();
         }
 
-        // 启动 auction_data 表的 Realtime 订阅（抓取程序同步后自动刷新行情数据）
-        // Realtime 防抖：收集变更日期，800ms 静默后统一拉取+渲染一次
-        // （抓取程序分批写入会产生大量通知，防抖避免每次通知都触发 renderAuction 导致卡顿）
+        // ===== 早盘竞价tap：两张表（auction_data / daily_highlights）的
+        // Realtime 订阅共用同一个"统一防抖池"。
+        // 背景：与 hot 分组同理（见下方 hot 分组的 _scheduleHotRealtimeReload 注释）——
+        // 抓取程序一次同步操作常常同时触发 auction_data 和 daily_highlights 两张表的变化，
+        // 若各自独立 800ms 防抖、各自独立调用 renderAuction()，会导致极短时间内（100~200ms）
+        // 早盘竞价列表的 DOM 被连续整体重建 2 次。用户点击"序号"展开趋势图的瞬间，若恰好
+        // 撞上这类连锁重渲染，点击目标节点可能已被替换或状态被下一轮渲染的自动展开覆盖，
+        // 表现为"卡顿、有时点不出来、点开又像被自动收起"。
+        // 统一后：不论哪张表先收到变化通知，都汇入同一个定时器，到点后按需重新拉取各自数据，
+        // 最后只调用一次 renderAuction()。
         var _auctionRealtimeTimer = null;
         var _pendingRealtimeDates = new Set();
-        function _debounceAuctionRealtime(date) {
-            _pendingRealtimeDates.add(date);
+        var _pendingAuctionReload = { marketData: false, highlights: false };
+        function _scheduleAuctionRealtimeReload() {
             if (_auctionRealtimeTimer) clearTimeout(_auctionRealtimeTimer);
             _auctionRealtimeTimer = setTimeout(function() {
+                var need = _pendingAuctionReload;
+                _pendingAuctionReload = { marketData: false, highlights: false };
                 var dates = Array.from(_pendingRealtimeDates);
                 _pendingRealtimeDates.clear();
                 _auctionRealtimeTimer = null;
-                var tasks = dates.map(function(d) {
-                    var t = [];
-                    if (typeof pullAuctionMarketDataForDate === 'function') {
-                        t.push(pullAuctionMarketDataForDate(d).catch(function(e) {
-                            console.warn('Realtime pullAuctionMarketDataForDate 失败:', e);
-                        }));
-                    }
-                    return Promise.all(t);
-                });
+                var tasks = [];
+                if (need.marketData) {
+                    tasks = tasks.concat(dates.map(function(d) {
+                        if (typeof pullAuctionMarketDataForDate === 'function') {
+                            return pullAuctionMarketDataForDate(d).catch(function(e) {
+                                console.warn('Realtime pullAuctionMarketDataForDate 失败:', e);
+                            });
+                        }
+                        return Promise.resolve();
+                    }));
+                }
+                if (need.highlights) {
+                    tasks.push(pullDailyHighlights().catch(function(e) {
+                        console.warn('highlights Realtime 重载失败:', e);
+                    }));
+                }
                 Promise.all(tasks).then(function() {
-                    renderAuction();
+                    renderAuction(); // 两张表变化只触发这一次整体重渲染
                 });
             }, 800);
+        }
+        function _debounceAuctionRealtime(date) {
+            _pendingRealtimeDates.add(date);
+            _pendingAuctionReload.marketData = true;
+            _scheduleAuctionRealtimeReload();
         }
 
         function startAuctionRealtime() {
@@ -9493,13 +9513,10 @@
                     }, function(payload) {
                         var row = payload.new || payload.old;
                         if (!row || !row.date) return;
-                        // 防抖：收到变更后重新加载 highlights 缓存并刷新
-                        if (_highlightsReloadTimer) clearTimeout(_highlightsReloadTimer);
-                        _highlightsReloadTimer = setTimeout(function() {
-                            pullDailyHighlights().then(function() {
-                                renderAuction();
-                            }).catch(function(e) { console.warn('highlights Realtime 重载失败:', e); });
-                        }, 800);
+                        // 汇入与 auction_data 共用的统一防抖池，避免两张表几乎同时变更时
+                        // 各自独立触发 renderAuction 导致短时间内连续两次整体重渲染（见上方注释）
+                        _pendingAuctionReload.highlights = true;
+                        _scheduleAuctionRealtimeReload();
                     })
                     .subscribe();
                 console.log('daily_highlights Realtime 订阅已启动');
@@ -20070,7 +20087,26 @@
                 return;
             }
 
-            if (stockKey) expandedAuctionStocks.add(stockKey);
+            if (stockKey) {
+                // 容量保护：手动点开的面板超过上限时，淘汰最早展开的那个（Set 按插入顺序迭代，第一个即最早）。
+                // 原因：expandedAuctionStocks 只增不减（除非用户手动收起），早盘期间点得越多，
+                // 每次后台数据刷新触发 restoreExpandedAuctionTrendPanels() 时要重新计算+重绘的面板就越多，
+                // 是造成长时间使用后越来越卡的主因之一。这里限制同时"记忆"展开的股票数，
+                // 不影响用户当前能展开的数量（仍可以点开任意多个，只是最早点的会在超限时被自动收起）。
+                const _MAX_REMEMBERED_EXPANDED = 8;
+                if (!expandedAuctionStocks.has(stockKey) && expandedAuctionStocks.size >= _MAX_REMEMBERED_EXPANDED) {
+                    const _oldest = expandedAuctionStocks.values().next().value;
+                    if (_oldest !== undefined) {
+                        expandedAuctionStocks.delete(_oldest);
+                        const _oldestIdx = auctionList.findIndex(it => it && it.stock && it.stock.trim() === _oldest);
+                        if (_oldestIdx >= 0) {
+                            const _oldestPanel = document.getElementById(_tp + 'TrendPanel-' + _oldestIdx);
+                            if (_oldestPanel) { _oldestPanel.style.display = 'none'; _oldestPanel.innerHTML = ''; }
+                        }
+                    }
+                }
+                expandedAuctionStocks.add(stockKey);
+            }
             expandAuctionTrendPanel(resolvedIndex);
         }
 
