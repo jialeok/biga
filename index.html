@@ -7256,6 +7256,17 @@
                 <span id="numcatApiStatusHot" style="display: block; margin-top: 6px; font-size: 12px; color: #831843; min-height: 16px;"></span>
             </div>
 
+            <!-- 接口诊断面板（热门股票 tab 独立版本）：一键体检同花顺/猫抓全部按钮的数据、保存、趋势图链路。
+                 与早盘竞价 tab 的 auctionDiagArea/runAuctionApiDiagnostics 完全独立，不共用任何函数或 DOM。 -->
+            <div id="hotDiagArea" style="margin-bottom: 16px; padding: 10px; background: #f0fdf4; border: 1px solid #86efac; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                    <span style="font-size: 13px; color: #166534; font-weight: 600;">接口诊断（热门股票）</span>
+                    <span style="font-size: 10px; color: #16a34a; font-family: monospace;">独立于早盘竞价，互不影响</span>
+                </div>
+                <button type="button" onclick="runHotApiDiagnostics()" style="width: 100%; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">🔍 运行诊断（当天昨日成交量 / 对比日昨成交量 / 竞价量 / 涨幅 / 保存 / 趋势图）</button>
+                <span id="hotDiagStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #166534; min-height: 16px;"></span>
+            </div>
+
             <form onsubmit="saveHotStocks(event)" id="hotForm">
                 <div class="rank-form-scroll-container">
                     <div id="hotFormContainer">
@@ -7370,6 +7381,16 @@
                     <button type="button" onclick="fetchMonitorWarningFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">查询监管</button>
                 </div>
                 <span id="numcatApiStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #831843; min-height: 16px;"></span>
+            </div>
+
+            <!-- 接口诊断面板（早盘竞价 tab 独立版本）：一键体检同花顺/猫抓全部按钮的数据、保存、趋势图链路 -->
+            <div id="auctionDiagArea" style="margin-bottom: 16px; padding: 10px; background: #f0fdf4; border: 1px solid #86efac; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                    <span style="font-size: 13px; color: #166534; font-weight: 600;">接口诊断（早盘竞价）</span>
+                    <span style="font-size: 10px; color: #16a34a; font-family: monospace;">独立于热门股票，互不影响</span>
+                </div>
+                <button type="button" onclick="runAuctionApiDiagnostics()" style="width: 100%; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">🔍 运行诊断（当天昨日成交量 / 对比日昨成交量 / 竞价量 / 涨幅 / 保存 / 趋势图）</button>
+                <span id="auctionDiagStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #166534; min-height: 16px;"></span>
             </div>
 
             <form onsubmit="saveAuction(event)" id="auctionForm">
@@ -8572,12 +8593,16 @@
             });
             const mergedList = cloudWatchlist.map(function(row) {
                 var local = localMap[(row.stock || '').trim()];
-                // note/changePct/topics：云端有值才覆盖，否则保留本地（避免抓取程序空字段覆盖主程序手动编辑的备注）
+                // volume/yestVolume/note/changePct/topics：云端有值才覆盖，否则保留本地
+                // （避免"补全昨日竞价量"和"补全/对比日昨成交量"等只更新单个字段的操作，
+                // 被随后的云端拉取用另一字段的旧/空值把刚写入的本地字段冲掉——
+                // 两个按钮各自只 upsert 自己关心的字段时，upsert 整行仍会带上当时读到的
+                // 另一字段旧值，若不在这里做字段级保护，会互相清空对方的结果）
                 return {
                     stock: row.stock,
                     code: row.code || (local ? (local.code || '') : ''),
-                    volume: row.volume || '',
-                    yestVolume: row.yest_volume || '',
+                    volume: getNumericVolume(row.volume) !== null ? row.volume : (local ? (local.volume || '') : ''),
+                    yestVolume: getNumericVolume(row.yest_volume) !== null ? row.yest_volume : (local ? (local.yestVolume || '') : ''),
                     note: (row.note && row.note.trim()) ? row.note : (local ? (local.note || '') : ''),
                     changePct: (row.change_pct && String(row.change_pct).trim()) ? row.change_pct : (local ? (local.changePct || '') : ''),
                     topics: (row.topics && row.topics.trim()) ? row.topics : (local ? (local.topics || '') : ''),
@@ -9376,6 +9401,12 @@
             const sb = getSupabase();
             const result = {};
             _auctionFullRowCache = {};
+            // 旧本地数据：用于给 volume/yestVolume 做"云端有效值优先，否则保留本地"的合并保护。
+            // 这是整表刷新路径（pullFromCloud → pullAuctionFromTable，触发于重连/其它设备推送等），
+            // 与 pullAuctionMarketDataForDate（单日期 Realtime 增量更新）是同一类 bug 的另一个触发口：
+            // 若两个只更新单个字段（volume 或 yestVolume）的补全按钮之间恰好插入一次整表刷新，
+            // 刷新时如果无条件用云端值覆盖，会把云端当时还没来得及写入的那个字段冲空。
+            const oldLocalAuction = (loadAllData().auction) || {};
             let offset = 0;
             const pageSize = 1000;
             while (true) {
@@ -9385,7 +9416,7 @@
                 if (error) throw error;
                 if (!data || data.length === 0) break;
                 data.forEach(function(row) {
-                    // 全量快照缓存：包含所有行（in_watchlist true/false）
+                    // 全量快照缓存：包含所有行（in_watchlist true/false），忠实反映云端真实数据，不做本地合并
                     if (!_auctionFullRowCache[row.date]) _auctionFullRowCache[row.date] = [];
                     _auctionFullRowCache[row.date].push({
                         stock: row.stock,
@@ -9404,11 +9435,13 @@
                     // 返回值只含 in_watchlist=true 行（供 allData.auction 渲染）
                     if (row.in_watchlist) {
                         if (!result[row.date]) result[row.date] = [];
+                        const localList = oldLocalAuction[row.date] || [];
+                        const local = localList.find(function(s) { return s && s.stock && s.stock.trim() === (row.stock || '').trim(); });
                         result[row.date].push({
                             stock: row.stock,
                             code: row.code || '',
-                            volume: row.volume || '',
-                            yestVolume: row.yest_volume || '',
+                            volume: getNumericVolume(row.volume) !== null ? row.volume : (local ? (local.volume || '') : ''),
+                            yestVolume: getNumericVolume(row.yest_volume) !== null ? row.yest_volume : (local ? (local.yestVolume || '') : ''),
                             note: row.note || '',
                             changePct: row.change_pct || '',
                             topics: row.topics || '',
@@ -9425,6 +9458,7 @@
             _auctionTableAvailable = true;
             return result;
         }
+
 
         // ===== daily_highlights 表操作（预计算竞/昨高光，加速加载）=====
 
@@ -9584,14 +9618,17 @@
                     // 返回值只含 in_watchlist=true 行（供渲染）
                     if (row.in_watchlist) {
                         if (!result[row.date]) result[row.date] = [];
-                        // 查找本地旧数据，合并 note/changePct/topics（云端有值才覆盖）
+                        // 查找本地旧数据，合并 volume/yestVolume/note/changePct/topics（云端有值才覆盖）
+                        // 同早盘竞价 tab 的 pullAuctionMarketDataForDate：volume/yestVolume 若不做
+                        // "云端有值才覆盖，否则保留本地"的保护，"补全昨日竞价量"和"补全/对比日
+                        // 昨日成交量"这类只更新单个字段的按钮会在云端拉取时互相冲掉对方的结果。
                         const localList = oldLocalData[row.date] || [];
                         const local = localList.find(s => s && s.stock && s.stock.trim() === (row.stock || '').trim());
                         result[row.date].push({
                             stock: row.stock,
                             code: row.code || (local ? (local.code || '') : ''),
-                            volume: row.volume || '',
-                            yestVolume: row.yest_volume || '',
+                            volume: getNumericVolume(row.volume) !== null ? row.volume : (local ? (local.volume || '') : ''),
+                            yestVolume: getNumericVolume(row.yest_volume) !== null ? row.yest_volume : (local ? (local.yestVolume || '') : ''),
                             note: (row.note && row.note.trim()) ? row.note : (local ? (local.note || '') : ''),
                             changePct: (row.change_pct && String(row.change_pct).trim()) ? row.change_pct : (local ? (local.changePct || '') : ''),
                             topics: (row.topics && row.topics.trim()) ? row.topics : (local ? (local.topics || '') : ''),
@@ -14869,6 +14906,164 @@
             }
         }
 
+        // ================================================================
+        // 接口诊断（热门股票 tab 独立版本）
+        // 只读检查，不修改任何数据。与早盘竞价 tab 的 runAuctionApiDiagnostics
+        // 结构对称，但完全独立：只读写 hotAuctionData / _hotFullRowCache /
+        // _hotTrendsCache 等热门股票专属状态，不调用早盘竞价的任何函数。
+        // 额外体检 hot_stock_trends 独立表（热门股票 tab 特有，早盘竞价没有）。
+        // ================================================================
+        function runHotApiDiagnostics() {
+            const lines = [];
+            const push = function(s) { lines.push(s); };
+            const now = new Date();
+
+            push('===== 热门股票 接口诊断报告 =====');
+            push('生成时间：' + now.toLocaleString('zh-CN', { hour12: false }));
+            push('');
+
+            try {
+                const today = currentDate;
+                const yesterday = getPreviousTradingDay(today);
+                const dayBefore = yesterday ? getPreviousTradingDay(yesterday) : null;
+                push('【交易日】当前日期(today)=' + today);
+                push('　　　　  上一交易日(yesterday)=' + (yesterday || '（无法确定）'));
+                push('　　　　  前两交易日(dayBefore)=' + (dayBefore || '（无法确定）'));
+                push('');
+
+                const hotAuctionData = getHotAuctionData();
+                const scMap = loadAllData().stockCodeMap || {};
+
+                // ---- 今日列表体检 ----
+                const todayList = (hotAuctionData[today] || []).filter(function(s) { return s && s.stock; });
+                push('【今日列表 ' + today + '】共 ' + todayList.length + ' 只');
+                let todayVolMiss = 0, todayYestMiss = 0, todayCodeMiss = 0;
+                todayList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (!code) todayCodeMiss++;
+                    if (getNumericVolume(s.volume) === null) todayVolMiss++;
+                    if (getNumericVolume(s.yestVolume) === null) todayYestMiss++;
+                });
+                push('　　缺代码映射：' + todayCodeMiss + ' 只');
+                push('　　缺竞价量(volume)：' + todayVolMiss + ' 只');
+                push('　　缺成交量(yestVolume)：' + todayYestMiss + ' 只');
+                push('　　逐只明细（股票 | 代码 | volume竞价量 | yestVolume成交量 | 涨幅）：');
+                todayList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim() || '(无)';
+                    push('　　  ' + s.stock + ' | ' + code + ' | vol=' + (s.volume || '(空)') +
+                         ' | yest=' + (s.yestVolume || '(空)') + ' | pct=' + (s.changePct || '(空)'));
+                });
+                push('');
+
+                // ---- 对比日列表体检 ----
+                const yesterdayList = yesterday ? (hotAuctionData[yesterday] || []).filter(function(s) { return s && s.stock; }) : [];
+                push('【对比日列表 ' + (yesterday || '') + '】共 ' + yesterdayList.length + ' 只');
+                let yVolMiss = 0, yYestMiss = 0;
+                yesterdayList.forEach(function(s) {
+                    if (getNumericVolume(s.volume) === null) yVolMiss++;
+                    if (getNumericVolume(s.yestVolume) === null) yYestMiss++;
+                });
+                push('　　缺竞价量(volume)：' + yVolMiss + ' 只');
+                push('　　缺成交量(yestVolume)：' + yYestMiss + ' 只');
+                push('　　逐只明细（股票 | volume竞价量 | yestVolume成交量）：');
+                yesterdayList.forEach(function(s) {
+                    push('　　  ' + s.stock + ' | vol=' + (s.volume || '(空)') + ' | yest=' + (s.yestVolume || '(空)'));
+                });
+                push('');
+
+                // ---- 保存路径体检 ----
+                push('【保存路径】');
+                push('　　saveHotStocks 函数存在（表单提交绑定）：' + (typeof saveHotStocks === 'function'));
+                const formEl = document.getElementById('hotForm');
+                push('　　#hotForm 表单元素存在：' + (!!formEl));
+                push('　　#hotForm onsubmit 绑定：' + (formEl && formEl.getAttribute('onsubmit') || '（未找到）'));
+                push('　　云端表 hot_stocks 可用(_hotAuctionTableAvailable)：' + _hotAuctionTableAvailable);
+                push('　　云端表 hot_stock_trends 可用(_hotTrendsTableAvailable)：' + _hotTrendsTableAvailable);
+                push('　　_syncState（云同步状态）：' + _syncState);
+                push('　　说明：热门股票数据不落 localStorage 的 auction 模块，直接以 hot_stocks /');
+                push('　　　　 hot_stock_trends 两张云端表为准，故这里不检查 localStorage。');
+                push('');
+
+                // ---- 趋势图数据源体检（hot_stocks 全量快照 + hot_stock_trends 独立表） ----
+                push('【趋势图数据源 1/2：_hotFullRowCache（来自 hot_stocks 表）】');
+                const todayCache = _hotFullRowCache[today] || [];
+                const yestCache = yesterday ? (_hotFullRowCache[yesterday] || []) : [];
+                push('　　' + today + ' 快照行数：' + todayCache.length);
+                push('　　' + (yesterday || '') + ' 快照行数：' + yestCache.length);
+
+                push('【趋势图数据源 2/2：_hotTrendsCache（来自 hot_stock_trends 独立表）】');
+                const todayTrend = _hotTrendsCache[today] || [];
+                const yestTrend = yesterday ? (_hotTrendsCache[yesterday] || []) : [];
+                push('　　' + today + ' 趋势行数：' + todayTrend.length);
+                push('　　' + (yesterday || '') + ' 趋势行数：' + yestTrend.length);
+
+                if (todayList.length > 0) {
+                    const sample = todayList[0];
+                    const cacheRow = todayCache.find(function(r) { return r.stock === sample.stock; });
+                    const trendRow = todayTrend.find(function(r) { return r.stock === sample.stock; });
+                    push('　　抽样核对「' + sample.stock + '」：');
+                    push('　　　内存(hotAuctionData) volume=' + (sample.volume || '(空)') + ' / yestVolume=' + (sample.yestVolume || '(空)'));
+                    push('　　　快照(_hotFullRowCache) volume=' + (cacheRow ? (cacheRow.volume || '(空)') : '（无此股票）') +
+                         ' / yest_volume=' + (cacheRow ? (cacheRow.yest_volume || '(空)') : '（无此股票）'));
+                    push('　　　趋势表(_hotTrendsCache) volume=' + (trendRow ? (trendRow.volume || '(空)') : '（无此股票）') +
+                         ' / yest_volume=' + (trendRow ? (trendRow.yest_volume || '(空)') : '（无此股票）'));
+                    const mismatch = cacheRow && ((cacheRow.volume || '') !== (sample.volume || '') || (cacheRow.yest_volume || '') !== (sample.yestVolume || ''));
+                    const mismatch2 = trendRow && ((trendRow.volume || '') !== (sample.volume || '') || (trendRow.yest_volume || '') !== (sample.yestVolume || ''));
+                    if (mismatch) push('　　　⚠️ 内存与 hot_stocks 快照不一致，可能显示旧值');
+                    if (mismatch2) push('　　　⚠️ 内存与 hot_stock_trends 趋势表不一致，趋势图可能显示旧值');
+                }
+                push('');
+
+                // ---- Realtime / 防抖 / 推送屏蔽窗口 体检 ----
+                push('【Realtime 与推送状态】');
+                push('　　_justPushedHotAuction（hot_stocks 刚推送屏蔽窗口）：' + _justPushedHotAuction);
+                push('　　_justPushedHotTrends（hot_stock_trends 刚推送屏蔽窗口）：' + _justPushedHotTrends);
+                push('　　_hotAuctionRealtimeTimer 是否有待执行的防抖拉取：' + (_hotAuctionRealtimeTimer !== null));
+                push('　　说明：热门股票 tab 有 hot_stocks / hot_stocks_highlights / hot_stock_trends');
+                push('　　　　 三张表共用同一个防抖池，任一张表变化都会触发重新拉取。若两次点击');
+                push('　　　　 补全按钮之间插入了一次拉取，云端当时若还没有另一字段的最新值，');
+                push('　　　　 本次已修复为「云端有效值才覆盖，否则保留本地」，若仍复现请把本报告完整复制发出。');
+                push('');
+
+                push('===== 报告结束 =====');
+            } catch (e) {
+                push('');
+                push('❌ 诊断过程出错：' + (e && e.message ? e.message : String(e)));
+                if (e && e.stack) push(e.stack);
+            }
+
+            showHotDiagReport(lines.join('\n'));
+            setApiStatus('hotDiagStatus', '✅ 诊断完成，请复制报告发给开发者', true);
+        }
+
+        // 展示热门股票诊断报告的弹窗（热门股票 tab 独立 DOM，不与早盘竞价共用）
+        function showHotDiagReport(text) {
+            const overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;';
+            overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+            overlay.innerHTML = `
+                <div style="background:#111827;color:#bbf7d0;border-radius:12px;max-width:100%;width:100%;max-height:80vh;display:flex;flex-direction:column;font-family:monospace;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #374151;">
+                        <span style="color:#fff;font-weight:600;">热门股票 · 接口诊断报告</span>
+                        <div>
+                            <button id="_hotDiagCopyBtn" style="margin-right:8px;background:#059669;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;">复制</button>
+                            <button id="_hotDiagCloseBtn" style="background:#374151;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;">关闭</button>
+                        </div>
+                    </div>
+                    <pre style="margin:0;padding:12px 16px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.5;">${text.replace(/</g, '&lt;')}</pre>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+            document.getElementById('_hotDiagCloseBtn').onclick = function() { overlay.remove(); };
+            document.getElementById('_hotDiagCopyBtn').onclick = function() {
+                navigator.clipboard && navigator.clipboard.writeText(text).then(function() {
+                    showToast('✅ 已复制诊断报告');
+                }).catch(function() {
+                    showToast('❌ 复制失败，请长按选中手动复制');
+                });
+            };
+        }
+
         // ---------- 猫抓（热门股票）：补全题材（开盘啦，只填 topics 为空的股票） ----------
         async function fillHotTopicsFromNumcat(btn) {
             setBtnLoading(btn, true);
@@ -15278,6 +15473,162 @@
             } finally {
                 setBtnLoading(btn, false);
             }
+        }
+
+        // ================================================================
+        // 接口诊断（早盘竞价 tab 独立版本）
+        // 只读检查，不修改任何数据。用于排查"补全昨日成交量"（同花顺）和
+        // "补全昨日竞价量"（猫抓）互相冲掉对方字段的问题：把当前内存里的
+        // volume/yestVolume 真实取值、保存路径、保存按钮绑定、趋势图缓存
+        // 一次性列出来，人工或截图/复制给开发者比对，不靠猜测。
+        // 与热门股票 tab 的 runHotApiDiagnostics 完全独立，不共用任何函数、
+        // 不读写 hotAuctionData / _hotFullRowCache 等热门股票的数据。
+        // ================================================================
+        function runAuctionApiDiagnostics() {
+            const lines = [];
+            const push = function(s) { lines.push(s); };
+            const now = new Date();
+
+            push('===== 早盘竞价 接口诊断报告 =====');
+            push('生成时间：' + now.toLocaleString('zh-CN', { hour12: false }));
+            push('');
+
+            try {
+                const today = currentDate;
+                const yesterday = getPreviousTradingDay(today);
+                const dayBefore = yesterday ? getPreviousTradingDay(yesterday) : null;
+                push('【交易日】当前日期(today)=' + today);
+                push('　　　　  上一交易日(yesterday)=' + (yesterday || '（无法确定）'));
+                push('　　　　  前两交易日(dayBefore)=' + (dayBefore || '（无法确定）'));
+                push('');
+
+                const auctionData = getAuctionData();
+                const scMap = loadAllData().stockCodeMap || {};
+
+                // ---- 今日列表体检 ----
+                const todayList = (auctionData[today] || []).filter(function(s) { return s && s.stock; });
+                push('【今日列表 ' + today + '】共 ' + todayList.length + ' 只');
+                let todayVolMiss = 0, todayYestMiss = 0, todayCodeMiss = 0;
+                todayList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim();
+                    if (!code) todayCodeMiss++;
+                    if (getNumericVolume(s.volume) === null) todayVolMiss++;
+                    if (getNumericVolume(s.yestVolume) === null) todayYestMiss++;
+                });
+                push('　　缺代码映射：' + todayCodeMiss + ' 只');
+                push('　　缺竞价量(volume)：' + todayVolMiss + ' 只');
+                push('　　缺成交量(yestVolume)：' + todayYestMiss + ' 只');
+                push('　　逐只明细（股票 | 代码 | volume竞价量 | yestVolume成交量 | 涨幅）：');
+                todayList.forEach(function(s) {
+                    const code = (s.code || scMap[s.stock.trim()] || '').trim() || '(无)';
+                    push('　　  ' + s.stock + ' | ' + code + ' | vol=' + (s.volume || '(空)') +
+                         ' | yest=' + (s.yestVolume || '(空)') + ' | pct=' + (s.changePct || '(空)'));
+                });
+                push('');
+
+                // ---- 对比日列表体检 ----
+                const yesterdayList = yesterday ? (auctionData[yesterday] || []).filter(function(s) { return s && s.stock; }) : [];
+                push('【对比日列表 ' + (yesterday || '') + '】共 ' + yesterdayList.length + ' 只');
+                let yVolMiss = 0, yYestMiss = 0;
+                yesterdayList.forEach(function(s) {
+                    if (getNumericVolume(s.volume) === null) yVolMiss++;
+                    if (getNumericVolume(s.yestVolume) === null) yYestMiss++;
+                });
+                push('　　缺竞价量(volume)：' + yVolMiss + ' 只');
+                push('　　缺成交量(yestVolume)：' + yYestMiss + ' 只');
+                push('　　逐只明细（股票 | volume竞价量 | yestVolume成交量）：');
+                yesterdayList.forEach(function(s) {
+                    push('　　  ' + s.stock + ' | vol=' + (s.volume || '(空)') + ' | yest=' + (s.yestVolume || '(空)'));
+                });
+                push('');
+
+                // ---- 保存路径体检 ----
+                push('【保存路径】');
+                push('　　saveModule 函数存在：' + (typeof saveModule === 'function'));
+                push('　　saveAuction 函数存在（表单提交绑定）：' + (typeof saveAuction === 'function'));
+                const formEl = document.getElementById('auctionForm');
+                push('　　#auctionForm 表单元素存在：' + (!!formEl));
+                push('　　#auctionForm onsubmit 绑定：' + (formEl && formEl.getAttribute('onsubmit') || '（未找到）'));
+                try {
+                    const raw = localStorage.getItem('stockApp_v42_auction');
+                    push('　　localStorage[stockApp_v42_auction] 存在：' + (raw !== null) + '，长度=' + (raw ? raw.length : 0));
+                    if (raw) {
+                        const parsed = JSON.parse(raw);
+                        const todayInLS = (parsed[today] || []).length;
+                        push('　　localStorage 中 ' + today + ' 的股票数：' + todayInLS +
+                             (todayInLS === todayList.length ? '（与内存一致 ✅）' : '（与内存不一致 ⚠️，内存=' + todayList.length + '）'));
+                    }
+                } catch (e) {
+                    push('　　localStorage 读取失败：' + e.message);
+                }
+                push('　　云端表 auction_data 可用(_auctionTableAvailable)：' + _auctionTableAvailable);
+                push('　　_syncState（云同步状态）：' + _syncState);
+                push('');
+
+                // ---- 趋势图数据源体检 ----
+                push('【趋势图数据源 _auctionFullRowCache】');
+                const todayCache = _auctionFullRowCache[today] || [];
+                const yestCache = yesterday ? (_auctionFullRowCache[yesterday] || []) : [];
+                push('　　' + today + ' 快照行数：' + todayCache.length);
+                push('　　' + (yesterday || '') + ' 快照行数：' + yestCache.length);
+                if (todayList.length > 0) {
+                    const sample = todayList[0];
+                    const cacheRow = todayCache.find(function(r) { return r.stock === sample.stock; });
+                    push('　　抽样核对「' + sample.stock + '」：');
+                    push('　　　内存 volume=' + (sample.volume || '(空)') + ' / 快照 volume=' + (cacheRow ? (cacheRow.volume || '(空)') : '（快照中无此股票）'));
+                    push('　　　内存 yestVolume=' + (sample.yestVolume || '(空)') + ' / 快照 yest_volume=' + (cacheRow ? (cacheRow.yest_volume || '(空)') : '（快照中无此股票）'));
+                    if (cacheRow && ((cacheRow.volume || '') !== (sample.volume || '') || (cacheRow.yest_volume || '') !== (sample.yestVolume || ''))) {
+                        push('　　　⚠️ 内存与趋势图快照不一致，趋势图可能显示旧值，建议重新进入该 tab 或等待下次云端同步');
+                    }
+                }
+                push('');
+
+                // ---- Realtime / 防抖 / 推送屏蔽窗口 体检 ----
+                push('【Realtime 与推送状态】');
+                push('　　_justPushedAuction（是否处于"刚推送、屏蔽自身回显"窗口内）：' + _justPushedAuction);
+                push('　　_auctionRealtimeTimer 是否有待执行的防抖拉取：' + (_auctionRealtimeTimer !== null));
+                push('　　说明：若两次点击补全按钮之间，_justPushedAuction 曾经变回 false 且触发了云端拉取，');
+                push('　　　　 云端当时若还没有另一字段的最新值，理论上会覆盖本地——本次已修复为');
+                push('　　　　「云端有效值才覆盖，否则保留本地」，若仍复现请把本报告完整复制发出。');
+                push('');
+
+                push('===== 报告结束 =====');
+            } catch (e) {
+                push('');
+                push('❌ 诊断过程出错：' + (e && e.message ? e.message : String(e)));
+                if (e && e.stack) push(e.stack);
+            }
+
+            showAuctionDiagReport(lines.join('\n'));
+            setApiStatus('auctionDiagStatus', '✅ 诊断完成，请复制报告发给开发者', true);
+        }
+
+        // 展示早盘竞价诊断报告的弹窗（早盘竞价 tab 独立 DOM，不与热门股票共用）
+        function showAuctionDiagReport(text) {
+            const overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;';
+            overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+            overlay.innerHTML = `
+                <div style="background:#111827;color:#bbf7d0;border-radius:12px;max-width:100%;width:100%;max-height:80vh;display:flex;flex-direction:column;font-family:monospace;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #374151;">
+                        <span style="color:#fff;font-weight:600;">早盘竞价 · 接口诊断报告</span>
+                        <div>
+                            <button id="_auctionDiagCopyBtn" style="margin-right:8px;background:#059669;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;">复制</button>
+                            <button id="_auctionDiagCloseBtn" style="background:#374151;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;">关闭</button>
+                        </div>
+                    </div>
+                    <pre style="margin:0;padding:12px 16px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.5;">${text.replace(/</g, '&lt;')}</pre>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+            document.getElementById('_auctionDiagCloseBtn').onclick = function() { overlay.remove(); };
+            document.getElementById('_auctionDiagCopyBtn').onclick = function() {
+                navigator.clipboard && navigator.clipboard.writeText(text).then(function() {
+                    showToast('✅ 已复制诊断报告');
+                }).catch(function() {
+                    showToast('❌ 复制失败，请长按选中手动复制');
+                });
+            };
         }
 
 
