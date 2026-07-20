@@ -8334,7 +8334,43 @@
         let _justPushed = false; // 刚推送完，忽略自己触发的 Realtime 通知
         let _justPushedAuction = false; // 刚推送 auction_data，忽略自己触发的 Realtime 通知
         let _auctionRealtimeChannel = null;
-        let _auctionFullRowCache = {}; // 合表后全量快照缓存 {date: [all rows]}，供历史行情查询
+        // ── 阶段二 D 新增：批量并发屏蔽窗口计数器 ─────────────────────────────
+        // 旧实现里每个 push 函数各自 _justPushedAuction = true / setTimeout(false, 2000)，
+        // 多个批量并发时（比如猫抓 today + yesterday 两批同时跑），先完成那批的 2 秒计时
+        // 可能在后完成那批的网络请求还在空中就到点，把屏蔽关掉，导致后完成那批的
+        // Realtime 回显被误判为"外部通知"而触发刷新，UI 出现闪烁。
+        // 改为计数器：每次开屏蔽 +1，每次关屏蔽 -1，归零时再延后 2 秒清空 boolean。
+        // 这样并发批量整体闭合，最后一次关闭的 2 秒内仍能屏蔽所有自身回显。
+        let _justPushedAuctionCounter = 0;
+        let _justPushedAuctionTimer = null;
+        function _openAuctionShield() {
+            _justPushedAuctionCounter++;
+            _justPushedAuction = true;
+            if (_justPushedAuctionTimer) {
+                clearTimeout(_justPushedAuctionTimer);
+                _justPushedAuctionTimer = null;
+            }
+        }
+        function _closeAuctionShield(delayMs) {
+            _justPushedAuctionCounter = Math.max(0, _justPushedAuctionCounter - 1);
+            if (_justPushedAuctionCounter === 0) {
+                if (_justPushedAuctionTimer) clearTimeout(_justPushedAuctionTimer);
+                _justPushedAuctionTimer = setTimeout(function() {
+                    _justPushedAuction = false;
+                    _justPushedAuctionTimer = null;
+                }, delayMs || 2000);
+            }
+        }
+        let _auctionFullRowCache_DELETED = null; // 阶段三 E：已删除，保留占位避免其它处误引用导致 ReferenceError；查询统一改走 _auctionMemCache
+        // ── 独立化改造 阶段一 新增 ──────────────────────────────────────────
+        // _auctionMemCache：早盘竞价模块级独立内存缓存，做法与 _jiwangMemCache/_biddingMemCache 一致：
+        // 不挂在全局 allData 下，不受任何模块触发的 allData=null 重置连坐。
+        // 结构 {date: [items]}，与旧 getAuctionData() 返回值结构保持一致，供现有渲染代码平滑过渡。
+        // 【阶段三 E 起】_auctionFullRowCache 已退场，本缓存兼任"全量快照"职责：
+        //   - 存当天所有行（正式列表成员 in_watchlist=true + 影子记录 in_watchlist=false）
+        //   - 趋势图查询直接读全部行（getStockHistoryValue / getAuctionStockHistory）
+        //   - tap 主列表渲染时由调用方过滤 in_watchlist===true
+        let _auctionMemCache = {};
         let _dailyHighlightsCache = {}; // {date: Set(stockNames)} 预计算的竞/昨高光
         let _highlightsTableAvailable = false;
         let _highlightsPushTimer = null;
@@ -8559,7 +8595,7 @@
             if (error) throw error;
 
             // 全量快照缓存：包含该日期所有行（in_watchlist true/false），供历史行情查询
-            _auctionFullRowCache[date] = (data || []).map(function(row) {
+            const normalizedRows = (data || []).map(function(row) {
                 return {
                     stock: row.stock,
                     code: row.code || '',
@@ -8575,6 +8611,10 @@
                     fixed: row.fixed || false
                 };
             });
+            // 阶段三 E：_auctionFullRowCache 已退场，_auctionMemCache 整段替换（对齐 bidding 模式 pullBiddingForDate），
+            // 不再做字段级合并猜测——字段级保护已在 patchAuctionFieldBatch 的 upsert SET 子句层面根治
+            // （只写 patch 携带的列，不会带旧值），这里再合并只会引入"本地旧值覆盖云端新值"的新竞态。
+            _auctionMemCache[date] = normalizedRows;
 
             const auctionData = getAuctionData();
             const localList = auctionData[date] || [];
@@ -8626,9 +8666,10 @@
             }
         }
 
-        // 查询某只股票在某日期的曲线数据（仅查全量快照缓存 _auctionFullRowCache / _hotFullRowCache）
+        // 查询某只股票在某日期的曲线数据
+        // 阶段三 E：auction 数据源改读 _auctionMemCache（含 in_watchlist true/false 全部行，供趋势图历史查询）
         function getStockHistoryValue(date, stockName, field, dataSource='auction') {
-            const cache = dataSource === 'hot' ? _hotFullRowCache : _auctionFullRowCache;
+            const cache = dataSource === 'hot' ? _hotFullRowCache : _auctionMemCache;
             const rows = cache[date];
             if (!rows) return null;
             const rawField = field === 'volume' ? 'volume' : 'yest_volume';
@@ -9396,11 +9437,11 @@
         let _lastPushedAuctionStatus = '';  // 上次推送的 auction 状态签名（避免无变化时重复推送）
 
         // 从 auction_data 表全量读取，组装成 {date: [{stock,code,volume,yestVolume,note,changePct,topics,selected,bought,sold,fixed}]} 结构
-        // 同时构建 _auctionFullRowCache 全量快照缓存（含 in_watchlist=false 行），供历史行情查询
+        // 阶段三 E：原 _auctionFullRowCache 已退场，全量快照改由 _auctionMemCache 担任（含 in_watchlist=false 影子记录，供趋势图历史查询）
         async function pullAuctionFromTable() {
             const sb = getSupabase();
             const result = {};
-            _auctionFullRowCache = {};
+            _auctionMemCache = {};
             // 旧本地数据：用于给 volume/yestVolume 做"云端有效值优先，否则保留本地"的合并保护。
             // 这是整表刷新路径（pullFromCloud → pullAuctionFromTable，触发于重连/其它设备推送等），
             // 与 pullAuctionMarketDataForDate（单日期 Realtime 增量更新）是同一类 bug 的另一个触发口：
@@ -9417,8 +9458,8 @@
                 if (!data || data.length === 0) break;
                 data.forEach(function(row) {
                     // 全量快照缓存：包含所有行（in_watchlist true/false），忠实反映云端真实数据，不做本地合并
-                    if (!_auctionFullRowCache[row.date]) _auctionFullRowCache[row.date] = [];
-                    _auctionFullRowCache[row.date].push({
+                    if (!_auctionMemCache[row.date]) _auctionMemCache[row.date] = [];
+                    _auctionMemCache[row.date].push({
                         stock: row.stock,
                         code: row.code || '',
                         volume: row.volume || '',
@@ -10332,10 +10373,131 @@
             }
         }
 
+        // ════════════════════════════════════════════════════════════════
+        // 独立化改造 阶段一 新增：字段级增量写入接口
+        // ════════════════════════════════════════════════════════════════
+        // 设计原则（对齐大厂标准思路：PATCH 而非 PUT，服务端字段级合并而非客户端整段覆盖）：
+        //   1. 调用方只传"这次真正要改的字段"，不传的字段既不出现在云端 SQL 的 SET 子句里，
+        //      也不覆盖 _auctionMemCache 里该行的其它字段。
+        //   2. 本地写入是"merge 指定字段到已有行"，不是"整行/整个数组替换"——
+        //      这是根治"旧快照覆盖新数据"竞态的关键，替代原来"读一份 slice() 快照、
+        //      await 网络请求、结束后整段写回 auctionData[date]"的模式。
+        //   3. 云端 upsert 的冲突键固定为 date,stock（沿用现有 auction_data 表约定，不改动）。
+        //   4. in_watchlist 字段不属于这两个函数的管辖范围——它由"该股票是否在当前正式列表"
+        //      这一业务规则决定，写入逻辑保留在 syncAuctionListForDate 等现有函数里，
+        //      不要通过 patch 参数传入 in_watchlist，也不要在这两个函数内部推断它。
+        //
+        // 【阶段一范围说明】本次只新增这两个函数本身并验证其独立工作正常，不改造任何旧调用方
+        // （猫抓/同花顺/其它写入入口切换到调用这两个函数，属于任务分工文档里的阶段二 B/C；
+        // Realtime 屏蔽窗口按批量操作整体开合的调整，属于阶段二 D；
+        // _auctionFullRowCache 退场与查询函数改造，属于阶段三 E —— 已完成）。
+        //
+        // 可 patch 的字段范围（对应表里由抓取程序/主程序共同维护的业务列）：
+        //   volume, yest_volume, note, change_pct, topics, code, selected, bought, sold, fixed
+        // 不允许出现在 patch 里的字段：in_watchlist（原因见上），date/stock（这两个是定位列，
+        //   通过函数参数单独传入，不放在 patch 对象里，避免和定位语义混淆）。
+
+        // 允许 patch 的字段白名单，防止调用方不小心把 in_watchlist、date、stock 等
+        // 非受控字段混进 patch 对象，在 SQL 生成阶段被悄悄一起写进 SET 子句。
+        const AUCTION_PATCHABLE_FIELDS = ['volume', 'yest_volume', 'note', 'change_pct', 'topics', 'code', 'selected', 'bought', 'sold', 'fixed'];
+
+        // 从调用方传入的 patch 对象中，只挑出白名单内、且确实存在（!== undefined）的字段。
+        // 之所以要求"确实存在"而不是"值为真"，是因为 false/''/0 都是合法的业务值
+        // （比如 selected: false 也是一次有意义的字段更新，不能被过滤掉）。
+        function _sanitizeAuctionPatch(patch) {
+            const clean = {};
+            if (!patch) return clean;
+            AUCTION_PATCHABLE_FIELDS.forEach(function(key) {
+                if (Object.prototype.hasOwnProperty.call(patch, key) && patch[key] !== undefined) {
+                    clean[key] = patch[key];
+                }
+            });
+            return clean;
+        }
+
+        // 本地 merge：只把 clean patch 里出现的字段写进 _auctionMemCache 对应行，
+        // 不存在的行则新建（新建时 in_watchlist 默认 false，因为“新建”只可能发生在
+        // 单字段补数据场景——正式列表成员的创建/移除仍由 syncAuctionListForDate 负责）。
+        // 不做整个数组替换、不做整个对象替换，只动被点名的字段。
+        function _mergeAuctionPatchLocal(date, stock, cleanPatch) {
+            const nameTrim = (stock || '').trim();
+            if (!nameTrim) return;
+            if (!_auctionMemCache[date]) _auctionMemCache[date] = [];
+            const list = _auctionMemCache[date];
+            const idx = list.findIndex(function(r) { return r && r.stock === nameTrim; });
+            if (idx >= 0) {
+                Object.keys(cleanPatch).forEach(function(k) { list[idx][k] = cleanPatch[k]; });
+            } else {
+                const row = Object.assign({ stock: nameTrim, in_watchlist: false }, cleanPatch);
+                list.push(row);
+            }
+        }
+
+        // 单条字段级写入：只上报/只覆盖 patch 里出现的字段。
+        // date: 'YYYY-MM-DD'；stock: 股票名；patch: 形如 {volume: 'xxx'} 或 {yest_volume: 'xxx'}
+        // 返回 {ok: true} 或 {ok: false, error}，调用方按需处理失败（沿用现有代码里
+        // "推送失败仅 console.warn、不阻断主流程"的一贯风格，不在此函数内部强行抛出阻断 UI）。
+        async function patchAuctionField(date, stock, patch) {
+            return patchAuctionFieldBatch(date, [Object.assign({ stock: stock }, patch)]);
+        }
+
+        // 批量字段级写入：一次 upsert 多行，但每行仍然只写调用方指定的那几个字段，
+        // 不会因为"批量"就退化回整行覆盖。用于猫抓/同花顺一次处理几十只股票的场景，
+        // 避免拆成 N 次网络请求；_justPushedAuction 屏蔽窗口按"这一次批量调用"整体开合
+        // （不是每行各开一个），避免批量过程中窗口提前过期、被自身触发的 Realtime 打断。
+        //
+        // items: [{stock, ...patch}, ...]，每个 item 里除 stock 外的其余字段会各自
+        //   经过白名单过滤，不同 item 允许携带不同的字段组合（比如同一批里有的行只改
+        //   volume、有的行只改 note，互不影响）。
+        async function patchAuctionFieldBatch(date, items) {
+            if (!date || !Array.isArray(items) || items.length === 0) return { ok: true, rows: 0 };
+            _openAuctionShield();
+            try {
+                const now = new Date().toISOString();
+                const rows = [];
+                const localOps = [];
+                items.forEach(function(item) {
+                    if (!item || !item.stock) return;
+                    const nameTrim = item.stock.trim();
+                    if (!nameTrim) return;
+                    const cleanPatch = _sanitizeAuctionPatch(item);
+                    if (Object.keys(cleanPatch).length === 0) return; // 没有合法字段可写，跳过
+                    rows.push(Object.assign(
+                        { date: date, stock: nameTrim, updated_at: now, updated_by: 'main' },
+                        cleanPatch
+                    ));
+                    localOps.push({ stock: nameTrim, cleanPatch: cleanPatch });
+                });
+                if (rows.length === 0) return { ok: true, rows: 0 };
+
+                if (_auctionTableAvailable) {
+                    const sb = getSupabase();
+                    const { error } = await sb.from('auction_data')
+                        .upsert(rows, { onConflict: 'date,stock' });
+                    if (error) throw error;
+                }
+
+                // 云端成功后再做本地 merge，避免云端失败时本地和云端出现"本地领先云端"的假象
+                localOps.forEach(function(op) {
+                    _mergeAuctionPatchLocal(date, op.stock, op.cleanPatch);
+                });
+
+                return { ok: true, rows: rows.length };
+            } catch (e) {
+                console.warn('patchAuctionFieldBatch 失败:', date, e && e.message);
+                return { ok: false, error: e };
+            } finally {
+                _closeAuctionShield(2000);
+            }
+        }
+        // ════════════════════════════════════════════════════════════════
+        // 阶段一新增结束
+        // ════════════════════════════════════════════════════════════════
+
         // pushToCloud 中调用：同步 auction 数据到新表
         async function pushAuctionToCloud() {
             if (!_auctionTableAvailable) return; // 表不可用时跳过，回退到 user_data
-            _justPushedAuction = true; // 标记自己推送，忽略 Realtime 通知
+            _openAuctionShield();
             try {
             const dirtyDates = window._auctionDirtyDates ? Array.from(window._auctionDirtyDates) : [];
 
@@ -10365,14 +10527,14 @@
             // 3. 清空脏日期标记
             if (window._auctionDirtyDates) window._auctionDirtyDates.clear();
             } finally {
-                setTimeout(function() { _justPushedAuction = false; }, 2000);
+                _closeAuctionShield(2000);
             }
         }
 
         // 导入功能用：批量 upsert 行情+状态数据（用于 importAuctionFromPaste / importAuctionHistoryFill）
         async function pushAuctionDataToCloud(date, items) {
             if (!_auctionTableAvailable) return;
-            _justPushedAuction = true;
+            _openAuctionShield();
             try {
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
@@ -10404,12 +10566,13 @@
                 .upsert(rows, { onConflict: 'date,stock' });
             if (error) throw error;
 
-            // 推送成功后，直接把这批数据合并进本地全量快照缓存，
+            // 推送成功后，直接把这批数据合并进本地内存缓存，
             // 避免趋势图因 _justPushedAuction 屏蔽了 Realtime 回显而读不到当天刚导入/编辑的数据
-            if (!_auctionFullRowCache[date]) _auctionFullRowCache[date] = [];
+            // 阶段三 E：原 _auctionFullRowCache 已退场，改写 _auctionMemCache（snake_case 字段结构）
+            if (!_auctionMemCache[date]) _auctionMemCache[date] = [];
             rows.forEach(function(row) {
-                var idx = _auctionFullRowCache[date].findIndex(function(r) { return r.stock === row.stock; });
-                var existing = idx >= 0 ? _auctionFullRowCache[date][idx] : null;
+                var idx = _auctionMemCache[date].findIndex(function(r) { return r.stock === row.stock; });
+                var existing = idx >= 0 ? _auctionMemCache[date][idx] : null;
                 var mergedRow = {
                     stock: row.stock, code: row.code,
                     volume: row.volume, yest_volume: row.yest_volume, note: row.note,
@@ -10419,9 +10582,9 @@
                     selected: row.selected, bought: row.bought, sold: row.sold, fixed: row.fixed
                 };
                 if (idx >= 0) {
-                    _auctionFullRowCache[date][idx] = mergedRow;
+                    _auctionMemCache[date][idx] = mergedRow;
                 } else {
-                    _auctionFullRowCache[date].push(mergedRow);
+                    _auctionMemCache[date].push(mergedRow);
                 }
             });
 
@@ -10433,31 +10596,27 @@
                 }));
             }
             } finally {
-                setTimeout(function() { _justPushedAuction = false; }, 2000);
+                _closeAuctionShield(2000);
             }
         }
 
         // 导入代码映射后：批量更新某日期的 code 列
+        // 阶段二 C 改造：改用统一的 patchAuctionFieldBatch，只上报 code 列，
+        // 不再各自发 update 请求；屏蔽窗口、updated_at/updated_by、本地 merge
+        // 都由 patchAuctionFieldBatch 内部统一处理。
         async function pushAuctionCodeToCloud(date) {
             if (!_auctionTableAvailable) return;
-            _justPushedAuction = true;
-            try {
-            const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock; });
-            const now = new Date().toISOString();
-            const tasks = [];
+            const items = [];
             auctionList.forEach(function(item) {
                 var code = scMap[item.stock.trim()] || '';
                 if (code) {
-                    tasks.push(sb.from('auction_data')
-                        .update({ code: code, updated_at: now, updated_by: 'main' })
-                        .eq('date', date).eq('stock', item.stock.trim()));
+                    items.push({ stock: item.stock, code: code });
                 }
             });
-            if (tasks.length > 0) await Promise.all(tasks);
-            } finally {
-                setTimeout(function() { _justPushedAuction = false; }, 2000);
+            if (items.length > 0) {
+                await patchAuctionFieldBatch(date, items);
             }
         }
 
@@ -12979,8 +13138,33 @@
             auctionData[currentDate] = auctionList;
             saveModule('auction');
             invalidateTopicCache();
-            // 同步到 auction_data 独立表（拆表后新增）
-            pushAuctionDataToCloud(currentDate, auctionList);
+            // 同步到 auction_data 独立表（阶段二 C：改为字段级 patch）
+            // 粘贴导入是全量数据写入，覆盖所有业务字段；in_watchlist 不在 patch 白名单内，
+            // 由 syncAuctionListForDate 单独管理（标记 formal list 成员）
+            (function() {
+                const scMap = loadAllData().stockCodeMap || {};
+                const patches = auctionList.filter(function(s) { return s && s.stock; }).map(function(item) {
+                    const nameTrim = item.stock.trim();
+                    return {
+                        stock: nameTrim,
+                        code: scMap[nameTrim] || item.code || '',
+                        volume: item.volume || '',
+                        yest_volume: item.yestVolume || '',
+                        note: item.note || '',
+                        change_pct: item.changePct || '',
+                        topics: item.topics || '',
+                        selected: item.selected || false,
+                        bought: item.bought || false,
+                        sold: item.sold || false,
+                        fixed: item.fixed || false
+                    };
+                });
+                if (patches.length > 0) {
+                    patchAuctionFieldBatch(currentDate, patches).catch(function(e) { console.warn('patchAuctionFieldBatch paste-import 失败:', e); });
+                    // 单独同步 in_watchlist：粘贴导入的股票都应进入正式列表
+                    syncAuctionListForDate(currentDate).catch(function(e) { console.warn('syncAuctionListForDate paste-import 失败:', e); });
+                }
+            })();
             document.getElementById('auctionPasteInput').value = '';
             let statusMsg = '✅ ';
             if (fullDataCount > 0) statusMsg += `新增${fullDataCount}条`;
@@ -13148,6 +13332,12 @@
             let overwritedCount = 0; // 股票存在且字段已有值，本次覆盖（用户要求手动粘贴可覆盖旧错误数据）
             let skippedNotInCurrent = 0; // 当前列表里不存在该股票，跳过（不允许导入无关股票）
             let invalidCount = 0;    // 无法解析的行数
+            // 阶段二 C 改造：收集字段级 patch，结束时调用 patchAuctionFieldBatch 上报。
+            // 本函数只改 volume / yest_volume 这两个字段，patch 里绝不携带 note/topics 等。
+            const historyPatches = [];
+            // twoColField 是 camelCase（'volume' | 'yestVolume'），patch 白名单用 snake_case，
+            // 这里建一个映射，避免下面两列格式分支里临时转换。
+            const twoColPatchKey = twoColField === 'yestVolume' ? 'yest_volume' : 'volume';
 
             lines.forEach((line, index) => {
                 if (!line.trim()) return;
@@ -13193,21 +13383,25 @@
 
                     const item = targetList[existingIndex];
                     let didFill = false;
+                    const patch = { stock: stock };
 
                     if (parsedVolume !== null) {
                         const isEmpty = getNumericVolume(item.volume) === null;
                         item.volume = parsedVolume;
+                        patch.volume = parsedVolume;
                         if (isEmpty) { filledCount++; } else { overwritedCount++; }
                         didFill = true;
                     }
                     if (parsedYest !== null) {
                         const isEmpty = getNumericVolume(item.yestVolume) === null;
                         item.yestVolume = parsedYest;
+                        patch.yest_volume = parsedYest;
                         if (isEmpty) { filledCount++; } else { overwritedCount++; }
                         didFill = true;
                     }
                     if (didFill) {
                         targetList[existingIndex] = { ...item };
+                        historyPatches.push(patch);
                         if (isNewRecord) addedCount++;
                     } else if (isNewRecord) {
                         targetList.pop(); // 新增的记录一个字段都没填上，撤销
@@ -13226,6 +13420,7 @@
                     const existingFieldValue = item[twoColField];
                     const isEmpty = getNumericVolume(existingFieldValue) === null;
                     targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
+                    historyPatches.push({ stock: stock, [twoColPatchKey]: parsedValue });
                     if (isEmpty) { filledCount++; } else { overwritedCount++; }
                     if (isNewRecord) addedCount++;
                 } else {
@@ -13251,8 +13446,10 @@
             auctionData[targetDate] = targetList;
             saveModule('auction');
             invalidateTopicCache();
-            // 同步到 auction_data 独立表（拆表后新增）
-            pushAuctionDataToCloud(targetDate, targetList);
+            // 阶段二 C：改用字段级 patch 上报，只携带 volume/yest_volume，不再整段推送。
+            if (historyPatches.length > 0) {
+                patchAuctionFieldBatch(targetDate, historyPatches).catch(function(e) { console.warn('patchAuctionFieldBatch historyFill 失败:', e); });
+            }
 
             textarea.value = '';
             let statusMsg = `✅ ${targetDate} 补齐${filledCount}个字段`;
@@ -13762,12 +13959,19 @@
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
 
                 let filled = 0, skipped = 0;
+                // 阶段二 B 改造：收集字段级 patch，结束时调用 patchAuctionFieldBatch 上报。
+                // 【重点自查项】patch 对象里只能出现 yest_volume，绝对不能顺手塞 volume——
+                // 原实现 pushAuctionDataToCloud 会把当时内存里的 row.volume 旧值一起带上，
+                // 这是原 bug（先点同花顺再点猫抓互相覆盖）的触发点之一。
+                const yesterdayPatches = [];
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式：已有值跳过
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
+                        // 只上报 yest_volume，不带 volume/change_pct/note 等其它字段
+                        yesterdayPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         filled++;
                     } else {
                         skipped++;
@@ -13797,9 +14001,11 @@
                 auctionData[yesterday] = existingYesterdayList;
                 saveModule('auction');
                 invalidateTopicCache();
-                pushAuctionDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
-                if (shadowOnlyYesterdayStocks.length > 0) {
-                    pushAuctionDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday(影子) 失败:', e); });
+                // 阶段二 B：改用字段级 patch 上报，不再走整段 pushAuctionDataToCloud。
+                // yesterdayPatches 同时包含正式列表成员和影子记录，对 patch 函数而言都是
+                // upsert(date,stock) 定位 + 只写 yest_volume；in_watchlist 不通过 patch 上报。
+                if (yesterdayPatches.length > 0) {
+                    patchAuctionFieldBatch(yesterday, yesterdayPatches).catch(function(e) { console.warn('patchAuctionFieldBatch yesterday 失败:', e); });
                 }
 
                 renderAuctionForm();
@@ -15387,8 +15593,14 @@
                 // overwrite=false：已有值就跳过（补全模式）
                 let filledCount = 0;
                 let skippedCount = 0;
+                // 阶段二 B 改造：收集字段级 patch，结束时调用 patchAuctionFieldBatch 上报，
+                // 只携带本次猫抓真正改动的字段（volume，以及今天的 change_pct/note），
+                // 不再像 pushAuctionDataToCloud 那样把当时内存里的 yest_volume 等其它字段
+                // 一起带上——这正是原始 bug（先点猫抓再点同花顺互相覆盖）的触发点。
+                const todayPatches = [];
+                const yesterdayPatches = [];
 
-                const fillVolume = function(list, dateStr, overwrite, fillPct) {
+                const fillVolume = function(list, dateStr, overwrite, fillPct, patchesArr) {
                     const ymd = dateStr.replace(/-/g, '');
                     const dayData = aucByDate[ymd] || {};
                     list.forEach(function(s) {
@@ -15397,13 +15609,19 @@
                         const code = (s.code || scMap[s.stock.trim()] || '').trim();
                         if (code && dayData[code] != null) {
                             s.volume = String(dayData[code].vol);
+                            // patch 只携带本次改动的字段：volume 一定有
+                            const patch = { stock: s.stock, volume: s.volume };
                             // 只填今天的竞价涨幅；昨日不填涨幅（fillPct=false）
                             if (fillPct && dayData[code].pct) {
                                 if (overwrite || !((s.changePct || '').trim())) {
                                     s.changePct = dayData[code].pct;
                                     s.note = buildNoteFromFields(s.changePct, s.topics);
+                                    // 今天才顺手把 change_pct/note 也写进 patch（猫抓今天确实改了这两个字段）
+                                    patch.change_pct = s.changePct;
+                                    patch.note = s.note;
                                 }
                             }
+                            patchesArr.push(patch);
                             filledCount++;
                         } else {
                             skippedCount++; // 覆盖模式下也会走到这里：无新数据，保留原值
@@ -15412,7 +15630,7 @@
                 };
 
                 if (needToday) {
-                    fillVolume(todayList, today, !!opts.overwriteToday, true);   // 今天：填 volume + 涨幅
+                    fillVolume(todayList, today, !!opts.overwriteToday, true, todayPatches);   // 今天：填 volume + 涨幅
                     auctionData[today] = todayList;
                 }
                 // 同「两全/对比日昨成交量」的修复：needYesterday 场景下 yesterdayList 是
@@ -15421,7 +15639,7 @@
                 let shadowOnlyYesterdayStocks = [];
                 let existingYesterdayList = null;
                 if (needYesterday) {
-                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false); // 昨日：只填 volume
+                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false, yesterdayPatches); // 昨日：只填 volume
                     existingYesterdayList = (auctionData[yesterday] || []).slice();
                     const existingYesterdayNames = {};
                     existingYesterdayList.forEach(function(s) {
@@ -15443,12 +15661,16 @@
                 saveModule('auction');
                 invalidateTopicCache();
 
-                if (needToday) pushAuctionDataToCloud(today, todayList).catch(function(e) { console.warn('pushAuctionDataToCloud today 失败:', e); });
-                if (needYesterday) {
-                    pushAuctionDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday 失败:', e); });
-                    if (shadowOnlyYesterdayStocks.length > 0) {
-                        pushAuctionDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushAuctionDataToCloud yesterday(影子) 失败:', e); });
-                    }
+                // 阶段二 B：改用字段级 patch 上报，不再走整段 pushAuctionDataToCloud。
+                // yesterdayPatches 同时包含"正式列表成员"和"影子记录"——对 patch 函数而言
+                // 两者都是 upsert(date,stock) 定位 + 只写 volume，影子记录在 _auctionMemCache
+                // 里新建时 in_watchlist 默认 false，正是预期行为；in_watchlist 字段不通过 patch 上报，
+                // 由 syncAuctionListForDate 单独管理（清单改造项 2 边界问题）。
+                if (todayPatches.length > 0) {
+                    patchAuctionFieldBatch(today, todayPatches).catch(function(e) { console.warn('patchAuctionFieldBatch today 失败:', e); });
+                }
+                if (yesterdayPatches.length > 0) {
+                    patchAuctionFieldBatch(yesterday, yesterdayPatches).catch(function(e) { console.warn('patchAuctionFieldBatch yesterday 失败:', e); });
                 }
 
                 renderAuctionForm();
@@ -15566,9 +15788,9 @@
                 push('');
 
                 // ---- 趋势图数据源体检 ----
-                push('【趋势图数据源 _auctionFullRowCache】');
-                const todayCache = _auctionFullRowCache[today] || [];
-                const yestCache = yesterday ? (_auctionFullRowCache[yesterday] || []) : [];
+                push('【趋势图数据源 _auctionMemCache】');
+                const todayCache = _auctionMemCache[today] || [];
+                const yestCache = yesterday ? (_auctionMemCache[yesterday] || []) : [];
                 push('　　' + today + ' 快照行数：' + todayCache.length);
                 push('　　' + (yesterday || '') + ' 快照行数：' + yestCache.length);
                 if (todayList.length > 0) {
@@ -16313,7 +16535,7 @@
             const jingYestToggleChecked = document.getElementById(_p + 'SortByJingYestToggle')?.checked;
             const jingYestHighlightSet = getJingYestHighlightSetForDate(currentDate, dataSource);
             // 若全量快照缓存有数据（说明函数内部走了实时计算路径），推送高光到 highlights 表
-            const _fullCache = dataSource === 'hot' ? _hotFullRowCache : _auctionFullRowCache;
+            const _fullCache = dataSource === 'hot' ? _hotFullRowCache : _auctionMemCache;
             if (jingYestHighlightSet && Object.keys(_fullCache).length > 0) {
                 schedulePushDailyHighlights(currentDate, jingYestHighlightSet, dataSource);
             }
@@ -19411,9 +19633,9 @@
                         });
                     } else {
                         saveData();
-                        // 同步推送到 auction_data 云表，避免下次 pullFromCloud 时被云端旧数据覆盖丢失
-                        pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
-                            console.warn('pushAuctionDataToCloud 失败（openAuctionNoteEditFromPage2）:', e);
+                        // 阶段二 C：改为字段级 patch，只更新 note 字段（不动 hot_stocks 分支）
+                        patchAuctionField(currentDate, stockName, { note: normalizedNote }).catch(function(e) {
+                            console.warn('patchAuctionField note 失败（openAuctionNoteEditFromPage2）:', e);
                         });
                     }
 
@@ -20691,7 +20913,7 @@
         // 否则会把"满足平行+差值>0但位数差过大、并未显示蓝色高光"的股票也错误地纳入观察组。
         // 排序 tier0 判定与高光显示口径必须统一调用本函数（同一份返回结果），杜绝分叉。
         function getJingYestHighlightSetForDate(dateStr, dataSource='auction') {
-            // 优先实时计算（与抓取程序口径一致：本地 rawData + 全量快照缓存 _auctionFullRowCache / _hotFullRowCache）
+            // 优先实时计算（与抓取程序口径一致：本地 rawData + 全量快照缓存 _auctionMemCache / _hotFullRowCache）
             // 修复历史 Bug：原先优先用云端 daily_highlights 缓存，可能存的是旧的/错误的高光集合，
             // 导致本地数据更新后高光仍显示旧结果（与抓取程序不一致），且推送有 2s debounce + Realtime 延迟 → 延迟感。
             const stockDiffMap = getJingYestStocksForDate(dateStr, dataSource);
@@ -20718,7 +20940,7 @@
             // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
             const obsStocks = getJingYestHighlightSetForDate(prevDay);
             if (!obsStocks || obsStocks.size === 0) {
-                // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionFullRowCache 会有值）
+                // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionMemCache 会有值）
                 return;
             }
 
@@ -20982,8 +21204,13 @@
                         console.warn('pushHotStocksDataToCloud 失败（showAuctionNoteInput）:', e);
                     });
                 } else {
-                    pushAuctionDataToCloud(currentDate, auctionList).catch(function(e) {
-                        console.warn('pushAuctionDataToCloud 失败（showAuctionNoteInput）:', e);
+                    // 阶段二 C：改为字段级 patch，只更新 note/change_pct/topics 三字段
+                    patchAuctionField(currentDate, auctionList[index].stock, {
+                        note: normalizedNote,
+                        change_pct: parsed.changePct,
+                        topics: parsed.topics
+                    }).catch(function(e) {
+                        console.warn('patchAuctionField note 失败（showAuctionNoteInput）:', e);
                     });
                 }
 
