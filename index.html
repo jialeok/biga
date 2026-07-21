@@ -8585,12 +8585,6 @@
             }
         }
 
-        // 🔍[调试] 监控名单：这几只股票近期在"早盘竞价"里反复出现"凭空出现在正式列表、
-        // 涨幅字段为空"的现象，怀疑是某条云端写入路径把它们错误标记为 in_watchlist=true。
-        // 只要拉取到这些股票的云端原始行，就把完整字段（含 updated_by/updated_at/obs_auto_added）打印出来，
-        // 用于确定是"谁"、"什么时候"把它们的 in_watchlist 写成了 true。
-        var _WATCHED_SUSPECT_STOCKS = new Set(['华银电力', '中嘉博创', '深南电A', '古井贡酒', '桂冠电力', '金牛化工', '乐山电力', '中曼石油']);
-
         // 拉取某日期的行情数据并合并到本地（只更新行情列，保留本地状态标记）
         async function pullAuctionMarketDataForDate(date) {
             if (!_auctionTableAvailable) return;
@@ -8599,29 +8593,6 @@
                 .select('stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed,updated_at,updated_by,obs_auto_added')
                 .eq('date', date);
             if (error) throw error;
-
-            // 🔍[调试] 打印监控名单中的股票在云端的完整原始行（含 updated_by/updated_at/obs_auto_added），
-            // 帮助确认是谁、什么时候写入/提升了 in_watchlist。
-            (function() {
-                var suspectRows = (data || []).filter(function(row) {
-                    return row && row.stock && _WATCHED_SUSPECT_STOCKS.has(row.stock.trim());
-                });
-                if (suspectRows.length > 0) {
-                    console.warn('[调试-可疑股票云端原始数据] date=' + date + ' | 命中监控名单共 ' + suspectRows.length + ' 只:');
-                    suspectRows.forEach(function(row) {
-                        console.warn('  ' + row.stock + ' | in_watchlist=' + row.in_watchlist +
-                            ' | volume=' + row.volume + ' | yest_volume=' + row.yest_volume +
-                            ' | change_pct=' + row.change_pct + ' | obs_auto_added=' + row.obs_auto_added +
-                            ' | updated_by=' + row.updated_by + ' | updated_at=' + row.updated_at);
-                    });
-                    if (typeof _dbgLog === 'function') {
-                        _dbgLog('[调试-可疑股票云端原始数据] date=' + date + ' 命中' + suspectRows.length + '只: ' +
-                            suspectRows.map(function(r) {
-                                return r.stock + '(in_watchlist=' + r.in_watchlist + ',updated_by=' + r.updated_by + ',updated_at=' + r.updated_at + ',obs_auto_added=' + r.obs_auto_added + ')';
-                            }).join('; '));
-                    }
-                }
-            })();
 
             // 全量快照缓存：包含该日期所有行（in_watchlist true/false），供历史行情查询
             // 阶段四 Bug 6 修复：删除旧的字段级合并逻辑（原本服务于已脱节的 allData.auction），
@@ -9485,21 +9456,6 @@
                     .range(offset, offset + pageSize - 1);
                 if (error) throw error;
                 if (!data || data.length === 0) break;
-                // 🔍[调试] 打印监控名单中的股票在云端的完整原始行（含 updated_by/updated_at/obs_auto_added）
-                (function() {
-                    var suspectRows = data.filter(function(row) {
-                        return row && row.stock && _WATCHED_SUSPECT_STOCKS.has(row.stock.trim());
-                    });
-                    if (suspectRows.length > 0) {
-                        console.warn('[调试-可疑股票云端原始数据/批量拉取pullAuctionFromTable] 命中监控名单共 ' + suspectRows.length + ' 条:');
-                        suspectRows.forEach(function(row) {
-                            console.warn('  date=' + row.date + ' ' + row.stock + ' | in_watchlist=' + row.in_watchlist +
-                                ' | volume=' + row.volume + ' | yest_volume=' + row.yest_volume +
-                                ' | change_pct=' + row.change_pct + ' | obs_auto_added=' + row.obs_auto_added +
-                                ' | updated_by=' + row.updated_by + ' | updated_at=' + row.updated_at);
-                        });
-                    }
-                })();
                 data.forEach(function(row) {
                     // 全量快照缓存：包含所有行（in_watchlist true/false），忠实反映云端真实数据，不做本地合并。
                     // 同时携带 snake_case 和 camelCase 别名（与 pullAuctionMarketDataForDate 对齐）。
@@ -10443,53 +10399,9 @@
             // 只写入全量快照缓存供趋势图查询，不会出现在 tap 页面的第一页列表里。
             const existingWatchlistNames = {};
             const _watchlistSourceList = watchlistSnapshot !== undefined ? watchlistSnapshot : (getHotAuctionData()[date] || []);
-            // 🔍[调试-影子记录混入排查] 统计本次构建 existingWatchlistNames 时，
-            // _watchlistSourceList 里 in_watchlist=true / false / 字段缺失 的行数，
-            // 以及被记入 existingWatchlistNames 的股票名单中，有多少其实是 in_watchlist!==true 的影子记录。
-            (function() {
-                var trueCount = 0, falseCount = 0, undefinedCount = 0;
-                var shadowNamesLeaking = [];
-                (_watchlistSourceList || []).forEach(function(s) {
-                    if (!s || !s.stock) return;
-                    if (s.in_watchlist === true) trueCount++;
-                    else if (s.in_watchlist === false) { falseCount++; shadowNamesLeaking.push(s.stock.trim()); }
-                    else { undefinedCount++; shadowNamesLeaking.push(s.stock.trim() + '(undefined)'); }
-                });
-                if (shadowNamesLeaking.length > 0) {
-                    console.warn('[调试-pushHotStocksDataToCloud] 日期=' + date +
-                        ' | existingWatchlistNames 来源列表共 ' + (_watchlistSourceList || []).length + ' 行' +
-                        ' | in_watchlist=true: ' + trueCount +
-                        ' | in_watchlist=false: ' + falseCount +
-                        ' | 字段缺失: ' + undefinedCount +
-                        ' | ⚠️即将被当作"正式成员名单"混入 existingWatchlistNames 的影子/异常记录(' + shadowNamesLeaking.length + '只): ' +
-                        shadowNamesLeaking.join('、'));
-                }
-                if (typeof _dbgLog === 'function') {
-                    _dbgLog('[调试-pushHotStocksDataToCloud] ' + date + ' 来源共' + (_watchlistSourceList || []).length +
-                        '行，true=' + trueCount + ' false=' + falseCount + ' undefined=' + undefinedCount +
-                        '，泄漏影子名单=' + shadowNamesLeaking.join('、'));
-                }
-            })();
             (_watchlistSourceList || []).forEach(function(s) {
                 if (s && s.stock) existingWatchlistNames[s.stock.trim()] = true;
             });
-            // 🔍[调试-影子记录混入排查] 检查本次 items 中，有哪些股票原本不是正式列表(existingWatchlistNames 未记录)，
-            // 却因为上面的泄漏被误判为 in_watchlist=true，即将写入云端第一页。
-            (function() {
-                var wronglyPromoted = [];
-                (items || []).forEach(function(item) {
-                    if (!item || !item.stock) return;
-                    var nameTrim = item.stock.trim();
-                    if (existingWatchlistNames[nameTrim]) {
-                        wronglyPromoted.push(nameTrim);
-                    }
-                });
-                if (wronglyPromoted.length > 0) {
-                    console.warn('[调试-pushHotStocksDataToCloud] 日期=' + date +
-                        ' | 本次 items 中将被写为 in_watchlist=true 的股票共' + wronglyPromoted.length + '只: ' +
-                        wronglyPromoted.join('、'));
-                }
-            })();
             const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
                 const nameTrim = item.stock.trim();
                 return {
@@ -10590,10 +10502,6 @@
             } else {
                 const row = Object.assign({ stock: nameTrim, in_watchlist: false }, cleanPatch);
                 list.push(row);
-                // 阶段五 影子清单 调试2：追踪影子记录新建路径，定位是否有"目标日期写错"的 bug
-                _dbgLog('[SHADOW-WRITE] date=' + date + ' stock=' + nameTrim
-                    + ' in_watchlist=false | fields=' + Object.keys(cleanPatch).join(',')
-                    + ' | 来源=' + ((new Error()).stack.split('\n')[2] || '').trim());
             }
         }
 
@@ -11883,109 +11791,6 @@
             }
             return list.filter(function(r) { return r && r.in_watchlist === true; });
         }
-
-        // 阶段五 影子清单 调试3：手动排查入口，控制台执行 debugAuctionStock('股票名')
-        // 返回该股票在所有日期下的记录（date / in_watchlist / volume / note），用 console.table 展示
-        window.debugAuctionStock = function(stockName) {
-            if (!stockName) { console.warn('用法: debugAuctionStock("股票名")'); return []; }
-            const result = [];
-            Object.keys(_auctionMemCache).sort().forEach(function(date) {
-                const rows = (_auctionMemCache[date] || []).filter(function(r) {
-                    return r && r.stock && r.stock.trim() === String(stockName).trim();
-                });
-                rows.forEach(function(r) {
-                    result.push({
-                        date: date,
-                        in_watchlist: r.in_watchlist,
-                        volume: r.volume || '',
-                        yest_volume: r.yest_volume || r.yestVolume || '',
-                        note: r.note || '',
-                        change_pct: r.change_pct || r.changePct || ''
-                    });
-                });
-            });
-            console.table(result);
-            return result;
-        };
-
-        // 阶段六 影子清单 调试4：一键对比"过滤前后"差异清单
-        // 控制台执行 debugShadowDiff('2026-07-20')，查看当天分区里哪些被过滤、哪些是 undefined 脏数据
-        window.debugShadowDiff = function(date) {
-            date = date || currentDate;
-            const raw = (_auctionMemCache[date] || []);
-            const filtered = raw.filter(function(r) { return r && r.in_watchlist === true; });
-            const shadowRows = raw.filter(function(r) { return r && r.in_watchlist === false; });
-            const undefinedRows = raw.filter(function(r) { return r && r.stock && r.in_watchlist === undefined; });
-            console.log('日期=' + date + ' | 原始总数=' + raw.length + ' | 过滤后(===true)=' + filtered.length
-                + ' | in_watchlist=false=' + shadowRows.length + ' | in_watchlist=undefined=' + undefinedRows.length);
-            if (shadowRows.length > 0) {
-                console.log('被过滤掉的影子记录（in_watchlist=false）：');
-                console.table(shadowRows.map(function(r) { return { stock: r.stock, in_watchlist: r.in_watchlist, volume: r.volume }; }));
-            }
-            if (undefinedRows.length > 0) {
-                console.warn('⚠️ 以下行 in_watchlist 字段缺失（undefined），被严格判断过滤掉（需排查写入路径）：');
-                console.table(undefinedRows.map(function(r) { return { stock: r.stock, volume: r.volume, obsAutoAdded: r.obsAutoAdded }; }));
-            }
-            return { raw: raw.length, filtered: filtered.length, shadow: shadowRows.length, undefinedField: undefinedRows.length };
-        };
-
-        // 🔍[调试] 手动排查入口，控制台执行 debugObsAutoAdded('2026-07-20')
-        // 专门回答："当天正式列表里，哪些股票是被 ensureObservationStocks 自动加入的（obsAutoAdded=true）？
-        // 它们是否在 localStorage 的正式名单里？它们是否命中了上一交易日的'竞/昨'高光集合？"
-        window.debugObsAutoAdded = function(date) {
-            date = date || currentDate;
-            const raw = (_auctionMemCache[date] || []);
-            const watchlistRows = raw.filter(function(r) { return r && r.in_watchlist === true; });
-            const obsRows = watchlistRows.filter(function(r) { return r && r.obsAutoAdded === true; });
-            const nonObsRows = watchlistRows.filter(function(r) { return !r || r.obsAutoAdded !== true; });
-
-            // localStorage 里的正式名单（旧存储格式，供对照）
-            let lsStocks = new Set();
-            try {
-                const lsRaw = JSON.parse(localStorage.getItem('stockApp_v42_auction') || '{}');
-                const lsList = (lsRaw[date] || []);
-                lsStocks = new Set(lsList.map(function(s) { return s && s.stock ? s.stock.trim() : ''; }).filter(Boolean));
-            } catch (e) {
-                console.warn('读取 localStorage 正式名单失败:', e.message);
-            }
-
-            // localStorage 里记录的"本函数自动加入"名单
-            const obsAutoAddedLsSet = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]'));
-
-            // 上一交易日"竞/昨"高光集合（obsStocks 的计算口径），重新算一遍核对
-            const prevDay = getPreviousTradingDay(date);
-            const obsStocksNow = prevDay ? getJingYestHighlightSetForDate(prevDay) : new Set();
-
-            console.log('===== debugObsAutoAdded(' + date + ') =====');
-            console.log('云端/内存正式列表(in_watchlist=true)总数: ' + watchlistRows.length);
-            console.log('其中带 obsAutoAdded=true 标记的: ' + obsRows.length);
-            console.log('不带该标记的（人工/其它路径加入）: ' + nonObsRows.length);
-            console.log('localStorage[stockApp_v42_auction][' + date + '] 正式名单数: ' + lsStocks.size);
-            console.log('localStorage[obsAutoAdded_' + date + '] 记录数: ' + obsAutoAddedLsSet.size);
-            console.log('重新计算 prevDay=' + prevDay + ' 的"竞/昨"高光集合，当前共 ' + obsStocksNow.size + ' 只: ' + [...obsStocksNow].join('、'));
-
-            console.log('--- 带 obsAutoAdded=true 标记的股票明细 ---');
-            console.table(obsRows.map(function(r) {
-                const name = r.stock.trim();
-                return {
-                    stock: name,
-                    change_pct: r.change_pct || r.changePct || '(空)',
-                    在localStorage正式名单中: lsStocks.has(name),
-                    在localStorage_obsAutoAdded记录中: obsAutoAddedLsSet.has(name),
-                    命中当前重算的竞昨高光集合: obsStocksNow.has(name)
-                };
-            }));
-
-            return {
-                total: watchlistRows.length,
-                obsAutoAddedCount: obsRows.length,
-                obsAutoAddedNames: obsRows.map(function(r) { return r.stock.trim(); }),
-                lsStockCount: lsStocks.size,
-                lsObsAutoAddedCount: obsAutoAddedLsSet.size,
-                recomputedHighlightCount: obsStocksNow.size,
-                recomputedHighlightNames: [...obsStocksNow]
-            };
-        };
 
         function buildTopicCache() {
             if (_topicCacheBuilt && _topicCache) return _topicCache;
@@ -16469,30 +16274,6 @@
                     if (cacheRow && ((cacheRow.volume || '') !== (sample.volume || '') || (cacheRow.yest_volume || '') !== (sample.yestVolume || ''))) {
                         push('　　　⚠️ 内存与趋势图快照不一致，趋势图可能显示旧值，建议重新进入该 tab 或等待下次云端同步');
                     }
-                    // ===== 临时调试（阶段八排查用，仅追加输出，不改变任何判断逻辑）=====
-                    // 目的：todayList 和 todayCache 理论上都来自同一个 _auctionMemCache 引用，
-                    // 若真的出现字段不一致，最可能的原因是同一股票名在 auctionData[today] 数组里
-                    // 存在多条行记录（例如一条 in_watchlist=true 正式行 + 一条遗留的重复/影子行），
-                    // 导致 todayList.filter 和 todayCache.find 各自命中了不同的行对象。
-                    // 下面把该股票名在原始数组中的【所有】匹配行都列出来，并标注对象引用是否相同，
-                    // 直接定位是"重复行"问题还是"引用被替换/深拷贝"问题。
-                    push('　　🔍[调试] 「' + sample.stock + '」在 auctionData[' + today + '] 原始数组中的全部匹配行：');
-                    const allMatches = (auctionData[today] || []).filter(function(r) { return r && r.stock === sample.stock; });
-                    allMatches.forEach(function(r, i) {
-                        push('　　　[原始数组#' + i + '] in_watchlist=' + r.in_watchlist
-                            + ' | volume=' + (r.volume || '(空)') + ' | yestVolume=' + (r.yestVolume || '(空)')
-                            + ' | 与sample同一引用=' + (r === sample));
-                    });
-                    push('　　🔍[调试] 「' + sample.stock + '」在 _auctionMemCache[' + today + '] 原始数组中的全部匹配行：');
-                    const allCacheMatches = todayCache.filter(function(r) { return r && r.stock === sample.stock; });
-                    allCacheMatches.forEach(function(r, i) {
-                        push('　　　[快照数组#' + i + '] in_watchlist=' + r.in_watchlist
-                            + ' | volume=' + (r.volume || '(空)') + ' | yest_volume=' + (r.yest_volume || '(空)')
-                            + ' | 与sample同一引用=' + (r === sample));
-                    });
-                    push('　　🔍[调试] auctionData 与 _auctionMemCache 是否为同一引用：' + (auctionData === _auctionMemCache));
-                    push('　　🔍[调试] auctionData[' + today + '] 与 _auctionMemCache[' + today + '] 是否为同一数组引用：' + (auctionData[today] === _auctionMemCache[today]));
-                    // ===== 临时调试结束 =====
                 }
                 push('');
 
@@ -16503,75 +16284,6 @@
                 push('　　说明：若两次点击补全按钮之间，_justPushedAuction 曾经变回 false 且触发了云端拉取，');
                 push('　　　　 云端当时若还没有另一字段的最新值，理论上会覆盖本地——本次已修复为');
                 push('　　　　「云端有效值才覆盖，否则保留本地」，若仍复现请把本报告完整复制发出。');
-                push('');
-
-                // ---- 可疑股票云端原始数据排查（直接查数据库，不依赖本地缓存）----
-                // 🔍[调试] 针对反复出现"凭空进入正式列表、涨幅为空"的这批股票，直接查询
-                // auction_data 表里它们的完整原始行（含 updated_by/updated_at/obs_auto_added），
-                // 用于确定 in_watchlist=true 是谁、什么时候写入的。
-                push('【可疑股票云端原始数据排查（直接查库）】');
-                try {
-                    const suspectNames = ['华银电力', '中嘉博创', '深南电A', '古井贡酒', '桂冠电力', '金牛化工', '乐山电力', '中曼石油'];
-                    const sb2 = getSupabase();
-                    const { data: suspectData, error: suspectErr } = await sb2.from('auction_data')
-                        .select('date,stock,in_watchlist,volume,yest_volume,change_pct,topics,obs_auto_added,updated_at,updated_by')
-                        .eq('date', today)
-                        .in('stock', suspectNames);
-                    if (suspectErr) {
-                        push('　　查询失败：' + suspectErr.message);
-                    } else if (!suspectData || suspectData.length === 0) {
-                        push('　　未在云端 auction_data 表中查到这些股票（date=' + today + '）的记录。');
-                    } else {
-                        push('　　共查到 ' + suspectData.length + ' 条记录：');
-                        suspectData.forEach(function(row) {
-                            push('　　  ' + row.stock + ' | in_watchlist=' + row.in_watchlist +
-                                 ' | volume=' + row.volume + ' | yest_volume=' + row.yest_volume +
-                                 ' | change_pct=' + (row.change_pct || '(空)') +
-                                 ' | topics=' + (row.topics || '(空)') +
-                                 ' | obs_auto_added=' + row.obs_auto_added +
-                                 ' | updated_by=' + row.updated_by +
-                                 ' | updated_at=' + row.updated_at);
-                        });
-                    }
-
-                    // 🔍[调试] 假设排查：这 8 只是否是"补全题材时首次写入 auction_data 表"
-                    // 导致的新行（即在其它历史日期完全没有记录，且只有 topics/updated_by 相关字段被写过）。
-                    // 查询这 8 只股票在 auction_data 表里全部日期的记录，看历史深度和字段模式。
-                    push('　　--- 历史记录深度排查（验证是否为"题材补全时首次创建"的新行）---');
-                    const { data: histData, error: histErr } = await sb2.from('auction_data')
-                        .select('date,stock,in_watchlist,volume,yest_volume,change_pct,topics,updated_by,updated_at')
-                        .in('stock', suspectNames)
-                        .order('date', { ascending: true });
-                    if (histErr) {
-                        push('　　历史查询失败：' + histErr.message);
-                    } else if (!histData || histData.length === 0) {
-                        push('　　这 8 只股票在 auction_data 表里查无任何历史记录。');
-                    } else {
-                        const byStock = {};
-                        histData.forEach(function(row) {
-                            if (!byStock[row.stock]) byStock[row.stock] = [];
-                            byStock[row.stock].push(row);
-                        });
-                        Object.keys(byStock).forEach(function(name) {
-                            const rows = byStock[name];
-                            push('　　  ' + name + ' | 共 ' + rows.length + ' 条历史记录，日期范围：' +
-                                 rows[0].date + ' ~ ' + rows[rows.length - 1].date);
-                            rows.forEach(function(r) {
-                                push('　　　　' + r.date + ' | in_watchlist=' + r.in_watchlist +
-                                     ' | vol=' + r.volume + ' | yest=' + r.yest_volume +
-                                     ' | pct=' + (r.change_pct || '(空)') + ' | topics=' + (r.topics || '(空)') +
-                                     ' | updated_by=' + r.updated_by + ' | updated_at=' + r.updated_at);
-                            });
-                        });
-                        // 也列出完全没查到历史记录的股票名
-                        const notFoundNames = suspectNames.filter(function(n) { return !byStock[n]; });
-                        if (notFoundNames.length > 0) {
-                            push('　　以下股票在 auction_data 表里完全无任何历史记录：' + notFoundNames.join('、'));
-                        }
-                    }
-                } catch (e) {
-                    push('　　排查异常：' + (e && e.message ? e.message : String(e)));
-                }
                 push('');
 
                 push('===== 报告结束 =====');
@@ -17039,16 +16751,6 @@
 
         function renderAuction(dataSource='auction') {
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
-            // 【调试】记录每次 renderAuction 调用的时间戳、来源、与上次调用的间隔，用于排查"序号点击后被重渲染打断"问题
-            (function() {
-                const _now = performance.now();
-                const _stack = (new Error()).stack || '';
-                const _callerLine = _stack.split('\n').slice(2, 4).join(' | ').replace(/\s+/g, ' ').trim();
-                const _sinceLast = window._lastRenderAuctionAt ? Math.round(_now - window._lastRenderAuctionAt) : -1;
-                window._lastRenderAuctionAt = _now;
-                window._renderAuctionCallCount = (window._renderAuctionCallCount || 0) + 1;
-                _dbgLog('[RENDER#' + window._renderAuctionCallCount + '] renderAuction(' + dataSource + ') 触发，距上次=' + _sinceLast + 'ms | 调用来源: ' + _callerLine.slice(0, 200));
-            })();
             // 保存滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
             var _savedScrollY = window.scrollY;
             // 确保题材历史缓存可用（内部有幂等保护，重复调用不会重复扫描）
@@ -17086,14 +16788,6 @@
             if (dataSource === 'hot') _lastHotRenderDate = currentDate; else _lastAuctionRenderDate = currentDate;
 
             const auctionList = getTodayGroupList(dataSource);
-            // 阶段五 影子清单 调试1：渲染前打印数据来源统计，确认 in_watchlist=false 影子记录已被过滤
-            const _rawPartition = (getGroupData(dataSource)[currentDate] || []);
-            const _shadowCount = _rawPartition.filter(function(r) { return r.in_watchlist === false; }).length;
-            _dbgLog('[AUCTION-DEBUG] currentDate=' + currentDate
-                + ' | 渲染条数=' + auctionList.length
-                + ' | 原始分区总条数=' + _rawPartition.length
-                + ' | in_watchlist=false条数=' + _shadowCount
-                + ' | dataSource=' + dataSource);
 
             // 实时检查股票列表中的标签，自动标记颜色并锁定（早盘竞价专属：写回 auction 本地存储）
             if (dataSource === 'auction') {
@@ -21709,36 +21403,16 @@
             if (!date) return;
             // 防重复：每日期只执行一次
             if (localStorage.getItem('obsEnsured_' + date) === '1') {
-                console.warn('[调试-ensureObservationStocks] date=' + date + ' | 已跑过一次（obsEnsured_' + date + '=1），本次直接return，不会新增任何股票。若怀疑本次异常是由此函数产生，请检查该标记是"什么时候"被设置为1的（有没有可能是刷新页面/多tab导致重复触发后又被跳过，实际写入发生在你没注意到的更早一次）。');
                 return;
             }
 
             const prevDay = getPreviousTradingDay(date);
-            console.warn('[调试-ensureObservationStocks] date=' + date + ' | prevDay(上一交易日)=' + prevDay);
             if (!prevDay) return;
 
             // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
             const obsStocks = getJingYestHighlightSetForDate(prevDay);
-            // 🔍[调试] 把 getJingYestHighlightSetForDate 的返回集合完整打印出来，
-            // 同时单独调用 getJingYestStocksForDate 拿到过滤前的原始 Tier0 结果，
-            // 对比"过滤前有多少只、过滤后（digitGap<=1）剩多少只"，确认高光口径本身算出来的是不是 4 只。
-            (function() {
-                var rawMap = (typeof getJingYestStocksForDate === 'function') ? getJingYestStocksForDate(prevDay) : null;
-                var rawList = [];
-                if (rawMap) {
-                    rawMap.forEach(function(info, name) {
-                        rawList.push(name + '(diff=' + (info && info.diff) + ',digitGap=' + (info && info.digitGap) + ')');
-                    });
-                }
-                console.warn('[调试-ensureObservationStocks] date=' + date + ' prevDay=' + prevDay +
-                    ' | getJingYestStocksForDate 过滤前(Tier0) 共 ' + (rawMap ? rawMap.size : 'null') + ' 只: ' + rawList.join('、'));
-                console.warn('[调试-ensureObservationStocks] date=' + date + ' prevDay=' + prevDay +
-                    ' | getJingYestHighlightSetForDate 过滤后(digitGap<=1，即 obsStocks) 共 ' +
-                    (obsStocks ? obsStocks.size : 'null') + ' 只: ' + (obsStocks ? [...obsStocks].join('、') : '(无)'));
-            })();
             if (!obsStocks || obsStocks.size === 0) {
                 // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionMemCache 会有值）
-                console.warn('[调试-ensureObservationStocks] date=' + date + ' | obsStocks 为空，本次不新增，直接return');
                 return;
             }
 
@@ -21746,18 +21420,12 @@
             const auctionData = getAuctionData();
             const dayList = auctionData[date] || [];
             const existingNames = new Set(dayList.map(function(s) { return s.stock ? s.stock.trim() : ''; }));
-            console.warn('[调试-ensureObservationStocks] date=' + date + ' | 执行前 dayList 共 ' + dayList.length +
-                ' 行，其中 in_watchlist=true 的 existingNames 共 ' + existingNames.size + ' 个: ' + [...existingNames].join('、'));
 
             // 已自动添加的股票名集合
             var autoAdded = JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]');
             var autoAddedSet = new Set(autoAdded);
-            console.warn('[调试-ensureObservationStocks] date=' + date + ' | localStorage 中已记录的 obsAutoAdded_' + date + ' 共 ' +
-                autoAddedSet.size + ' 个: ' + [...autoAddedSet].join('、'));
 
             var hasNew = false;
-            var newlyAddedThisRun = [];
-            var skippedAlreadyExists = [];
             obsStocks.forEach(function(name) {
                 if (!existingNames.has(name)) {
                     // 不在当日列表中 → 自动添加
@@ -21766,21 +21434,14 @@
                     dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true });
                     autoAddedSet.add(name);
                     hasNew = true;
-                    newlyAddedThisRun.push(name);
-                } else {
-                    skippedAlreadyExists.push(name);
                 }
             });
-            console.warn('[调试-ensureObservationStocks] date=' + date +
-                ' | 本次实际新增 ' + newlyAddedThisRun.length + ' 只: ' + newlyAddedThisRun.join('、') +
-                ' | 因已在列表中而跳过 ' + skippedAlreadyExists.length + ' 只: ' + skippedAlreadyExists.join('、'));
 
             if (hasNew) {
                 auctionData[date] = dayList;
                 saveModule('auction');
                 markAuctionDirty(date);
                 scheduleCloudPush();
-                console.warn('[调试-ensureObservationStocks] date=' + date + ' | 已写入 auctionData[' + date + ']，长度变为 ' + dayList.length + '，并已调用 saveModule/markAuctionDirty/scheduleCloudPush');
             }
 
             // 保存 autoAdded 集合（即使没有新增，也要保存空集合以区分 * 标记）
@@ -26814,9 +26475,6 @@
             });
 
             const fallCount = total - riseCount;
-            console.log('[最近多板调试] currentDate=', currentDate, '早盘竞价股票数=', auctionList.length,
-                'notes样本=', auctionList.slice(0, 5).map(i => i.note),
-                'rise=', riseCount, 'fall=', fallCount, 'total=', total);
 
             const duibanData = JSON.parse(localStorage.getItem('duibanData') || '{}');
             const existingList = duibanData[currentDate] || [];
