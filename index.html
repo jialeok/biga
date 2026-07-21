@@ -15244,11 +15244,14 @@
                     setApiStatus('numcatApiStatusHot', '❌ 当日列表为空，请先导入股票到表格', false);
                     return;
                 }
-                // yesterdayList 直接读 hotAuctionData[yesterday] 已有列表，不复制 todayList（避免污染历史日期）
+                // 对比日列表体检：若 hotAuctionData[yesterday] 本来就是空的（对比日从未单独导入过），
+                // 用 buildYesterdayListFromToday 以今日列表为基础现造一份"影子"对比日列表，
+                // 与同花顺版本 _fillHotYesterdayYesterdayVolumeFromThsImpl（第15017行）保持同一套处理方式，
+                // 否则会像之前那样直接判定"没有可补全的股票"而整段跳过，云端和本地缓存都不会被写入。
+                const yesterdayListWasEmpty = opts.fillYesterday && (hotAuctionData[yesterday] || []).length === 0;
                 const yesterdayList = opts.fillYesterday
-                    ? (hotAuctionData[yesterday] || []).slice()
+                    ? buildYesterdayListFromToday(todayList, hotAuctionData, yesterday)
                     : [];
-                const yesterdayListWasEmpty = opts.fillYesterday && yesterdayList.length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 const needToday = opts.fillToday && todayList.length > 0;
@@ -15358,17 +15361,44 @@
                     fillVolume(todayList, today, !!opts.overwriteToday, true);   // 今天：填 volume + 涨幅
                     hotAuctionData[today] = todayList;
                 }
+                let shadowOnlyYesterdayStocks = [];
                 if (needYesterday) {
                     fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false); // 昨日：只填 volume
-                    hotAuctionData[yesterday] = yesterdayList;
+                    // 同「对比日昨成交量」(ths) 的修复：不能用 buildYesterdayListFromToday 造出的 yesterdayList
+                    // 直接覆盖 hotAuctionData[yesterday]，否则会把对比日原有、这次名单没覆盖到的股票冲掉，
+                    // 后续 syncHotStocksListForDate 同步时会把这些股票误标记 in_watchlist=false 而从
+                    // tap 页面消失。只把补全的 volume 合并回原有正式列表股票；不存在的股票（影子记录）
+                    // 单独落表，不进正式列表，但仍然持久化到云端供趋势图查询。
+                    const existingYesterdayList = (hotAuctionData[yesterday] || []).slice();
+                    const existingYesterdayNames = {};
+                    existingYesterdayList.forEach(function(s) {
+                        if (s && s.stock) existingYesterdayNames[s.stock.trim()] = true;
+                    });
+                    yesterdayList.forEach(function(s) {
+                        if (!s || !s.stock) return;
+                        const name = s.stock.trim();
+                        if (!existingYesterdayNames[name]) return;
+                        const target = existingYesterdayList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                        if (target) target.volume = s.volume;
+                    });
+                    shadowOnlyYesterdayStocks = yesterdayList.filter(function(s) {
+                        return s && s.stock && !existingYesterdayNames[s.stock.trim()];
+                    });
+                    hotAuctionData[yesterday] = existingYesterdayList;
                 }
 
                 invalidateTopicCache();
 
                 if (needToday) pushHotStocksDataToCloud(today, todayList).catch(function(e) { console.warn('pushHotStocksDataToCloud today 失败:', e); });
-                if (needYesterday) pushHotStocksDataToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                if (needYesterday) {
+                    pushHotStocksDataToCloud(yesterday, hotAuctionData[yesterday]).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                    pushHotTrendsToCloud(yesterday, hotAuctionData[yesterday]).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                    if (shadowOnlyYesterdayStocks.length > 0) {
+                        pushHotStocksDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday(影子) 失败:', e); });
+                        pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
+                    }
+                }
                 if (needToday) pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
-                if (needYesterday) pushHotTrendsToCloud(yesterday, yesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
 
                 renderHotForm();
                 renderHotStocks();
