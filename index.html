@@ -8399,6 +8399,13 @@
         let _hotHighlightsChannel = null; // hot_stocks_highlights 表的 Realtime 订阅
         let currentGroup = 'auction'; // 'auction' | 'hot'，当前 Tab 选中的分组
         let _justPushedHotAuction = false; // 刚推送 hot_stocks，忽略自己触发的 Realtime 通知
+        // ── 热门股票独立化改造：对齐早盘竞价 8344-8345 行的计数器式屏蔽窗口状态 ──
+        // 原裸布尔值 + 各自 setTimeout 2 秒复位的写法无法正确处理并发批量操作
+        // （猫抓+同花顺快速连点时，先完成的那个会提前把标志复位，导致后完成的这次
+        //  Realtime 回显把本地刚写入的数据冲乱）。改为计数器：每开一个批量操作 +1，
+        //  收尾 -1，归零后才启动 2 秒复位定时器。
+        let _justPushedHotAuctionCounter = 0;
+        let _justPushedHotAuctionTimer = null;
         let _hotAuctionData = {}; // 热门股票本地缓存 {date: [items]}，结构与 getAuctionData() 返回一致
         let _hotAuctionTableAvailable = false; // 运行时标记：hot_stocks 表是否可用
         let _hotAuctionRealtimeChannel = null; // hot_stocks 表的 Realtime 订阅
@@ -10298,7 +10305,7 @@
 
         // 热门股票脏日期全量同步（照抄 syncAuctionListForDate，改表名 hot_stocks、数据源 getGroupData('hot')）
         async function syncHotStocksListForDate(date) {
-            _justPushedHotAuction = true; // 标记刚推送，忽略自己触发的 Realtime 通知
+            _openHotAuctionShield(); // 计数器式屏蔽窗口：与 patchHotFieldBatch 并发时互不干扰
             try {
             const sb = getSupabase();
             const localList = (getGroupData('hot')[date] || []).filter(function(s) { return s && s.stock; });
@@ -10387,7 +10394,7 @@
                     return;
                 }
             }
-            _justPushedHotAuction = true;
+            _openHotAuctionShield();
             try {
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
@@ -10441,13 +10448,141 @@
                 }
             });
             } finally {
-                setTimeout(function() { _justPushedHotAuction = false; }, 2000);
+                _closeHotAuctionShield(2000);
             }
         }
 
         // ════════════════════════════════════════════════════════════════
-        // 独立化改造 阶段一 新增：字段级增量写入接口
+        // 热门股票独立化改造 新增：字段级增量写入接口（对齐早盘竞价 10474-10571 行）
         // ════════════════════════════════════════════════════════════════
+        // 设计原则与早盘竞价 PATCH 架构完全一致（见上方 10458-10477 行注释）：
+        //   1. 调用方只传"这次真正要改的字段"，不传的字段既不出现在云端 SET 子句里，
+        //      也不覆盖 _hotFullRowCache 里该行的其它字段。
+        //   2. 本地写入是"merge 指定字段到已有行"，不是整行替换。
+        //   3. 云端 upsert 冲突键固定为 date,stock（hot_stocks 表现有约定，不改动）。
+        //   4. in_watchlist 不属于 patch 管辖范围，由 syncHotStocksListForDate 单独维护，
+        //      绝不通过 patch 参数传入或在函数内部推断。
+        // 【独立性要求】以下函数/变量全部为热门股票专用（Hot 命名），与早盘竞价的
+        //   patchAuctionFieldBatch / _openAuctionShield 等完全独立、不共用，
+        //   早盘竞价原有代码一行未改。
+        //
+        // ⚠️ 字段命名约定（本改造最易出错的点）：
+        //   patch 对象一律使用 snake_case（与 hot_stocks 表列名一致）。
+        //   hotAuctionData[date] 内存对象用的是驼峰字段（yestVolume/changePct），
+        //   调用点构造 patch 时必须显式转换，例如：
+        //     patches.push({ stock: s.stock, yest_volume: s.yestVolume });  // ✅
+        //     patches.push({ stock: s.stock, yestVolume: s.yestVolume });   // ❌ 会被白名单过滤，静默丢失
+
+        // ── 计数器式屏蔽窗口（对齐早盘竞价 _openAuctionShield/_closeAuctionShield）──
+        function _openHotAuctionShield() {
+            _justPushedHotAuctionCounter++;
+            _justPushedHotAuction = true;
+            if (_justPushedHotAuctionTimer) {
+                clearTimeout(_justPushedHotAuctionTimer);
+                _justPushedHotAuctionTimer = null;
+            }
+        }
+        function _closeHotAuctionShield(delayMs) {
+            _justPushedHotAuctionCounter = Math.max(0, _justPushedHotAuctionCounter - 1);
+            if (_justPushedHotAuctionCounter === 0) {
+                if (_justPushedHotAuctionTimer) clearTimeout(_justPushedHotAuctionTimer);
+                _justPushedHotAuctionTimer = setTimeout(function() {
+                    _justPushedHotAuction = false;
+                    _justPushedHotAuctionTimer = null;
+                }, delayMs || 2000);
+            }
+        }
+
+        // 可 patch 的字段白名单（与早盘竞价 AUCTION_PATCHABLE_FIELDS 保持同一集合）：
+        //   volume, yest_volume, note, change_pct, topics, code, selected, bought, sold, fixed
+        // 不允许出现在 patch 里的字段：in_watchlist（原因见上）、date/stock（定位列，
+        //   通过函数参数单独传入，不放在 patch 对象里）。
+        const HOT_PATCHABLE_FIELDS = ['volume', 'yest_volume', 'note', 'change_pct', 'topics', 'code', 'selected', 'bought', 'sold', 'fixed'];
+
+        function _sanitizeHotPatch(patch) {
+            const clean = {};
+            if (!patch) return clean;
+            HOT_PATCHABLE_FIELDS.forEach(function(key) {
+                if (Object.prototype.hasOwnProperty.call(patch, key) && patch[key] !== undefined) {
+                    clean[key] = patch[key];
+                }
+            });
+            return clean;
+        }
+
+        // 只把 patch 里出现的字段 merge 进 _hotFullRowCache 对应行；不存在则新建
+        // （新建行 in_watchlist 默认 false，影子记录恰好落在这里，语义自洽，无需特殊处理）。
+        function _mergeHotPatchLocal(date, stock, cleanPatch) {
+            const nameTrim = (stock || '').trim();
+            if (!nameTrim) return;
+            if (!_hotFullRowCache[date]) _hotFullRowCache[date] = [];
+            const list = _hotFullRowCache[date];
+            const idx = list.findIndex(function(r) { return r && r.stock === nameTrim; });
+            if (idx >= 0) {
+                Object.keys(cleanPatch).forEach(function(k) { list[idx][k] = cleanPatch[k]; });
+            } else {
+                const row = Object.assign({ stock: nameTrim, in_watchlist: false }, cleanPatch);
+                list.push(row);
+            }
+        }
+
+        // 单条字段级写入的语法糖
+        async function patchHotField(date, stock, patch) {
+            return patchHotFieldBatch(date, [Object.assign({ stock: stock }, patch)]);
+        }
+
+        // 核心函数：批量字段级 upsert，云端成功后才 merge 本地（避免"本地领先云端"的假象）。
+        // 与 pushHotStocksDataToCloud 一致：表未就绪时最多等待 5 秒再放弃（比早盘竞价
+        // "不可用就静默跳过"更严格，避免登录后立刻点按钮导致数据无声丢失）。
+        async function patchHotFieldBatch(date, items) {
+            if (!date || !Array.isArray(items) || items.length === 0) return { ok: true, rows: 0 };
+            _openHotAuctionShield();
+            try {
+                if (!_hotAuctionTableAvailable) {
+                    const waitStart = Date.now();
+                    while (!_hotAuctionTableAvailable && Date.now() - waitStart < 5000) {
+                        await new Promise(function(r) { setTimeout(r, 100); });
+                    }
+                    if (!_hotAuctionTableAvailable) {
+                        console.warn('patchHotFieldBatch 放弃：hot_stocks 表 5 秒内仍未就绪，数据未写入云端。日期:', date);
+                        return { ok: false, error: new Error('hot_stocks 表未就绪') };
+                    }
+                }
+
+                const now = new Date().toISOString();
+                const rows = [];
+                const localOps = [];
+                items.forEach(function(item) {
+                    if (!item || !item.stock) return;
+                    const nameTrim = item.stock.trim();
+                    if (!nameTrim) return;
+                    const cleanPatch = _sanitizeHotPatch(item);
+                    if (Object.keys(cleanPatch).length === 0) return;
+                    rows.push(Object.assign(
+                        { date: date, stock: nameTrim, updated_at: now, updated_by: 'main' },
+                        cleanPatch
+                    ));
+                    localOps.push({ stock: nameTrim, cleanPatch: cleanPatch });
+                });
+                if (rows.length === 0) return { ok: true, rows: 0 };
+
+                const sb = getSupabase();
+                const { error } = await sb.from('hot_stocks')
+                    .upsert(rows, { onConflict: 'date,stock' });
+                if (error) throw error;
+
+                localOps.forEach(function(op) {
+                    _mergeHotPatchLocal(date, op.stock, op.cleanPatch);
+                });
+
+                return { ok: true, rows: rows.length };
+            } catch (e) {
+                console.warn('patchHotFieldBatch 失败:', date, e && e.message);
+                return { ok: false, error: e };
+            } finally {
+                _closeHotAuctionShield(2000);
+            }
+        }
         // 设计原则（对齐大厂标准思路：PATCH 而非 PUT，服务端字段级合并而非客户端整段覆盖）：
         //   1. 调用方只传"这次真正要改的字段"，不传的字段既不出现在云端 SQL 的 SET 子句里，
         //      也不覆盖 _auctionMemCache 里该行的其它字段。
@@ -12671,6 +12806,7 @@
             const existingList = (hotData[currentDate] || []).slice();
             if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
             let clearCount = 0;
+            const patches = [];
             existingList.forEach((item, idx) => {
                 if ((item.note && item.note.includes('(')) || item.topics) {
                     const newItem = { ...item };
@@ -12681,6 +12817,8 @@
                     var parsed = parseNoteToFields(newNote);
                     newItem.changePct = parsed.changePct;
                     existingList[idx] = newItem;
+                    // 字段级 PATCH：本次改动的是 note/topics/change_pct 三个字段
+                    patches.push({ stock: newItem.stock, note: newItem.note, topics: '', change_pct: newItem.changePct });
                     clearCount++;
                 }
             });
@@ -12688,7 +12826,7 @@
                 getHotAuctionData()[currentDate] = existingList;
                 invalidateTopicCache();
                 syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotConcepts syncHotStocksListForDate 失败:', err); });
-                pushHotStocksDataToCloud(currentDate, existingList).catch(function(err) { console.error('clearAllHotConcepts pushHotStocksDataToCloud 失败:', err); });
+                patchHotFieldBatch(currentDate, patches).catch(function(err) { console.error('clearAllHotConcepts patchHotFieldBatch 失败:', err); });
                 renderHotForm();
                 renderAuction('hot');
                 alert('✅ 已清除 ' + clearCount + ' 条题材数据');
@@ -12703,6 +12841,7 @@
             const existingList = (hotData[currentDate] || []).slice();
             if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
             let clearCount = 0;
+            const patches = [];
             existingList.forEach((item, idx) => {
                 if (item.note) {
                     const percentMatches = item.note.match(/-?\d+\.?\d*%/g) || [];
@@ -12716,6 +12855,8 @@
                         newItem.changePct = parsed.changePct;
                         newItem.topics = parsed.topics;
                         existingList[idx] = newItem;
+                        // 字段级 PATCH：note 变了，changePct/topics 由 note 重解析而来，一并上报
+                        patches.push({ stock: newItem.stock, note: newItem.note, change_pct: newItem.changePct, topics: newItem.topics });
                         clearCount++;
                     }
                 }
@@ -12724,7 +12865,7 @@
                 getHotAuctionData()[currentDate] = existingList;
                 invalidateTopicCache();
                 syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotText syncHotStocksListForDate 失败:', err); });
-                pushHotStocksDataToCloud(currentDate, existingList).catch(function(err) { console.error('clearAllHotText pushHotStocksDataToCloud 失败:', err); });
+                patchHotFieldBatch(currentDate, patches).catch(function(err) { console.error('clearAllHotText patchHotFieldBatch 失败:', err); });
                 renderHotForm();
                 renderAuction('hot');
                 alert('✅ 已清除 ' + clearCount + ' 条文字数据');
@@ -12739,9 +12880,12 @@
             const existingList = (hotData[currentDate] || []).slice();
             if (existingList.length === 0) { alert('当前没有数据可清除！'); return; }
             let clearCount = 0;
+            const patches = [];
             existingList.forEach((item, idx) => {
                 if (item.note) {
                     existingList[idx] = { ...item, note: '' };
+                    // 字段级 PATCH：只清空 note 一个字段
+                    patches.push({ stock: item.stock, note: '' });
                     clearCount++;
                 }
             });
@@ -12749,7 +12893,7 @@
                 getHotAuctionData()[currentDate] = existingList;
                 invalidateTopicCache();
                 syncHotStocksListForDate(currentDate).catch(function(err) { console.error('clearAllHotNotes syncHotStocksListForDate 失败:', err); });
-                pushHotStocksDataToCloud(currentDate, existingList).catch(function(err) { console.error('clearAllHotNotes pushHotStocksDataToCloud 失败:', err); });
+                patchHotFieldBatch(currentDate, patches).catch(function(err) { console.error('clearAllHotNotes patchHotFieldBatch 失败:', err); });
                 renderHotForm();
                 renderAuction('hot');
                 alert('✅ 已清除 ' + clearCount + ' 条注释数据');
@@ -14828,6 +14972,9 @@
                 // ===== 分两批调用 fuyao historical（每批用单天时间窗口，避免跨天窗口只返回最新一根 K 线）=====
                 let todayFilled = 0, todaySkipped = 0;
                 let yesterdayFilled = 0, yesterdaySkipped = 0;
+                // 字段级 PATCH 改造：只上报本次真正改动的 yest_volume 字段
+                const todayYestVolPatches = [];
+                const yesterdayYestVolPatches = [];
 
                 // ===== 第一批：调取当日的昨日成交量（today.yestVolume ← yesterday 的 volume）=====
                 setApiStatus('thsApiStatusHot', '【1/2】正在获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
@@ -14839,13 +14986,16 @@
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
+                        todayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         todayFilled++;
                     } else {
                         todaySkipped++;
                     }
                 });
                 hotAuctionData[today] = todayList;
-                pushHotStocksDataToCloud(today, todayList).catch(function(e) { console.warn('pushHotStocksDataToCloud today 失败:', e); });
+                if (todayYestVolPatches.length > 0) {
+                    patchHotFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch today yest_volume 失败:', e); });
+                }
                 pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
 
                 // ===== 第二批：调取对比日的昨日成交量（yesterday.yestVolume ← dayBefore 的 volume）=====
@@ -14858,6 +15008,9 @@
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
+                        // 正式列表成员 + 影子记录统一进 patch（影子记录 upsert 时 in_watchlist 默认 false，
+                        // 仅供趋势图查询，正是预期行为）
+                        yesterdayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         yesterdayFilled++;
                     } else {
                         yesterdaySkipped++;
@@ -14887,12 +15040,11 @@
 
                 hotAuctionData[yesterday] = existingYesterdayList; // 正式列表：只含对比日原有股票，数量不变
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                if (yesterdayYestVolPatches.length > 0) {
+                    patchHotFieldBatch(yesterday, yesterdayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday yest_volume 失败:', e); });
+                }
                 pushHotTrendsToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
                 if (shadowOnlyYesterdayStocks.length > 0) {
-                    // 影子记录单独推送：此时 hotAuctionData[yesterday] 已经是"不含它们"的正式列表，
-                    // pushHotStocksDataToCloud 内部按"是否在当前正式列表"判断，天然落到 in_watchlist=false
-                    pushHotStocksDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday(影子) 失败:', e); });
                     pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
                 }
 
@@ -14958,12 +15110,14 @@
                 const volYesterday = await fetchDayVolumes(allCodes, yesterday); // ticker -> volume(股)
 
                 let filled = 0, skipped = 0;
+                const todayYestVolPatches = [];
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式跳过已有值
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
+                        todayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         filled++;
                     } else {
                         skipped++;
@@ -14971,7 +15125,9 @@
                 });
                 hotAuctionData[today] = todayList;
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(today, todayList).catch(function(e) { console.warn('pushHotStocksDataToCloud today 失败:', e); });
+                if (todayYestVolPatches.length > 0) {
+                    patchHotFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch today yest_volume 失败:', e); });
+                }
                 pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
 
                 renderHotForm();
@@ -15033,12 +15189,15 @@
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
 
                 let filled = 0, skipped = 0;
+                const yesterdayYestVolPatches = [];
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式跳过已有值
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code && volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
+                        // 正式列表成员 + 影子记录统一进 patch
+                        yesterdayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         filled++;
                     } else {
                         skipped++;
@@ -15066,10 +15225,11 @@
 
                 hotAuctionData[yesterday] = existingYesterdayList;
                 invalidateTopicCache();
-                pushHotStocksDataToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
+                if (yesterdayYestVolPatches.length > 0) {
+                    patchHotFieldBatch(yesterday, yesterdayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday yest_volume 失败:', e); });
+                }
                 pushHotTrendsToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
                 if (shadowOnlyYesterdayStocks.length > 0) {
-                    pushHotStocksDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday(影子) 失败:', e); });
                     pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
                 }
 
@@ -15137,6 +15297,7 @@
                 const batchSize = 40;
                 let filledCount = 0;
                 let skippedCount = 0;
+                const changePctPatches = [];
 
                 for (let i = 0; i < thscodes.length; i += batchSize) {
                     const chunk = thscodes.slice(i, i + batchSize);
@@ -15165,6 +15326,8 @@
                         }
                         stock.changePct = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
                         stock.note = buildNoteFromFields(stock.changePct, stock.topics);
+                        // 字段级 PATCH：只上报本次改动的 change_pct/note
+                        changePctPatches.push({ stock: stock.stock, change_pct: stock.changePct, note: stock.note });
                         filledCount++;
                     });
                 }
@@ -15174,10 +15337,12 @@
                 renderHotForm();
                 renderHotStocks();
 
-                // 同步到云端
-                pushHotStocksDataToCloud(today, todayList).catch(function(e) {
-                    console.warn('pushHotStocksDataToCloud 失败:', e);
-                });
+                // 同步到云端（字段级 PATCH：只写本次改动的 change_pct/note，不再整行覆盖）
+                if (changePctPatches.length > 0) {
+                    patchHotFieldBatch(today, changePctPatches).catch(function(e) {
+                        console.warn('patchHotFieldBatch change_pct 失败:', e);
+                    });
+                }
                 pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
 
                 const action = overwrite ? '覆盖' : '补全';
@@ -15335,35 +15500,92 @@
                 let filledCount = 0;
                 let skippedCount = 0;
 
-                const fillVolume = function(list, dateStr, overwrite, fillPct) {
+                // 字段级 PATCH 改造（对齐早盘竞价 15914-15919 行）：收集 patch，结束时统一
+                // 调 patchHotFieldBatch 上报，只携带本次猫抓真正改动的字段（volume，以及今天
+                // 的 change_pct/note），不再整行 push——这正是"先点猫抓再点同花顺互相覆盖"
+                // 原始 bug 的触发点。
+                const todayPatches = [];
+                const yesterdayPatches = [];
+                // 🔍[调试-诊断报告用] 记录"今天"这轮每只股票的命中/未命中情况，写入
+                // lastNumcatFillDebugHot_<date>（加 Hot 前缀与早盘竞价 key 互相独立）。
+                const todayFillLog = [];
+
+                const fillVolume = function(list, dateStr, overwrite, fillPct, patchesArr) {
                     const ymd = dateStr.replace(/-/g, '');
                     const dayData = aucByDate[ymd] || {};
                     list.forEach(function(s) {
                         if (!s || !s.stock) return;
-                        if (!overwrite && getNumericVolume(s.volume) !== null) return;
+                        if (!overwrite && getNumericVolume(s.volume) !== null) {
+                            if (fillPct) {
+                                todayFillLog.push({ stock: s.stock, code: (s.code || scMap[s.stock.trim()] || '').trim(),
+                                    skippedReason: '补全模式-已有volume跳过', hadDayData: !!dayData[(s.code || scMap[s.stock.trim()] || '').trim()] });
+                            }
+                            return;
+                        }
                         const code = (s.code || scMap[s.stock.trim()] || '').trim();
                         if (code && dayData[code] != null) {
                             s.volume = String(dayData[code].vol);
+                            // patch 只携带本次改动的字段：volume 一定有
+                            const patch = { stock: s.stock, volume: s.volume };
+                            let pctWritten = false;
                             if (fillPct && dayData[code].pct) {
                                 if (overwrite || !((s.changePct || '').trim())) {
                                     s.changePct = dayData[code].pct;
                                     s.note = buildNoteFromFields(s.changePct, s.topics);
+                                    patch.change_pct = s.changePct;
+                                    patch.note = s.note;
+                                    pctWritten = true;
                                 }
                             }
+                            if (fillPct) {
+                                todayFillLog.push({
+                                    stock: s.stock, code: code,
+                                    hadDayData: true,
+                                    apiReturnedPct: dayData[code].pct || null,
+                                    apiReturnedVol: dayData[code].vol,
+                                    pctWrittenThisTime: pctWritten,
+                                    changePctAfter: s.changePct || '',
+                                    reasonNotWritten: pctWritten ? '' : (!dayData[code].pct ? '接口未返回auc_pct_chg' : '已有值且非覆盖模式，未覆盖')
+                                });
+                            }
+                            patchesArr.push(patch);
                             filledCount++;
                         } else {
                             skippedCount++;
+                            if (fillPct) {
+                                todayFillLog.push({ stock: s.stock, code: code, hadDayData: false,
+                                    reasonNotWritten: code ? '接口返回结果里完全没有这只股票的数据(symbol未匹配)' : '缺代码映射，无法匹配' });
+                            }
                         }
                     });
                 };
 
                 if (needToday) {
-                    fillVolume(todayList, today, !!opts.overwriteToday, true);   // 今天：填 volume + 涨幅
+                    fillVolume(todayList, today, !!opts.overwriteToday, true, todayPatches);   // 今天：填 volume + 涨幅
                     hotAuctionData[today] = todayList;
+                    // 🔍[调试-诊断报告用] 快照写入 localStorage，供"运行诊断"读取展示。
+                    try {
+                        localStorage.setItem('lastNumcatFillDebugHot_' + today, JSON.stringify({
+                            requestedAt: new Date().toISOString(),
+                            today: today,
+                            overwrite: !!opts.overwriteToday,
+                            requestedCodesCount: allCodesSet.size,
+                            apiRawItemsCount: items.length,
+                            apiRawItemsForToday: items.filter(function(row) {
+                                return String(row[tradedateIdx] || '').trim() === todayYMD;
+                            }).map(function(row) {
+                                return { symbol: row[symbolIdx], name: row[1], tradedate: row[tradedateIdx],
+                                    auc_vol: row[aucVolIdx], auc_pct_chg: (aucPctIdx >= 0 ? row[aucPctIdx] : undefined) };
+                            }),
+                            fillLog: todayFillLog
+                        }));
+                    } catch (e) {
+                        console.error('保存 lastNumcatFillDebugHot 失败:', e);
+                    }
                 }
                 let shadowOnlyYesterdayStocks = [];
                 if (needYesterday) {
-                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false); // 昨日：只填 volume
+                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false, yesterdayPatches); // 昨日：只填 volume
                     // 同「对比日昨成交量」(ths) 的修复：不能用 buildYesterdayListFromToday 造出的 yesterdayList
                     // 直接覆盖 hotAuctionData[yesterday]，否则会把对比日原有、这次名单没覆盖到的股票冲掉，
                     // 后续 syncHotStocksListForDate 同步时会把这些股票误标记 in_watchlist=false 而从
@@ -15389,12 +15611,19 @@
 
                 invalidateTopicCache();
 
-                if (needToday) pushHotStocksDataToCloud(today, todayList).catch(function(e) { console.warn('pushHotStocksDataToCloud today 失败:', e); });
+                // 字段级 PATCH 上报：todayPatches/yesterdayPatches 同时包含正式列表成员和影子记录——
+                // 对 patch 函数而言两者都是 upsert(date,stock) 定位 + 只写 volume，影子记录在
+                // _hotFullRowCache 里新建时 in_watchlist 默认 false，正是预期行为。
+                if (todayPatches.length > 0) {
+                    patchHotFieldBatch(today, todayPatches).catch(function(e) { console.warn('patchHotFieldBatch today 失败:', e); });
+                }
+                if (yesterdayPatches.length > 0) {
+                    patchHotFieldBatch(yesterday, yesterdayPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday 失败:', e); });
+                }
+                // 趋势图缓存同步（hot_stock_trends 表，热门股票独有，沿用原整行逻辑不变）
                 if (needYesterday) {
-                    pushHotStocksDataToCloud(yesterday, hotAuctionData[yesterday]).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday 失败:', e); });
                     pushHotTrendsToCloud(yesterday, hotAuctionData[yesterday]).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
                     if (shadowOnlyYesterdayStocks.length > 0) {
-                        pushHotStocksDataToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotStocksDataToCloud yesterday(影子) 失败:', e); });
                         pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
                     }
                 }
@@ -15632,6 +15861,7 @@
 
                 let filledCount = 0;
                 let skippedCount = 0;
+                const topicsPatches = [];
                 items.forEach(function(row) {
                     const code = String(row[symIdx] || '').trim();
                     const themeNames = String(row[themeIdx] || '').trim();
@@ -15645,6 +15875,8 @@
                     const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) { return t; });
                     const allTopicsStr = topicList.join('，');
                     stock.topics = allTopicsStr;
+                    // 字段级 PATCH：只上报 topics
+                    topicsPatches.push({ stock: stock.stock, topics: allTopicsStr });
                     // 同步推送到跨 tab 共享的 stock_topics 表（合并去重，不覆盖丢失旧题材）
                     if (topicList.length > 0) {
                         const stockCode = (stock.code || scMap[stock.stock.trim()] || '').trim();
@@ -15661,10 +15893,12 @@
                 invalidateTopicCache();
                 renderHotStocks();
 
-                // 同步到云端
-                pushHotStocksDataToCloud(today, getHotAuctionData()[today] || []).catch(function(e) {
-                    console.warn('pushHotStocksDataToCloud 失败:', e);
-                });
+                // 同步到云端（字段级 PATCH：只写 topics，不再整行覆盖）
+                if (topicsPatches.length > 0) {
+                    patchHotFieldBatch(today, topicsPatches).catch(function(e) {
+                        console.warn('patchHotFieldBatch topics 失败:', e);
+                    });
+                }
 
                 setApiStatus('numcatApiStatusHot',
                     '✅ 补全 ' + filledCount + ' 只股票题材，跳过 ' + skippedCount + ' 只无数据或已有题材',
@@ -15754,10 +15988,10 @@
 
                 renderHotStocks();
 
-                // 同步到云端（monitorWarning 不入库，但 upsert 其他字段以保持云端一致）
-                pushHotStocksDataToCloud(today, getHotAuctionData()[today] || []).catch(function(e) {
-                    console.warn('pushHotStocksDataToCloud 失败:', e);
-                });
+                // monitorWarning 是内存态标记，不入 hot_stocks 库（白名单里也没有这个字段）。
+                // 原实现这里有一次整行 pushHotStocksDataToCloud"以保持云端一致"，但它携带的是
+                // 触发那一刻的旧字段快照，会把猫抓/同花顺刚写入的 volume/yest_volume 冲掉——
+                // 属于互斥问题的帮凶，本次改造直接删除（无字段需要上报，无需任何云端写入）。
 
                 setApiStatus('numcatApiStatusHot',
                     '✅ 查询到 ' + markedCount + ' 只股票有严重异常波动（最近 5 个交易日）',
@@ -20126,10 +20360,9 @@
 
                     if (currentGroup === 'hot') {
                         saveData();
-                        // 推送到 hot_stocks 云表（全量 upsert，含 note/topics/change_pct 等字段）
-                        // 注意：syncHotStocksListForDate 只同步状态/增删，不更新 note/topics，故用 pushHotStocksDataToCloud
-                        pushHotStocksDataToCloud(currentDate, auctionList).catch(function(e) {
-                            console.warn('pushHotStocksDataToCloud 失败（openAuctionNoteEditFromPage2）:', e);
+                        // 字段级 PATCH：本次只改了 note 一个字段（对齐同函数 auction 分支 20137 行的处理方式）
+                        patchHotField(currentDate, stockName, { note: normalizedNote }).catch(function(e) {
+                            console.warn('patchHotField note 失败（openAuctionNoteEditFromPage2）:', e);
                         });
                     } else {
                         saveData();
@@ -21710,8 +21943,13 @@
 
                 // 按 currentGroup 分支推送到对应的云表（hot_stocks / auction_data），避免错误写入
                 if (currentGroup === 'hot') {
-                    pushHotStocksDataToCloud(currentDate, auctionList).catch(function(e) {
-                        console.warn('pushHotStocksDataToCloud 失败（showAuctionNoteInput）:', e);
+                    // 字段级 PATCH：本次改了 note/changePct/topics 三个字段（对齐同函数 auction 分支的处理方式）
+                    patchHotField(currentDate, auctionList[index].stock, {
+                        note: normalizedNote,
+                        change_pct: parsed.changePct,
+                        topics: parsed.topics
+                    }).catch(function(e) {
+                        console.warn('patchHotField note 失败（showAuctionNoteInput）:', e);
                     });
                 } else {
                     // 阶段二 C：改为字段级 patch，只更新 note/change_pct/topics 三字段
