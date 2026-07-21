@@ -7640,6 +7640,11 @@
                 <button class="close-btn" onclick="closeBiddingModal()">×</button>
             </div>
             <div style="font-size:12px;color:#64748b;margin-bottom:12px">记录竞价变化数据</div>
+            <!-- 同花顺抓取：把当前时段的5行数据抓回填入表单，检查后再点保存（走 fuyao-proxy，与 Worker 自动抓取互为备份） -->
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+                <button type="button" onclick="fetchBiddingSnapshotToForm(this)" style="padding:8px 14px;font-size:12px;background:linear-gradient(135deg, #f59e0b, #d97706);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600">📡 抓取当前时段数据</button>
+                <span id="biddingFetchStatus" style="font-size:11px;color:#6b7280"></span>
+            </div>
             <div id="biddingFormContainer">
                 <!-- 竞价变化表单将通过JavaScript动态生成 -->
             </div>
@@ -23125,7 +23130,7 @@
             return [
                 { name: '最近多板%' },
                 { name: '板块ETF(48)' },
-                { name: '昨成交额前五' },
+                { name: '昨日资金前十' },
                 { name: '大盘ETF' },
                 { name: '大盘（%）' },
                 { name: '账号溢价' }
@@ -23624,14 +23629,15 @@
                 html += `<td>${nameDisplay}</td>`;
                 
                 // 根据项目名决定格式
-                let rowFormat = 'red'; // 默认格式：数字加"红"
+                let rowFormat = 'red'; // 默认格式：数字加"红"（上涨家数类行：板块ETF(48)、昨日资金前十）
                 if (nameDisplay.includes('%')) {
                     rowFormat = 'percent'; // 带%的项目：数字加%
                 } else if (nameDisplay === '账号溢价') {
                     rowFormat = 'yuan'; // 账号溢价：数字加"元"
-                } else if (nameDisplay === '大盘ETF' || nameDisplay.startsWith('板块ETF')) {
-                    rowFormat = 'etf'; // Fix Bug3: 大盘ETF/板块ETF是涨跌数值，不应加"红"后缀
+                } else if (nameDisplay === '大盘ETF') {
+                    rowFormat = 'percent'; // 大盘ETF是4只宽基的平均涨幅，带%显示（2026-07 修复：原先etf格式不带%）
                 }
+                // 板块ETF(48) 走默认 red 格式：存的是上涨家数，显示"38红"（2026-07 修复：原先etf格式只显示"38"）
                 
                 // 格式化函数
                 const formatValue = (val) => {
@@ -23815,6 +23821,200 @@
         }
 
         // 打开竞价变化编辑
+        // ══════════════════════════════════════════════════════════════
+        // 竞价变化看板 · 同花顺抓取填入表单（手动补录的自动化）
+        // 与 Cloudflare Worker 自动抓取互为备份：Worker 到点自动写库；
+        // 这个按钮在编辑模态框里，抓当前时段的快照【填入表单输入框】，
+        // 用户检查无误后自己点"保存竞价变化"——保存链路完全复用现有逻辑。
+        // ══════════════════════════════════════════════════════════════
+        // 板块ETF 48 只清单（与 Worker 里 CONFIG.SECTOR_ETFS 保持一致，改清单两边都要改）
+        const BIDDING_SECTOR_ETFS = [
+            { code: '560780', name: '半导体设备ETF' }, { code: '159995', name: '芯片ETF华夏' },
+            { code: '512480', name: '半导体ETF国' }, { code: '159732', name: '消费电子ETF' },
+            { code: '515880', name: '通信ETF国泰' }, { code: '560800', name: '数字经济ETF' },
+            { code: '159819', name: '人工智能ETF' }, { code: '159206', name: '卫星ETF永赢' },
+            { code: '515750', name: '科技50ETF' }, { code: '159608', name: '稀有金属ETF' },
+            { code: '159998', name: '计算机ETF天弘' }, { code: '561160', name: '电池ETF富国' },
+            { code: '159857', name: '光伏ETF天弘' }, { code: '516780', name: '稀土ETF华泰' },
+            { code: '562500', name: '机器人ETF华夏' }, { code: '515400', name: '大数据ETF富国' },
+            { code: '560860', name: '工业有色ETF' }, { code: '516510', name: '云计算ETF易' },
+            { code: '516390', name: '新能源车ETF' }, { code: '563010', name: '电信ETF易方达' },
+            { code: '159875', name: '新能源ETF嘉实' }, { code: '516100', name: '金融科技ETF' },
+            { code: '886078', name: '商业航天' }, { code: '512660', name: '军工ETF国泰' },
+            { code: '560280', name: '工程机械ETF' }, { code: '515230', name: '软件ETF国泰' },
+            { code: '159996', name: '家电ETF国泰' }, { code: '885939', name: '海峡两岸' },
+            { code: '159227', name: '航空航天ETF' }, { code: '518880', name: '黄金ETF华安' },
+            { code: '1A0001', name: '上证指数' }, { code: '159869', name: '游戏ETF华夏' },
+            { code: '515150', name: '一带一路ETF' }, { code: '516620', name: '影视ETF国泰' },
+            { code: '515120', name: '创新药ETF广发' }, { code: '516910', name: '物流ETF富国' },
+            { code: '159842', name: '券商ETF银华' }, { code: '159666', name: '交通运输ETF' },
+            { code: '512200', name: '房地产ETF南方' }, { code: '159766', name: '旅游ETF富国' },
+            { code: '562600', name: '医疗器械ETF' }, { code: '159611', name: '电力ETF广发' },
+            { code: '167301', name: '保险主题LOF' }, { code: '159825', name: '农业ETF富国' },
+            { code: '159309', name: '油气ETF汇添富' }, { code: '512690', name: '酒ETF鹏华' },
+            { code: '515220', name: '煤炭ETF国泰' }, { code: '159887', name: '银行ETF富国' }
+        ];
+        const BIDDING_BIG_ETFS = ['510500', '512100', '510300', '510050']; // 大盘ETF行：4只宽基
+        // 48只里的非股票代码 → 指数快照接口（上证指数 1A0001 对应标准代码 000001.SH）
+        const BIDDING_INDEX_CODES = { '886078': '886078.TI', '885939': '885939.TI', '1A0001': '000001.SH' };
+
+        // ETF/特殊代码 → 快照接口代码（注意：不能复用 tickerToThscode，它会把 1 开头深市ETF误判成 .SH）
+        function biddingEtfToSnapshotCode(code) {
+            if (BIDDING_INDEX_CODES[code]) return { thscode: BIDDING_INDEX_CODES[code], type: 'index' };
+            if (code.charAt(0) === '5') return { thscode: code + '.SH', type: 'stock' };
+            return { thscode: code + '.SZ', type: 'stock' };
+        }
+
+        // 当前北京时间该填哪一列（与 Worker 的 autoPoint 同一套时段划分）
+        function biddingCurrentPoint() {
+            const now = new Date(Date.now() + 8 * 3600 * 1000);
+            const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+            if (mins >= 9 * 60 + 10 && mins < 9 * 60 + 17) return { col: 'time915', label: '9:15' };
+            if (mins >= 9 * 60 + 17 && mins < 9 * 60 + 22) return { col: 'time920', label: '9:20' };
+            if (mins >= 9 * 60 + 22 && mins < 9 * 60 + 40) return { col: 'time930', label: '9:25' };
+            if (mins >= 15 * 60) return { col: 'close', label: '收盘' };
+            return null;
+        }
+
+        // 腾讯行情快照（JSONP 方式）：fuyao A股快照不覆盖 ETF 基金代码，腾讯接口覆盖场内 ETF 且免费。
+        // 浏览器直接 fetch qt.gtimg.cn 会被 CORS 拦，但它返回的是 v_xxx="..." 变量赋值，
+        // 用 <script> 注入后读全局变量即可（财经网站通行的经典用法）。
+        // 入参 thscodes 形如 ['510500.SH','159995.SZ']，返回 { '510500.SH': pct(number) }
+        function biddingGetTencentPcts(thscodes) {
+            return new Promise(function (resolve, reject) {
+                const tqCodes = thscodes.map(function (c) {
+                    const num = c.split('.')[0];
+                    return (c.slice(-2) === 'SZ' ? 'sz' : 'sh') + num;
+                });
+                const s = document.createElement('script');
+                s.src = 'https://qt.gtimg.cn/q=' + tqCodes.join(',');
+                s.charset = 'gbk';
+                const timer = setTimeout(function () { cleanup(); reject(new Error('腾讯行情请求超时')); }, 10000);
+                function cleanup() { clearTimeout(timer); s.remove(); }
+                s.onload = function () {
+                    const result = {};
+                    tqCodes.forEach(function (code) {
+                        const raw = window['v_' + code];
+                        if (!raw) return;
+                        const pct = parseFloat(String(raw).split('~')[32]); // 字段32 = 涨跌幅百分比
+                        if (!isNaN(pct)) {
+                            result[code.slice(2) + (code.slice(0, 2) === 'sz' ? '.SZ' : '.SH')] = pct;
+                        }
+                    });
+                    cleanup();
+                    resolve(result);
+                };
+                s.onerror = function () { cleanup(); reject(new Error('腾讯行情加载失败')); };
+                document.head.appendChild(s);
+            });
+        }
+
+        async function fetchBiddingSnapshotToForm(btn) {
+            const statusEl = document.getElementById('biddingFetchStatus');
+            const say = function (msg, ok) {
+                if (statusEl) { statusEl.textContent = msg; statusEl.style.color = ok === false ? '#dc2626' : (ok === true ? '#059669' : '#6b7280'); }
+            };
+            const point = biddingCurrentPoint();
+            if (!point) {
+                say('当前不在抓取时段（09:10-09:40 或 15:00 后），请直接手动填写', false);
+                return;
+            }
+            setBtnLoading(btn, true);
+            try {
+                say('正在拉取快照（股票走同花顺 / ETF走腾讯行情）...');
+                // ── 1. 最近多板%：883410 成分股涨幅算术平均（fuyao）──
+                const ladderData = await fuyaoApiGet('/api/a-share-index/constituents/ths-stock-list', { thscode: '883410.TI' });
+                const ladderCodes = ((ladderData && ladderData.item) || []).map(function (it) { return it.thscode; }).filter(Boolean);
+                // ── 2. 板块ETF 48只：45只ETF走腾讯行情 + 3只指数走fuyao ──
+                const etfCodes = [], indexCodes = [];
+                BIDDING_SECTOR_ETFS.forEach(function (e) {
+                    const c = biddingEtfToSnapshotCode(e.code);
+                    if (c.type === 'index') indexCodes.push(c.thscode); else etfCodes.push(c.thscode);
+                });
+                // ── 3. 昨日资金前十：883901 成分股（fuyao）──
+                const top10Data = await fuyaoApiGet('/api/a-share-index/constituents/ths-stock-list', { thscode: '883901.TI' });
+                const top10Codes = ((top10Data && top10Data.item) || []).map(function (it) { return it.thscode; }).filter(Boolean);
+                // ── 4. 大盘ETF 4只（腾讯行情）+ 大盘% 上证指数（fuyao指数快照）──
+                const bigEtfCodes = BIDDING_BIG_ETFS.map(function (c) { return c + '.SH'; });
+
+                // fuyao A股快照：只拉 883410 + 883901 成分股（ETF代码 fuyao 不覆盖，走腾讯）
+                const allStockCodes = Array.from(new Set([].concat(ladderCodes, top10Codes)));
+                const stockPcts = {};
+                for (let i = 0; i < allStockCodes.length; i += 40) {
+                    const chunk = allStockCodes.slice(i, i + 40);
+                    const snap = await fuyaoApiGet('/api/a-share/prices/snapshot', { thscodes: chunk.join(',') });
+                    ((snap && snap.item) || []).forEach(function (it) {
+                        if (it && it.thscode && it.price_change_ratio_pct !== null && it.price_change_ratio_pct !== undefined) {
+                            stockPcts[it.thscode] = Number(it.price_change_ratio_pct);
+                        }
+                    });
+                }
+                // 腾讯行情：45只板块ETF + 4只大盘ETF（一次批量，JSONP 无跨域问题）
+                const etfPcts = await biddingGetTencentPcts(Array.from(new Set([].concat(etfCodes, bigEtfCodes))));
+                // fuyao 指数快照（3只板块指数 + 上证指数）
+                const indexPcts = {};
+                const allIndexCodes = Array.from(new Set(indexCodes.concat(['000001.SH'])));
+                if (allIndexCodes.length > 0) {
+                    const idxSnap = await fuyaoApiGet('/api/a-share-index/prices/snapshot', { thscodes: allIndexCodes.join(',') });
+                    ((idxSnap && idxSnap.item) || []).forEach(function (it) {
+                        if (it && it.thscode && it.price_change_ratio_pct !== null && it.price_change_ratio_pct !== undefined) {
+                            indexPcts[it.thscode] = Number(it.price_change_ratio_pct);
+                        }
+                    });
+                }
+
+                // ── 计算5行的值（纯数字字符串，不带%/红，与 Worker 写入格式一致）──
+                const values = {}; // 行名匹配key → value
+                const ladderVals = ladderCodes.map(function (c) { return stockPcts[c]; }).filter(function (v) { return typeof v === 'number' && !isNaN(v); });
+                if (ladderVals.length > 0) {
+                    values['最近多板%'] = (ladderVals.reduce(function (a, b) { return a + b; }, 0) / ladderVals.length).toFixed(2);
+                }
+                let sectorRed = 0;
+                BIDDING_SECTOR_ETFS.forEach(function (e) {
+                    const c = biddingEtfToSnapshotCode(e.code);
+                    const v = c.type === 'index' ? indexPcts[c.thscode] : etfPcts[c.thscode];
+                    if (typeof v === 'number' && !isNaN(v) && v > 0) sectorRed++;
+                });
+                values['板块ETF'] = String(sectorRed); // 按行名前缀匹配（板块ETF(48)）
+                if (top10Codes.length > 0) {
+                    let top10Red = 0;
+                    top10Codes.forEach(function (c) { const v = stockPcts[c]; if (typeof v === 'number' && !isNaN(v) && v > 0) top10Red++; });
+                    values['昨日资金前十'] = String(top10Red);
+                }
+                const bigVals = bigEtfCodes.map(function (c) { return etfPcts[c]; }).filter(function (v) { return typeof v === 'number' && !isNaN(v); });
+                if (bigVals.length > 0) {
+                    values['大盘ETF'] = (bigVals.reduce(function (a, b) { return a + b; }, 0) / bigVals.length).toFixed(2);
+                }
+                if (typeof indexPcts['000001.SH'] === 'number') {
+                    values['大盘（%）'] = indexPcts['000001.SH'].toFixed(2);
+                }
+
+                // ── 按行名匹配填入表单对应列（账号溢价等不在 values 里的行不动）──
+                const formContainer = document.getElementById('biddingFormContainer');
+                const nameInputs = formContainer.querySelectorAll('[name^="name-"]');
+                let filledRows = 0;
+                nameInputs.forEach(function (nameInput) {
+                    const idx = nameInput.name.split('-')[1];
+                    const rowName = (nameInput.value || '').trim();
+                    let value;
+                    if (values[rowName] !== undefined) value = values[rowName];
+                    else if (rowName.indexOf('板块ETF') === 0 && values['板块ETF'] !== undefined) value = values['板块ETF'];
+                    if (value === undefined) return;
+                    const target = formContainer.querySelector('[name="' + point.col + '-' + idx + '"]');
+                    if (target) { target.value = value; filledRows++; }
+                });
+                updateAllChangeValues(); // 9:25 填完后自动算增减列
+                say('✅ 已填入 ' + point.label + ' 列共 ' + filledRows + ' 行，请检查后点"保存竞价变化"', true);
+            } catch (err) {
+                console.error('fetchBiddingSnapshotToForm 失败:', err);
+                let msg = err && err.message ? err.message : '抓取失败';
+                if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
+                say('❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
         function openBiddingEdit() {
             // 进入编辑前先关闭可能还开着的"最近多板%"历史提示弹窗
             closeDuibanHistoryPopup();
