@@ -7366,6 +7366,7 @@
                     <button type="button" onclick="fillYesterdayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">对比日昨成交量</button>
                     <button type="button" onclick="fetchChangePctFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取涨幅</button>
                     <button type="button" onclick="fillAuctionHistoryGapPctFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">历史断点涨幅</button>
+                    <button type="button" onclick="fillAuctionHistoryGapYestVolumeFromThs(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">历史断点昨日成交量</button>
                 </div>
                 <span id="thsApiStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #92400e; min-height: 16px;"></span>
             </div>
@@ -14720,6 +14721,141 @@
                     (failedStocks > 0 ? '，' + failedStocks + ' 只拉取失败' : ''), true);
             } catch (err) {
                 console.error('fillAuctionHistoryGapPctFromThs 失败:', err);
+                let msg = err && err.message ? err.message : '补全失败';
+                if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
+                setApiStatus('thsApiStatus', '❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
+        // ---------- 同花顺（早盘竞价）：历史断点昨日成交量补全 ----------
+        // 与上面 fillAuctionHistoryGapPctFromThs（历史断点涨幅）同一套定位逻辑，仅补全字段不同：
+        // 以窗口内每只股票最早出现竞价量(volume)的日期为起点(startDate)，从该日起找出
+        // yest_volume 缺失的断点日；为每只股票用 prices/historical 拉取
+        // [最早断点日的前一交易日 ~ 今天] 整段日线，取每个断点日"前一交易日"的 volume
+        // 作为该断点日的 yest_volume（与"当天/对比日昨成交量"按钮同样的 单位换算：股 ÷ 10000）。
+        // 同样只经 patchAuctionFieldBatch 写 yest_volume 字段，不碰 in_watchlist / 第一页正式列表语义。
+        async function fillAuctionHistoryGapYestVolumeFromThs(btn) {
+            setBtnLoading(btn, true);
+            try {
+                const today = currentDate;
+                // 早盘竞价第一页正式列表（过滤影子记录）
+                const todayList = getTodayAuction().filter(function(s) { return s && s.stock; });
+                if (todayList.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 当日列表为空，请先获取最近多板', false);
+                    return;
+                }
+
+                const scMap = loadAllData().stockCodeMap || {};
+                const windowDates = [];
+                let d = today;
+                for (let i = 0; i < 5 && d; i++) { windowDates.unshift(d); d = getPreviousTradingDay(d); }
+                if (windowDates.length === 0) {
+                    setApiStatus('thsApiStatus', '❌ 无法确定交易日序列', false);
+                    return;
+                }
+
+                const gapMap = {};
+                let totalGapDays = 0;
+                todayList.forEach(function(s) {
+                    const name = s.stock.trim();
+                    const code = (s.code || scMap[name] || '').trim();
+                    if (!code) return;
+                    let startDate = null;
+                    for (let i = 0; i < windowDates.length; i++) {
+                        const vol = getStockHistoryValue(windowDates[i], name, 'volume', 'auction');
+                        if (vol !== null) { startDate = windowDates[i]; break; }
+                    }
+                    if (!startDate) return;
+                    const gapDates = [];
+                    let started = false;
+                    for (let i = 0; i < windowDates.length; i++) {
+                        const dt = windowDates[i];
+                        if (dt === startDate) started = true;
+                        if (!started) continue;
+                        const yv = getStockHistoryValue(dt, name, 'yestVolume', 'auction');
+                        if (yv === null) gapDates.push(dt);
+                    }
+                    if (gapDates.length > 0) {
+                        gapMap[name] = { code: code, gapDates: gapDates };
+                        totalGapDays += gapDates.length;
+                    }
+                });
+
+                const stockNames = Object.keys(gapMap);
+                if (stockNames.length === 0) {
+                    setApiStatus('thsApiStatus', '✅ 近5日昨日成交量无断点（或竞价量数据不足，无需补全）', true);
+                    return;
+                }
+
+                setApiStatus('thsApiStatus',
+                    '发现 ' + stockNames.length + ' 只股票共 ' + totalGapDays + ' 个昨日成交量断点，正在逐只拉取历史日线...', true);
+
+                const patchesByDate = {};
+                let filledStocks = 0, failedStocks = 0;
+                let filledGapDays = 0;
+
+                for (let si = 0; si < stockNames.length; si++) {
+                    const name = stockNames[si];
+                    const info = gapMap[name];
+                    const earliestGap = info.gapDates[0];
+                    const baseDate = getPreviousTradingDay(earliestGap);
+                    if (!baseDate) { failedStocks++; continue; }
+                    const startMs = new Date(baseDate + 'T00:00:00').getTime();
+                    const endMs = new Date(today + 'T23:59:59').getTime();
+                    try {
+                        const data = await fuyaoApiGet('/api/a-share/prices/historical', {
+                            thscode: tickerToThscode(info.code),
+                            interval: '1d',
+                            start: String(startMs),
+                            end: String(endMs),
+                            adjust: 'none'
+                        });
+                        const items = (data && data.item) || [];
+                        const volByDate = {};
+                        items.forEach(function(it) {
+                            const dt = new Date(it.date_ms);
+                            const ds = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+                            if (typeof it.volume === 'number') volByDate[ds] = it.volume;
+                        });
+                        let stockFilled = 0;
+                        info.gapDates.forEach(function(gapDate) {
+                            const prevDate = getPreviousTradingDay(gapDate);
+                            const vol = prevDate ? volByDate[prevDate] : undefined;
+                            if (typeof vol !== 'number') return;
+                            const yestVolumeStr = String(Math.round(vol / 10000));
+                            if (!patchesByDate[gapDate]) patchesByDate[gapDate] = [];
+                            patchesByDate[gapDate].push({ stock: name, yest_volume: yestVolumeStr });
+                            stockFilled++;
+                        });
+                        if (stockFilled > 0) { filledStocks++; filledGapDays += stockFilled; }
+                        if (si % 5 === 4 || si === stockNames.length - 1) {
+                            setApiStatus('thsApiStatus',
+                                '拉取进度 ' + (si + 1) + '/' + stockNames.length + '，已补 ' + filledGapDays + ' 个断点...', true);
+                        }
+                    } catch (e) {
+                        failedStocks++;
+                        console.warn('拉取 ' + name + ' 历史日线失败:', e && e.message);
+                    }
+                }
+
+                const gapDateKeys = Object.keys(patchesByDate);
+                for (let di = 0; di < gapDateKeys.length; di++) {
+                    const dt = gapDateKeys[di];
+                    patchAuctionFieldBatch(dt, patchesByDate[dt]).catch(function(e) {
+                        console.warn('patchAuctionFieldBatch 历史断点昨日成交量 ' + dt + ' 失败:', e);
+                    });
+                }
+
+                renderAuctionForm();
+                renderAuction();
+
+                setApiStatus('thsApiStatus',
+                    '✅ 补全完成：' + filledStocks + ' 只股票、' + filledGapDays + ' 个断点日昨日成交量已写入（影子记录，不影响任何日期的最近多板池）' +
+                    (failedStocks > 0 ? '，' + failedStocks + ' 只拉取失败' : ''), true);
+            } catch (err) {
+                console.error('fillAuctionHistoryGapYestVolumeFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatus', '❌ ' + msg, false);
