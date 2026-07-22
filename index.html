@@ -31806,7 +31806,7 @@
                                         }
                                         return stock.bomb ? '<span class="bomb-badge">炸</span>' : '';
                                     })()}
-                                    ${stock.close !== undefined && stock.close !== '' ? (parseFloat(stock.close) > 0 ? '+' : '') + stock.close + '%' : '-%'}
+                                    ${stock.close !== undefined && stock.close !== '' ? (parseFloat(stock.close) > 0 ? '+' : (parseFloat(stock.close) < 0 ? '-' : '')) + String(stock.close).replace(/^[+-]/, '') + '%' : '-%'}
                                 </div>
                                 <div class="expand-icon">▼</div>
                             </div>
