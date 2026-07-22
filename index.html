@@ -22242,7 +22242,13 @@
         }
 
         // 买入/持有股票进次日观察组（早盘竞价 tab 专属，与 ensureObservationStocks 平行）：
-        // 昨日"买了还没卖"（bought=true 且 sold!==true）或"持有中"（selected/hold=true）的股票——
+        // 只继承一天，不会无限往后传——判断依据只看 getStocksData()[昨天]（点击"卖/买/持有"
+        // 标签直接写入的权威数据，只有用户在股票列表页手动新增/编辑/复制过的股票才会出现在这里）。
+        // 之前的实现读的是 auctionData[prevDay]，但观察组自动补入的空壳行也会写进 auctionData，
+        // 一旦某只股票被自动补入过一次，哪怕之后完全没人管它，也会靠着自己产生的空壳记录
+        // 一天天无限传递下去——造成"很久以前的旧股票、没有当天数据也一直出现"的问题。
+        // 改成只看 getStocksData() 后，由于该数据只在用户真正操作时才会写入，
+        // 观察组自动补入的空壳股票不会出现在这里，自然只继承一天。
         //   · 今日列表没有 → 自动加入：in_watchlist=true（进第一页）+ obsAutoAdded=true
         //     （观察组语义，导入时受 8617 行的继承保护不被冲掉）+ 延续昨天是"买"还是"持"的标记
         //   · 今日已有（比如最近多板本来就有）→ 不动任何数据，只把名字记入 obsBought_<date> 集合
@@ -22259,43 +22265,31 @@
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
 
-            const auctionData = getAuctionData();
-            const prevList = auctionData[prevDay] || [];
-            // 数据未就绪（昨日缓存尚未加载）时不设标记，等下次渲染重试（与观察组同一语义）
-            if (prevList.length === 0) return;
+            // 权威来源只用 getStocksData()（点击"卖/买/持有"标签直接写入的地方，
+            // 只有用户真正操作过的股票才会出现），不再看 auctionData[prevDay]。
+            const prevStocksTags = getStocksData()[prevDay];
+            // 昨天完全没有手动标签数据 → 数据未就绪，等下次渲染重试，不设标记（与观察组同一语义）
+            if (!prevStocksTags || prevStocksTags.length === 0) return;
 
-            // 权威来源是 getStocksData()（点击"卖/买/持有"标签直接写入的地方）；
-            // auctionData[prevDay] 里的 .bought/.sold/.selected 只是渲染时才会同步过去的副本——
-            // 如果标记之后没有再打开过昨日的早盘竞价看板（没触发过 renderAuction('auction')
-            // 走到 17561 行那段同步逻辑），auctionData 里就还是标记前的旧状态。这里额外查一次
-            // getStocksData()[prevDay]，以它的"已卖出"/"持有"标记为准。
-            const prevStocksTags = getStocksData()[prevDay] || [];
-            const soldNameSet = new Set(
-                prevStocksTags.filter(function(s) { return s && s.name && s.sold === true; })
-                    .map(function(s) { return s.name.trim(); })
-            );
-            const holdNameSet = new Set(
-                prevStocksTags.filter(function(s) { return s && s.name && s.hold === true; })
-                    .map(function(s) { return s.name.trim(); })
-            );
-
-            // 持有中 = （买了 或 持有）且没卖（已卖出的明确排除，两个数据源任一标记"已卖出"都算数）
-            // 买和持都算"仍需观察"，只有卖了才不继承——与 ensureObservationStocks 平行的次日继承规则。
+            // 持有中 = 买了 或 持有，且没卖（已卖出的明确排除）
             const holdingNames = [];
-            prevList.forEach(function(s) {
-                if (!s || !s.stock) return;
-                const nameTrim = s.stock.trim();
-                if (soldNameSet.has(nameTrim)) return;
-                const wasBought = s.bought === true && s.sold !== true;
-                const wasHeld = s.selected === true || holdNameSet.has(nameTrim);
+            const holdingIsBought = {}; // name -> true(买) / false(持)
+            prevStocksTags.forEach(function(s) {
+                if (!s || !s.name) return;
+                const nameTrim = s.name.trim();
+                if (s.sold === true) return;
+                const wasBought = s.bought === true;
+                const wasHeld = s.hold === true;
                 if (wasBought || wasHeld) {
                     holdingNames.push(nameTrim);
+                    holdingIsBought[nameTrim] = wasBought && !wasHeld;
                 }
             });
 
-            // 无论今日有没有，都记录"昨日买未卖"集合——渲染层据此显示"买"字
+            // 无论今日有没有，都记录"昨日买未卖/持有"集合——渲染层据此显示"买"/"持"字
             localStorage.setItem('obsBought_' + date, JSON.stringify(holdingNames));
 
+            const auctionData = getAuctionData();
             const dayList = auctionData[date] || [];
             const existingNames = new Set(dayList.map(function(s) { return s.stock ? s.stock.trim() : ''; }));
             const autoAdded = JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]');
@@ -22305,11 +22299,7 @@
             holdingNames.forEach(function(name) {
                 if (!existingNames.has(name)) {
                     // 不在今日列表 → 自动加入观察组：延续昨天是"买"还是"持"的状态
-                    // （两者都不给背景色，只是上标文字不同，见 obsAutoAdded 的背景豁免逻辑）
-                    const wasBoughtNotHeld = !holdNameSet.has(name) && prevList.some(function(s) {
-                        return s && s.stock && s.stock.trim() === name && s.bought === true;
-                    });
-                    if (wasBoughtNotHeld) {
+                    if (holdingIsBought[name]) {
                         dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, bought: true });
                     } else {
                         dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, selected: true });
