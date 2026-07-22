@@ -7251,6 +7251,7 @@
                     <button type="button" onclick="fillHotYesterdayAuctionFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">补全昨日竞价量</button>
                     <button type="button" onclick="fetchHotTodayAuctionFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取当天竞价量</button>
                     <button type="button" onclick="fetchAllHotAuctionFromNumcat(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">全竞价量（昨日+今日一次请求）</button>
+                    <button type="button" onclick="fetchThreeDaysHotAuctionFromNumcat(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">连抓三天补全（今日+昨日+前日）</button>
                     <button type="button" onclick="fillHotTopicsFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">补全题材</button>
                     <button type="button" onclick="fetchHotMonitorWarningFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">查询监管</button>
                 </div>
@@ -7379,6 +7380,7 @@
                     <button type="button" onclick="fillYesterdayAuctionFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">补全昨日竞价量</button>
                     <button type="button" onclick="fetchTodayAuctionFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取当天竞价量</button>
                     <button type="button" onclick="fetchAllAuctionFromNumcat(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">全竞价量（昨日+今日一次请求）</button>
+                    <button type="button" onclick="fetchThreeDaysAuctionFromNumcat(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #be185d, #9d174d); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">连抓三天补全（今日+昨日+前日）</button>
                     <button type="button" onclick="fillTopicsFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">补全题材</button>
                     <button type="button" onclick="fetchMonitorWarningFromNumcat(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">查询监管</button>
                 </div>
@@ -8651,9 +8653,8 @@
 
         // 查询某只股票在某日期的曲线数据
         // 阶段三 E：auction 数据源改读 _auctionMemCache（含 in_watchlist true/false 全部行，供趋势图历史查询）
-        function getStockHistoryValue(date, stockName, field, dataSource='auction') {
-            const cache = dataSource === 'hot' ? _hotFullRowCache : _auctionMemCache;
-            const rows = cache[date];
+        // 从指定缓存里读某股票某日的字段值（供 getStockHistoryValue 主读+回退复用）
+        function _readHistoryValueFrom(rows, stockName, field) {
             if (!rows) return null;
             const found = rows.find(function(p) { return p && p.stock && p.stock.trim() === stockName; });
             if (!found) return null;
@@ -8666,6 +8667,22 @@
             }
             const rawField = field === 'volume' ? 'volume' : 'yest_volume';
             return getNumericVolume(found[rawField]);
+        }
+
+        // 趋势图历史取数（含两个 tab 影子数据共享）：
+        // 本 tab 缓存优先；本 tab"该日没有这只股票的行"或"行里该字段为空"时，
+        // 回退读另一个 tab 的全量缓存（auction ↔ hot 互为影子数据源）。
+        // 【纯读取共享】不写任何一个表、不复制任何数据——两个 tab 第一页的股票数量、
+        // in_watchlist 归属、sync 逻辑完全不受影响；哈药股份这类只在热门股票 tab
+        // 存在的股票，永远不会因此出现在早盘竞价第一页（第一页渲染不经过本函数）。
+        // 两边都有数据但值不同时，本 tab 的值优先（只有本 tab 缺失才用对方的）。
+        function getStockHistoryValue(date, stockName, field, dataSource='auction') {
+            const primaryCache = dataSource === 'hot' ? _hotFullRowCache : _auctionMemCache;
+            const fallbackCache = dataSource === 'hot' ? _auctionMemCache : _hotFullRowCache;
+            const primaryVal = _readHistoryValueFrom(primaryCache[date], stockName, field);
+            if (primaryVal !== null) return primaryVal;
+            // 本 tab 缺失 → 回退另一个 tab 的影子数据
+            return _readHistoryValueFrom(fallbackCache[date], stockName, field);
         }
 
         // ===== stock_topics 表操作（题材库独立表）=====
@@ -8917,10 +8934,33 @@
             _biddingTableAvailable = true; // 推送成功即证明表可用
         }
 
+        // 删除"云端有但本地表单里没有"的行（用户在编辑表单里点"删"掉的行）。
+        // 之前 pushBiddingToCloud 只 upsert 不 delete：表单里删掉一行再保存，云端那行还在，
+        // 下次拉取又"复活"——表现为"删也删不掉"。保存成功后调用本函数把多余的行真正删掉。
+        // 安全前提：表单行来自 getTodayBidding()（云端全量），Worker 自动写入的行也在表单里，
+        // 只有用户手动点"删"的行才会进入删除名单。
+        async function syncBiddingDeletionsToCloud(date) {
+            const sb = getSupabase();
+            const localNames = new Set((getBiddingData()[date] || [])
+                .map(function(r) { return ((r && r.name) || '').trim(); })
+                .filter(function(n) { return n; }));
+            const { data: cloudRows, error } = await sb.from('bidding_data')
+                .select('name').eq('date', date);
+            if (error) throw error;
+            const toDelete = (cloudRows || [])
+                .map(function(r) { return ((r && r.name) || '').trim(); })
+                .filter(function(n) { return n && !localNames.has(n); });
+            if (toDelete.length === 0) return;
+            _justPushedBidding = true; // 删除也会触发 Realtime，同样屏蔽
+            setTimeout(function() { _justPushedBidding = false; }, 5000);
+            const { error: delErr } = await sb.from('bidding_data')
+                .delete().eq('date', date).in('name', toDelete);
+            if (delErr) throw delErr;
+        }
+
         // 删除 bidding_data 表中某天的全部数据（用于"清除当天数据"功能）。
         // 之前该操作只清内存，云端表行还在，下次刷新/Realtime 会把数据"复活"。
-        async function deleteBiddingFromCloud(date) {
-            if (!date) return;
+        async function deleteBiddingFromCloud(date) {            if (!date) return;
             _justPushedBidding = true;
             setTimeout(function() { _justPushedBidding = false; }, 5000);
             const sb = getSupabase();
@@ -11075,7 +11115,10 @@
 
 
                 // 观察组可能受云端数据影响（上一交易日"竞/昨"达标股票可能变化），清除标记重新计算
+                // 买入继承同理：昨日 bought/sold 状态可能被另一台设备改过，一并清除重算
                 try { localStorage.removeItem('obsEnsured_' + currentDate); } catch(e) {}
+                try { localStorage.removeItem('boughtEnsured_' + currentDate); } catch(e) {}
+                try { localStorage.removeItem('obsBought_' + currentDate); } catch(e) {}
 
                 statusEl.innerHTML = '<span style="color:#34d399">✅ 云端数据同步成功</span>';
             } catch (e) {
@@ -13189,9 +13232,12 @@
             // 导入新数据后，观察组需重新计算：
             // - 已在导入列表中的观察组股票 → 加 * 标记
             // - 不在导入列表中的观察组股票 → 自动添加
+            // 买入继承同样重新计算（boughtEnsured_/obsBought_ 一并清除）
             try {
                 localStorage.removeItem('obsEnsured_' + currentDate);
                 localStorage.removeItem('obsAutoAdded_' + currentDate);
+                localStorage.removeItem('boughtEnsured_' + currentDate);
+                localStorage.removeItem('obsBought_' + currentDate);
             } catch(e) {}
 
             buildTopicCache();
@@ -14712,6 +14758,14 @@
             });
         }
 
+        // ---------- 猫抓：连抓三天补全（今日+昨日+前日，一次请求，纯补全不覆盖，不弹窗） ----------
+        function fetchThreeDaysAuctionFromNumcat(btn) {
+            fetchAuctionFromNumcat(btn, {
+                fillToday: true, fillYesterday: true, fillDayBefore: true,
+                overwriteToday: false, overwriteYesterday: false, overwriteDayBefore: false
+            });
+        }
+
         // ---------- 猫抓：补全题材（开盘啦，只填 topics 为空的股票） ----------
         async function fillTopicsFromNumcat(btn) {
             setBtnLoading(btn, true);
@@ -15693,6 +15747,14 @@
             });
         }
 
+        // ---------- 猫抓（热门股票）：连抓三天补全（今日+昨日+前日，一次请求，纯补全不覆盖，不弹窗） ----------
+        function fetchThreeDaysHotAuctionFromNumcat(btn) {
+            fetchHotAuctionFromNumcat(btn, {
+                fillToday: true, fillYesterday: true, fillDayBefore: true,
+                overwriteToday: false, overwriteYesterday: false, overwriteDayBefore: false
+            });
+        }
+
         // 猫抓竞价量补全共用逻辑（热门股票独立版本）
         // opts: { fillYesterday: bool, fillToday: bool, overwriteYesterday: bool, overwriteToday: bool }
         async function fetchHotAuctionFromNumcat(btn, opts) {
@@ -15702,6 +15764,12 @@
                 const yesterday = getPreviousTradingDay(today);
                 if (!yesterday) {
                     setApiStatus('numcatApiStatusHot', '❌ 无法确定上一交易日', false);
+                    return;
+                }
+                // 「连抓三天补全」：前天（T-2）也纳入补全范围
+                const dayBefore = opts.fillDayBefore ? getPreviousTradingDay(yesterday) : null;
+                if (opts.fillDayBefore && !dayBefore) {
+                    setApiStatus('numcatApiStatusHot', '❌ 无法确定前两个交易日', false);
                     return;
                 }
 
@@ -15719,11 +15787,17 @@
                 const yesterdayList = opts.fillYesterday
                     ? buildYesterdayListFromToday(todayList, hotAuctionData, yesterday)
                     : [];
+                // 前天列表同样处理：有正式列表就基于它保留字段，没有就造影子（落影子记录，不进前天第一页）
+                const dayBeforeList = opts.fillDayBefore
+                    ? buildYesterdayListFromToday(todayList, hotAuctionData, dayBefore)
+                    : [];
+                const dayBeforeListWasEmpty = opts.fillDayBefore && (hotAuctionData[dayBefore] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 const needToday = opts.fillToday && todayList.length > 0;
                 const needYesterday = opts.fillYesterday && yesterdayList.length > 0;
-                if (!needToday && !needYesterday) {
+                const needDayBefore = opts.fillDayBefore && dayBeforeList.length > 0;
+                if (!needToday && !needYesterday && !needDayBefore) {
                     setApiStatus('numcatApiStatusHot', '❌ 没有可补全的股票', false);
                     return;
                 }
@@ -15739,6 +15813,7 @@
                 };
                 if (needToday) collectCodes(todayList);
                 if (needYesterday) collectCodes(yesterdayList);
+                if (needDayBefore) collectCodes(dayBeforeList);
 
                 if (allCodesSet.size === 0) {
                     setApiStatus('numcatApiStatusHot', '❌ 没有可补全的股票（缺少代码映射）', false);
@@ -15748,19 +15823,19 @@
                 const symbols = Array.from(allCodesSet).join(',');
                 const todayYMD = today.replace(/-/g, '');
                 const yesterdayYMD = yesterday.replace(/-/g, '');
+                const dayBeforeYMD = dayBefore ? dayBefore.replace(/-/g, '') : '';
 
-                // 构造 params（一次请求拿需要的所有日期）
-                let params;
-                if (needToday && needYesterday) {
-                    // 全竞价量：用 startdate+enddate 一次请求2天
-                    params = { symbols: symbols, startdate: yesterdayYMD, enddate: todayYMD };
-                } else if (needYesterday) {
-                    params = { symbols: symbols, tradedate: yesterdayYMD };
-                } else {
-                    params = { symbols: symbols, tradedate: todayYMD };
-                }
+                // 构造 params（一次请求拿需要的所有日期；多天用 startdate+enddate，1次请求省额度）
+                const reqDates = [];
+                if (needDayBefore) reqDates.push(dayBeforeYMD);
+                if (needYesterday) reqDates.push(yesterdayYMD);
+                if (needToday) reqDates.push(todayYMD);
+                const params = reqDates.length > 1
+                    ? { symbols: symbols, startdate: reqDates[0], enddate: reqDates[reqDates.length - 1] }
+                    : { symbols: symbols, tradedate: reqDates[0] };
 
-                setApiStatus('numcatApiStatusHot', '正在请求猫抓接口（' + allCodesSet.size + ' 只股票）...', true);
+                const dayCountText = reqDates.length === 3 ? '三天' : (reqDates.length === 2 ? '两天' : '单日');
+                setApiStatus('numcatApiStatusHot', '正在请求猫抓接口（' + allCodesSet.size + ' 只股票，' + dayCountText + '）...', true);
 
                 const fields = 'symbol,name,tradedate,auc_vol,auc_pct_chg';
                 const result = await numcatApiPost('daily_auc', fields, params);
@@ -15808,6 +15883,7 @@
                 // 原始 bug 的触发点。
                 const todayPatches = [];
                 const yesterdayPatches = [];
+                const dayBeforePatches = []; // 「连抓三天补全」前天的 patch 收集
                 // 🔍[调试-诊断报告用] 记录"今天"这轮每只股票的命中/未命中情况，写入
                 // lastNumcatFillDebugHot_<date>（加 Hot 前缀与早盘竞价 key 互相独立）。
                 const todayFillLog = [];
@@ -15911,6 +15987,29 @@
                     hotAuctionData[yesterday] = existingYesterdayList;
                 }
 
+                // 「连抓三天补全」前天：与昨日完全同一套影子逻辑——只把 volume 合并回前天
+                // 原有正式列表成员，前天原本没有的股票落影子记录（in_watchlist=false），不进前天第一页。
+                let shadowOnlyDayBeforeStocks = [];
+                if (needDayBefore) {
+                    fillVolume(dayBeforeList, dayBefore, !!opts.overwriteDayBefore, false, dayBeforePatches); // 前天：只填 volume
+                    const existingDayBeforeList = (hotAuctionData[dayBefore] || []).slice();
+                    const existingDayBeforeNames = {};
+                    existingDayBeforeList.forEach(function(s) {
+                        if (s && s.stock) existingDayBeforeNames[s.stock.trim()] = true;
+                    });
+                    dayBeforeList.forEach(function(s) {
+                        if (!s || !s.stock) return;
+                        const name = s.stock.trim();
+                        if (!existingDayBeforeNames[name]) return;
+                        const target = existingDayBeforeList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                        if (target) target.volume = s.volume;
+                    });
+                    shadowOnlyDayBeforeStocks = dayBeforeList.filter(function(s) {
+                        return s && s.stock && !existingDayBeforeNames[s.stock.trim()];
+                    });
+                    hotAuctionData[dayBefore] = existingDayBeforeList;
+                }
+
                 invalidateTopicCache();
 
                 // 字段级 PATCH 上报：todayPatches/yesterdayPatches 同时包含正式列表成员和影子记录——
@@ -15922,6 +16021,9 @@
                 if (yesterdayPatches.length > 0) {
                     patchHotFieldBatch(yesterday, yesterdayPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday 失败:', e); });
                 }
+                if (dayBeforePatches.length > 0) {
+                    patchHotFieldBatch(dayBefore, dayBeforePatches).catch(function(e) { console.warn('patchHotFieldBatch dayBefore 失败:', e); });
+                }
                 // 趋势图缓存同步（hot_stock_trends 表，热门股票独有，沿用原整行逻辑不变）
                 if (needYesterday) {
                     pushHotTrendsToCloud(yesterday, hotAuctionData[yesterday]).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
@@ -15929,19 +16031,32 @@
                         pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
                     }
                 }
+                if (needDayBefore) {
+                    pushHotTrendsToCloud(dayBefore, hotAuctionData[dayBefore]).catch(function(e) { console.warn('pushHotTrendsToCloud dayBefore 失败:', e); });
+                    if (shadowOnlyDayBeforeStocks.length > 0) {
+                        pushHotTrendsToCloud(dayBefore, shadowOnlyDayBeforeStocks).catch(function(e) { console.warn('pushHotTrendsToCloud dayBefore(影子) 失败:', e); });
+                    }
+                }
                 if (needToday) pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
 
                 renderHotForm();
                 renderHotStocks();
 
-                const mode = (needToday && needYesterday) ? '昨日+今日' : (needToday ? '今日' : '昨日');
-                const action = (opts.overwriteToday || opts.overwriteYesterday) ? '覆盖' : '补全';
-                const yesterdayNote = (needYesterday && yesterdayListWasEmpty)
-                    ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
-                    : '';
-                setApiStatus('numcatApiStatusHot',
-                    '✅ ' + mode + action + ' ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote,
-                    true);
+                // 三天模式显示分天结果，两天/单日保持原文案
+                let resultText;
+                if (opts.fillDayBefore) {
+                    resultText = '✅ 连抓三天补全完成：今日+' + todayPatches.length + ' / 昨日+' + yesterdayPatches.length +
+                        ' / 前日+' + dayBeforePatches.length + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据';
+                    if (dayBeforeListWasEmpty) resultText += '（前日列表已用今日列表作为基础，新股票落影子记录）';
+                } else {
+                    const mode = (needToday && needYesterday) ? '昨日+今日' : (needToday ? '今日' : '昨日');
+                    const action = (opts.overwriteToday || opts.overwriteYesterday) ? '覆盖' : '补全';
+                    const yesterdayNote = (needYesterday && yesterdayListWasEmpty)
+                        ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
+                        : '';
+                    resultText = '✅ ' + mode + action + ' ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote;
+                }
+                setApiStatus('numcatApiStatusHot', resultText, true);
             } catch (err) {
                 console.error('fetchHotAuctionFromNumcat 失败:', err);
                 let msg = err && err.message ? err.message : '获取失败';
@@ -16388,6 +16503,12 @@
                     setApiStatus('numcatApiStatus', '❌ 无法确定上一交易日', false);
                     return;
                 }
+                // 「连抓三天补全」：前天（T-2）也纳入补全范围
+                const dayBefore = opts.fillDayBefore ? getPreviousTradingDay(yesterday) : null;
+                if (opts.fillDayBefore && !dayBefore) {
+                    setApiStatus('numcatApiStatus', '❌ 无法确定前两个交易日', false);
+                    return;
+                }
 
                 const auctionData = getAuctionData();
                 const todayList = (auctionData[today] || []).slice();
@@ -16400,11 +16521,17 @@
                     ? buildYesterdayListFromToday(todayList, auctionData, yesterday)
                     : [];
                 const yesterdayListWasEmpty = opts.fillYesterday && (auctionData[yesterday] || []).length === 0;
+                // 前天列表同样处理：有正式列表就基于它保留字段，没有就造影子（落影子记录，不进前天第一页）
+                const dayBeforeList = opts.fillDayBefore
+                    ? buildYesterdayListFromToday(todayList, auctionData, dayBefore)
+                    : [];
+                const dayBeforeListWasEmpty = opts.fillDayBefore && (auctionData[dayBefore] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
                 const needToday = opts.fillToday && todayList.length > 0;
                 const needYesterday = opts.fillYesterday && yesterdayList.length > 0;
-                if (!needToday && !needYesterday) {
+                const needDayBefore = opts.fillDayBefore && dayBeforeList.length > 0;
+                if (!needToday && !needYesterday && !needDayBefore) {
                     setApiStatus('numcatApiStatus', '❌ 没有可补全的股票', false);
                     return;
                 }
@@ -16420,6 +16547,7 @@
                 };
                 if (needToday) collectCodes(todayList);
                 if (needYesterday) collectCodes(yesterdayList);
+                if (needDayBefore) collectCodes(dayBeforeList);
 
                 if (allCodesSet.size === 0) {
                     setApiStatus('numcatApiStatus', '❌ 没有可补全的股票（缺少代码映射）', false);
@@ -16429,19 +16557,19 @@
                 const symbols = Array.from(allCodesSet).join(',');
                 const todayYMD = today.replace(/-/g, '');
                 const yesterdayYMD = yesterday.replace(/-/g, '');
+                const dayBeforeYMD = dayBefore ? dayBefore.replace(/-/g, '') : '';
 
-                // 构造 params（一次请求拿需要的所有日期）
-                let params;
-                if (needToday && needYesterday) {
-                    // 全竞价量：用 startdate+enddate 一次请求2天
-                    params = { symbols: symbols, startdate: yesterdayYMD, enddate: todayYMD };
-                } else if (needYesterday) {
-                    params = { symbols: symbols, tradedate: yesterdayYMD };
-                } else {
-                    params = { symbols: symbols, tradedate: todayYMD };
-                }
+                // 构造 params（一次请求拿需要的所有日期；多天用 startdate+enddate，1次请求省额度）
+                const reqDates = [];
+                if (needDayBefore) reqDates.push(dayBeforeYMD);
+                if (needYesterday) reqDates.push(yesterdayYMD);
+                if (needToday) reqDates.push(todayYMD);
+                const params = reqDates.length > 1
+                    ? { symbols: symbols, startdate: reqDates[0], enddate: reqDates[reqDates.length - 1] }
+                    : { symbols: symbols, tradedate: reqDates[0] };
 
-                setApiStatus('numcatApiStatus', '正在请求猫抓接口（' + allCodesSet.size + ' 只股票）...', true);
+                const dayCountText = reqDates.length === 3 ? '三天' : (reqDates.length === 2 ? '两天' : '单日');
+                setApiStatus('numcatApiStatus', '正在请求猫抓接口（' + allCodesSet.size + ' 只股票，' + dayCountText + '）...', true);
 
                 const fields = 'symbol,name,tradedate,auc_vol,auc_pct_chg';
                 const result = await numcatApiPost('daily_auc', fields, params);
@@ -16494,6 +16622,7 @@
                 // 一起带上——这正是原始 bug（先点猫抓再点同花顺互相覆盖）的触发点。
                 const todayPatches = [];
                 const yesterdayPatches = [];
+                const dayBeforePatches = []; // 「连抓三天补全」前天的 patch 收集
                 // 🔍[调试-诊断报告用] 记录本次猫抓请求，"今天"这个日期下，每只股票命中/未命中的原始情况，
                 // 用于事后在诊断报告里还原"这次点击猫抓时，接口到底有没有给涨幅"，
                 // 不必再靠翻云端历史记录推理。只记录 fillPct=true（即今天）那一轮。
@@ -16600,6 +16729,26 @@
                     auctionData[yesterday] = existingYesterdayList;
                 }
 
+                // 「连抓三天补全」前天：与昨日完全同一套影子逻辑——只把 volume 合并回前天
+                // 原有正式列表成员，前天原本没有的股票落影子记录（in_watchlist=false），
+                // 不进前天第一页。
+                if (needDayBefore) {
+                    fillVolume(dayBeforeList, dayBefore, !!opts.overwriteDayBefore, false, dayBeforePatches); // 前天：只填 volume
+                    const existingDayBeforeList = (auctionData[dayBefore] || []).slice();
+                    const existingDayBeforeNames = {};
+                    existingDayBeforeList.forEach(function(s) {
+                        if (s && s.stock) existingDayBeforeNames[s.stock.trim()] = true;
+                    });
+                    dayBeforeList.forEach(function(s) {
+                        if (!s || !s.stock) return;
+                        const name = s.stock.trim();
+                        if (!existingDayBeforeNames[name]) return;
+                        const target = existingDayBeforeList.find(function(e) { return e.stock && e.stock.trim() === name; });
+                        if (target) { target.volume = s.volume; }
+                    });
+                    auctionData[dayBefore] = existingDayBeforeList;
+                }
+
                 // 阶段四 Bug 5 修复：saveModule('auction') 已是 no-op（Bug 4），删除避免误导；
                 // auctionData 即 _auctionMemCache（Bug 1+2），本地状态已由上面赋值更新
                 invalidateTopicCache();
@@ -16615,19 +16764,29 @@
                 if (yesterdayPatches.length > 0) {
                     patchAuctionFieldBatch(yesterday, yesterdayPatches).catch(function(e) { console.warn('patchAuctionFieldBatch yesterday 失败:', e); });
                 }
+                if (dayBeforePatches.length > 0) {
+                    patchAuctionFieldBatch(dayBefore, dayBeforePatches).catch(function(e) { console.warn('patchAuctionFieldBatch dayBefore 失败:', e); });
+                }
 
                 renderAuctionForm();
                 renderAuction();
                 renderList();
 
-                const mode = (needToday && needYesterday) ? '昨日+今日' : (needToday ? '今日' : '昨日');
-                const action = (opts.overwriteToday || opts.overwriteYesterday) ? '覆盖' : '补全';
-                const yesterdayNote = (needYesterday && yesterdayListWasEmpty)
-                    ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
-                    : '';
-                setApiStatus('numcatApiStatus',
-                    '✅ ' + mode + action + ' ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote,
-                    true);
+                // 三天模式显示分天结果，两天/单日保持原文案
+                let resultText;
+                if (opts.fillDayBefore) {
+                    resultText = '✅ 连抓三天补全完成：今日+' + todayPatches.length + ' / 昨日+' + yesterdayPatches.length +
+                        ' / 前日+' + dayBeforePatches.length + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据';
+                    if (dayBeforeListWasEmpty) resultText += '（前日列表已用今日列表作为基础，新股票落影子记录）';
+                } else {
+                    const mode = (needToday && needYesterday) ? '昨日+今日' : (needToday ? '今日' : '昨日');
+                    const action = (opts.overwriteToday || opts.overwriteYesterday) ? '覆盖' : '补全';
+                    const yesterdayNote = (needYesterday && yesterdayListWasEmpty)
+                        ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
+                        : '';
+                    resultText = '✅ ' + mode + action + ' ' + filledCount + ' 个竞价量，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote;
+                }
+                setApiStatus('numcatApiStatus', resultText, true);
             } catch (err) {
                 console.error('fetchAuctionFromNumcat 失败:', err);
                 let msg = err && err.message ? err.message : '获取失败';
@@ -17366,6 +17525,8 @@
             if (dataSource === 'auction') {
                 // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
                 ensureObservationStocks(currentDate);
+                // 买入股票进次日观察组：昨日"买了还没卖"的股票自动进今日观察组（名称后带"买"字）
+                ensureBoughtStocksForDate(currentDate);
                 // 每次渲染早盘竞价看板时，顺带重新计算一次"最近多板"统计，保证两个看板实时同步
                 recalcDuibanFromAuction();
             }
@@ -17778,6 +17939,8 @@
             // 观察组：上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与"竞/昨数"统计保持一致
             const _obsStocks = getJingYestHighlightSetForDate(getPreviousTradingDay(currentDate), dataSource);
             const _autoAddedSet = new Set(JSON.parse(localStorage.getItem('obsAutoAdded_' + currentDate) || '[]'));
+            // "昨日买未卖"股票集合（ensureBoughtStocksForDate 写入）：名称后显示红色上标"买"
+            const _obsBoughtSet = new Set(JSON.parse(localStorage.getItem('obsBought_' + currentDate) || '[]'));
 
             // 拆分渲染顺序：观察组 + 常规组
             // "竞/昨"关闭时：保持原样，观察组整体置顶、虚线分隔，与之前行为一致。
@@ -17848,13 +18011,16 @@
                 const isBought = item.bought === true;
                 const isSold = item.sold === true;
                 const isFixed = item.fixed === true;
+                // 观察组继承来的买入（obsAutoAdded=true 且 bought=true）：用户明确不要红色背景，
+                // 只显示名称后的"买"字上标；背景只给"当天手动标记买入"（非观察组继承）的股票
+                const isObsInheritedBought = isBought && item.obsAutoAdded === true;
                 const isGray = !isSelected && !isBought && !isSold && ratioValue < 4.5;
                 // 优先级：已卖出 > 已买入 > 持有 > 手动选中
                 let itemClass = 'auction-item';
                 if (isSold) {
                     itemClass = 'auction-item sold'; // 卖出状态显示浅灰色（最高优先级）
-                } else if (isBought) {
-                    itemClass = 'auction-item bought'; // 买入状态显示浅红色
+                } else if (isBought && !isObsInheritedBought) {
+                    itemClass = 'auction-item bought'; // 当天手动买入：浅红色
                 } else if (isSelected && isFixed) {
                     itemClass = 'auction-item selected'; // 持有状态（固定）显示浅紫色
                 } else if (isSelected && !isFixed) {
@@ -17929,6 +18095,12 @@
                 // 交易监管标记：严重异常波动
                 if (item.monitorWarning) {
                     _stockNameDisplay += '<span style="color:#dc2626;font-size:13px;margin-left:2px;" title="严重异常波动">⚠️</span>';
+                }
+                // 买入标记：名称后红色上标"买"（昨日买未卖继承来的 或 今天手动标记买入的，都显示；
+                // 背景只给今天手动买入的——见上方 isObsInheritedBought 的判断）
+                const _isObsBought = item.stock && _obsBoughtSet.has(item.stock.trim());
+                if (_isObsBought || isBought) {
+                    _stockNameDisplay += '<sup style="color:#dc2626;font-size:10px;font-weight:700;margin-left:2px;">买</sup>';
                 }
                 
                 return `
@@ -22061,6 +22233,62 @@
             localStorage.setItem('obsEnsured_' + date, '1');
         }
 
+        // 买入股票进次日观察组（早盘竞价 tab 专属，与 ensureObservationStocks 平行）：
+        // 昨日"买了还没卖"（bought=true 且 sold!==true，即持有中）的股票——
+        //   · 今日列表没有 → 自动加入：in_watchlist=true（进第一页）+ obsAutoAdded=true
+        //     （观察组语义，导入时受 8617 行的继承保护不被冲掉）+ bought=true（买入标记持久化）
+        //   · 今日已有（比如最近多板本来就有）→ 不动任何数据，只把名字记入 obsBought_<date> 集合
+        // 已卖出（sold=true）的不继承：卖了就不需要再观察。
+        // "买"字显示：渲染层读 obsBought_<date> 集合 + item.bought，名称后加红色上标"买"；
+        // 观察组继承来的（obsAutoAdded=true）即使 bought=true 也不给红色背景（用户明确不要背景）。
+        function ensureBoughtStocksForDate(date) {
+            if (!date) return;
+            // 防重复：每日期只执行一次
+            if (localStorage.getItem('boughtEnsured_' + date) === '1') return;
+
+            const prevDay = getPreviousTradingDay(date);
+            if (!prevDay) return;
+
+            const auctionData = getAuctionData();
+            const prevList = auctionData[prevDay] || [];
+            // 数据未就绪（昨日缓存尚未加载）时不设标记，等下次渲染重试（与观察组同一语义）
+            if (prevList.length === 0) return;
+
+            // 持有中 = 买了且没卖（已卖出的明确排除）
+            const holdingNames = [];
+            prevList.forEach(function(s) {
+                if (s && s.stock && s.bought === true && s.sold !== true) {
+                    holdingNames.push(s.stock.trim());
+                }
+            });
+
+            // 无论今日有没有，都记录"昨日买未卖"集合——渲染层据此显示"买"字
+            localStorage.setItem('obsBought_' + date, JSON.stringify(holdingNames));
+
+            const dayList = auctionData[date] || [];
+            const existingNames = new Set(dayList.map(function(s) { return s.stock ? s.stock.trim() : ''; }));
+            const autoAdded = JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]');
+            const autoAddedSet = new Set(autoAdded);
+
+            let hasNew = false;
+            holdingNames.forEach(function(name) {
+                if (!existingNames.has(name)) {
+                    // 不在今日列表 → 自动加入观察组（bought=true 入库持久，渲染时只显"买"字不显背景）
+                    dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, bought: true });
+                    autoAddedSet.add(name);
+                    hasNew = true;
+                }
+            });
+
+            if (hasNew) {
+                auctionData[date] = dayList;
+                markAuctionDirty(date);
+                scheduleCloudPush();
+            }
+            localStorage.setItem('obsAutoAdded_' + date, JSON.stringify([...autoAddedSet]));
+            localStorage.setItem('boughtEnsured_' + date, '1');
+        }
+
         function getAuctionStockHistory(stockName, endDate, count, dataSource='auction') {
             const days = [];
             let d = endDate;
@@ -23584,11 +23812,23 @@
             const contentEl = document.getElementById('biddingContent');
             const placeholderEl = document.getElementById('biddingPlaceholder');
             const toggleBtn = document.getElementById('biddingToggleBtn');
-            
+
             if (!biddingData || biddingData.length === 0) {
                 biddingData = getDefaultBiddingData();
             }
-            
+
+            // 按默认模板顺序重排：云端行按写入/更新时间返回，顺序不稳定（Worker 写的行
+            // updated_at 最新会沉底）。模板里的行按模板索引排，不在模板里的额外行排最后，
+            // 保证前台永远是固定顺序，与"设置默认模板"里的顺序一致。
+            const _tpl = getDefaultBiddingTemplate();
+            const _tplOrder = {};
+            _tpl.forEach(function(t, i) { _tplOrder[((t && t.name) || '').trim()] = i; });
+            biddingData = biddingData.slice().sort(function(a, b) {
+                const ai = _tplOrder[((a && a.name) || '').trim()];
+                const bi = _tplOrder[((b && b.name) || '').trim()];
+                return (ai === undefined ? 999 : ai) - (bi === undefined ? 999 : bi);
+            });
+
             if (placeholderEl) placeholderEl.style.display = 'none';
             
             let html = '<table class="bidding-table">';
@@ -24512,6 +24752,12 @@
                 console.warn('saveBidding pushBiddingToCloud 失败:', e);
                 const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
                 showWarningToast('⚠️ 云端同步失败，本次修改未保存！原因: ' + detail, 10000);
+            });
+            // 同步删除"云端有但表单没有"的行（用户在表单里点"删"掉的行，比如改名残留的幽灵行）
+            syncBiddingDeletionsToCloud(currentDate).catch(function(e) {
+                console.warn('saveBidding syncBiddingDeletionsToCloud 失败:', e);
+                const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
+                showWarningToast('⚠️ 删除多余行失败: ' + detail, 10000);
             });
             
             // Fix Bug5: iOS上点"保存"时oninput可能来不及触发syncBiddingCloseToEtf
