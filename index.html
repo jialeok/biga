@@ -22254,10 +22254,22 @@
             // 数据未就绪（昨日缓存尚未加载）时不设标记，等下次渲染重试（与观察组同一语义）
             if (prevList.length === 0) return;
 
-            // 持有中 = 买了且没卖（已卖出的明确排除）
+            // 权威来源是 getStocksData()（点击"卖/买/持有"标签直接写入的地方）；
+            // auctionData[prevDay] 里的 .bought/.sold 只是渲染时才会同步过去的副本——
+            // 如果标记"卖"之后没有再打开过昨日的早盘竞价看板（没触发过 renderAuction('auction')
+            // 走到 17561 行那段同步逻辑），auctionData 里就还是标记前的旧状态，导致已卖出的股票
+            // 被误判为"买了没卖"继续进入次日观察组。这里额外查一次 getStocksData()[prevDay]，
+            // 只要那边标记了"已卖出"，就以它为准，不再继承。
+            const prevStocksTags = getStocksData()[prevDay] || [];
+            const soldNameSet = new Set(
+                prevStocksTags.filter(function(s) { return s && s.name && s.sold === true; })
+                    .map(function(s) { return s.name.trim(); })
+            );
+
+            // 持有中 = 买了且没卖（已卖出的明确排除，两个数据源任一标记"已卖出"都算数）
             const holdingNames = [];
             prevList.forEach(function(s) {
-                if (s && s.stock && s.bought === true && s.sold !== true) {
+                if (s && s.stock && s.bought === true && s.sold !== true && !soldNameSet.has(s.stock.trim())) {
                     holdingNames.push(s.stock.trim());
                 }
             });
