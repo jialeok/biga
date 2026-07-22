@@ -18096,11 +18096,19 @@
                 if (item.monitorWarning) {
                     _stockNameDisplay += '<span style="color:#dc2626;font-size:13px;margin-left:2px;" title="严重异常波动">⚠️</span>';
                 }
-                // 买入标记：名称后红色上标"买"（昨日买未卖继承来的 或 今天手动标记买入的，都显示；
+                // 买入/持有标记：名称后红色上标"买"或蓝色上标"持"（昨日买未卖继承来的 或 今天手动标记的，都显示；
                 // 背景只给今天手动买入的——见上方 isObsInheritedBought 的判断）
+                // 优先用今天的实时标签（isBought/isSelected/isSold 来自 getStocksData()[currentDate] 的实时同步，
+                // 见 13517/17561 行）判断显示"买"还是"持"——而不是只看 _obsBoughtSet（继承那一刻的静态快照）。
+                // 这样如果继承进来后又用"复制到交易日"把标签变成了"持"，或者当天改了标签，上标能跟着更新，
+                // 不会一直固定显示成继承时的"买"。已卖出（isSold）则完全不显示这个上标。
                 const _isObsBought = item.stock && _obsBoughtSet.has(item.stock.trim());
-                if (_isObsBought || isBought) {
-                    _stockNameDisplay += '<sup style="color:#dc2626;font-size:10px;font-weight:700;margin-left:2px;">买</sup>';
+                if (!isSold) {
+                    if (isSelected) {
+                        _stockNameDisplay += '<sup style="color:#2563eb;font-size:10px;font-weight:700;margin-left:2px;">持</sup>';
+                    } else if (_isObsBought || isBought) {
+                        _stockNameDisplay += '<sup style="color:#dc2626;font-size:10px;font-weight:700;margin-left:2px;">买</sup>';
+                    }
                 }
                 
                 return `
@@ -22233,13 +22241,15 @@
             localStorage.setItem('obsEnsured_' + date, '1');
         }
 
-        // 买入股票进次日观察组（早盘竞价 tab 专属，与 ensureObservationStocks 平行）：
-        // 昨日"买了还没卖"（bought=true 且 sold!==true，即持有中）的股票——
+        // 买入/持有股票进次日观察组（早盘竞价 tab 专属，与 ensureObservationStocks 平行）：
+        // 昨日"买了还没卖"（bought=true 且 sold!==true）或"持有中"（selected/hold=true）的股票——
         //   · 今日列表没有 → 自动加入：in_watchlist=true（进第一页）+ obsAutoAdded=true
-        //     （观察组语义，导入时受 8617 行的继承保护不被冲掉）+ bought=true（买入标记持久化）
+        //     （观察组语义，导入时受 8617 行的继承保护不被冲掉）+ 延续昨天是"买"还是"持"的标记
         //   · 今日已有（比如最近多板本来就有）→ 不动任何数据，只把名字记入 obsBought_<date> 集合
         // 已卖出（sold=true）的不继承：卖了就不需要再观察。
-        // "买"字显示：渲染层读 obsBought_<date> 集合 + item.bought，名称后加红色上标"买"；
+        // "买"/"持"字显示：渲染层按当天实时标签（isBought/isSelected，来自 getStocksData()[currentDate]
+        // 的实时同步）优先判断，只有当天没有再打标签时才回退用 obsBought_<date> 集合的继承快照；
+        // 这样如果继承进来后又用"复制到交易日"等方式把标签改成了"持"，上标会跟着变，不会锁死成"买"。
         // 观察组继承来的（obsAutoAdded=true）即使 bought=true 也不给红色背景（用户明确不要背景）。
         function ensureBoughtStocksForDate(date) {
             if (!date) return;
@@ -22255,22 +22265,31 @@
             if (prevList.length === 0) return;
 
             // 权威来源是 getStocksData()（点击"卖/买/持有"标签直接写入的地方）；
-            // auctionData[prevDay] 里的 .bought/.sold 只是渲染时才会同步过去的副本——
-            // 如果标记"卖"之后没有再打开过昨日的早盘竞价看板（没触发过 renderAuction('auction')
-            // 走到 17561 行那段同步逻辑），auctionData 里就还是标记前的旧状态，导致已卖出的股票
-            // 被误判为"买了没卖"继续进入次日观察组。这里额外查一次 getStocksData()[prevDay]，
-            // 只要那边标记了"已卖出"，就以它为准，不再继承。
+            // auctionData[prevDay] 里的 .bought/.sold/.selected 只是渲染时才会同步过去的副本——
+            // 如果标记之后没有再打开过昨日的早盘竞价看板（没触发过 renderAuction('auction')
+            // 走到 17561 行那段同步逻辑），auctionData 里就还是标记前的旧状态。这里额外查一次
+            // getStocksData()[prevDay]，以它的"已卖出"/"持有"标记为准。
             const prevStocksTags = getStocksData()[prevDay] || [];
             const soldNameSet = new Set(
                 prevStocksTags.filter(function(s) { return s && s.name && s.sold === true; })
                     .map(function(s) { return s.name.trim(); })
             );
+            const holdNameSet = new Set(
+                prevStocksTags.filter(function(s) { return s && s.name && s.hold === true; })
+                    .map(function(s) { return s.name.trim(); })
+            );
 
-            // 持有中 = 买了且没卖（已卖出的明确排除，两个数据源任一标记"已卖出"都算数）
+            // 持有中 = （买了 或 持有）且没卖（已卖出的明确排除，两个数据源任一标记"已卖出"都算数）
+            // 买和持都算"仍需观察"，只有卖了才不继承——与 ensureObservationStocks 平行的次日继承规则。
             const holdingNames = [];
             prevList.forEach(function(s) {
-                if (s && s.stock && s.bought === true && s.sold !== true && !soldNameSet.has(s.stock.trim())) {
-                    holdingNames.push(s.stock.trim());
+                if (!s || !s.stock) return;
+                const nameTrim = s.stock.trim();
+                if (soldNameSet.has(nameTrim)) return;
+                const wasBought = s.bought === true && s.sold !== true;
+                const wasHeld = s.selected === true || holdNameSet.has(nameTrim);
+                if (wasBought || wasHeld) {
+                    holdingNames.push(nameTrim);
                 }
             });
 
@@ -22285,8 +22304,16 @@
             let hasNew = false;
             holdingNames.forEach(function(name) {
                 if (!existingNames.has(name)) {
-                    // 不在今日列表 → 自动加入观察组（bought=true 入库持久，渲染时只显"买"字不显背景）
-                    dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, bought: true });
+                    // 不在今日列表 → 自动加入观察组：延续昨天是"买"还是"持"的状态
+                    // （两者都不给背景色，只是上标文字不同，见 obsAutoAdded 的背景豁免逻辑）
+                    const wasBoughtNotHeld = !holdNameSet.has(name) && prevList.some(function(s) {
+                        return s && s.stock && s.stock.trim() === name && s.bought === true;
+                    });
+                    if (wasBoughtNotHeld) {
+                        dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, bought: true });
+                    } else {
+                        dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, selected: true });
+                    }
                     autoAddedSet.add(name);
                     hasNew = true;
                 }
