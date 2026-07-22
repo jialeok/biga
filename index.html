@@ -24269,6 +24269,19 @@
             if (!biddingData || biddingData.length === 0) {
                 biddingData = getDefaultBiddingData();
             }
+
+            // 按默认模板顺序重排（与 renderBidding() 保持一致）：否则编辑框会按
+            // 云端/本地原始行顺序渲染表单，保存时又是按表单DOM顺序写回，导致该
+            // 日期从此固化成错误顺序——即便 renderBidding() 本身有排序，也会被
+            // 下一次编辑保存后的数据覆盖掉。
+            const _tplEdit = getDefaultBiddingTemplate();
+            const _tplOrderEdit = {};
+            _tplEdit.forEach(function(t, i) { _tplOrderEdit[((t && t.name) || '').trim()] = i; });
+            biddingData = biddingData.slice().sort(function(a, b) {
+                const ai = _tplOrderEdit[((a && a.name) || '').trim()];
+                const bi = _tplOrderEdit[((b && b.name) || '').trim()];
+                return (ai === undefined ? 999 : ai) - (bi === undefined ? 999 : bi);
+            });
             
             const formContainer = document.getElementById('biddingFormContainer');
             
