@@ -17297,32 +17297,45 @@
                 }
                 push('');
 
-                // ---- 新疑点排查：猫抓/同花顺"竞价量/成交量补全"函数是否遗漏 in_watchlist 过滤 ----
-                // 🔍[调试] 发现 fetchAuctionFromNumcat / fillYesterdayVolumeFromThs 等函数取
-                // todayList 时用的是 (auctionData[today]||[]).slice()，未过滤 in_watchlist===true，
-                // 会连当天的影子记录（in_watchlist=false）一起处理并 patch 上云端。
-                // 如果某只影子记录在云端 auction_data 表里原本没有该日期的行，
-                // patchAuctionFieldBatch 的 upsert 会插入新行，in_watchlist 用数据库默认值填充——
-                // 这可能正是"凭空出现在正式列表、只有 volume/yest_volume 没有 change_pct"的真正成因。
-                push('【疑点排查：竞价量/成交量补全函数是否处理了影子记录（in_watchlist=false）】');
+                // ---- 买入继承排查（ensureBoughtStocksForDate）----
+                // 🔍[调试] 追踪"昨日买/持未卖 → 今日进入观察组显示持"的完整链路。
+                // 对照两个数据源：getStocksData（股票列表页，权威来源）vs auctionData（竞价看板）。
+                // 若某股票只在 auctionData 里有 bought=true 而 stocksData 没有，ensureBoughtStocksForDate
+                // 读不到它，就不会补入今日观察组——这正是"昨日买未卖但今日没进观察组"的常见成因。
+                push('【买入继承排查（ensureBoughtStocksForDate）】');
                 try {
-                    const rawList2 = (auctionData[today] || []).filter(function(s) { return s && s.stock; });
-                    const shadowList2 = rawList2.filter(function(s) { return s.in_watchlist === false; });
-                    push('　　当前 auctionData[' + today + '] 原始分区共 ' + rawList2.length + ' 只，其中 in_watchlist=false 影子记录 ' + shadowList2.length + ' 只：');
-                    if (shadowList2.length > 0) {
-                        push('　　　' + shadowList2.map(function(s) { return s.stock + '(vol=' + (s.volume || '空') + ',pct=' + (s.changePct || '空') + ')'; }).join('、'));
-                    }
-                    // 对照：今天正式列表里 pct 为空、但 volume/yestVolume 都有值的股票——
-                    // 这类股票的特征与"竞价量补全函数处理了影子记录"这个疑点完全吻合。
-                    const suspectPattern = todayList.filter(function(s) {
-                        return !(s.changePct || '').trim() && (s.volume || '').trim() && (s.yestVolume || '').trim();
+                    const _stocksData = (typeof getStocksData === 'function') ? getStocksData() : {};
+                    const _prevTags = (yesterday && _stocksData[yesterday]) || [];
+                    push('　　getStocksData[' + (yesterday || '?') + '] 共 ' + _prevTags.length + ' 条');
+                    const _sdHolding = _prevTags.filter(function(s) { return s && s.name && s.sold !== true && (s.bought === true || s.hold === true); });
+                    push('　　其中 bought/hold 未卖 共 ' + _sdHolding.length + ' 只：');
+                    _sdHolding.forEach(function(s) {
+                        push('　　  ' + (s.name || '').trim() + ' | bought=' + (s.bought === true) + ' | hold=' + (s.hold === true) + ' | sold=' + (s.sold === true));
                     });
-                    push('　　今日正式列表中"涨幅为空但 volume/yestVolume 都有值"的股票共 ' + suspectPattern.length + ' 只（此特征与该疑点吻合）：');
-                    if (suspectPattern.length > 0) {
-                        push('　　　' + suspectPattern.map(function(s) { return s.stock; }).join('、'));
+
+                    const _aucPrev = (yesterday && auctionData[yesterday]) ? auctionData[yesterday] : [];
+                    const _aucBoughtNames = _aucPrev.filter(function(s) { return s && s.bought === true && s.sold !== true; }).map(function(s) { return (s.stock || '').trim(); }).filter(Boolean);
+                    push('　　对照 auctionData[' + (yesterday || '?') + '] bought=true未卖 共 ' + _aucBoughtNames.length + ' 只：' + (_aucBoughtNames.length > 0 ? _aucBoughtNames.join('、') : '(无)'));
+                    const _leak = _aucBoughtNames.filter(function(n) { return !_sdHolding.some(function(s) { return (s.name || '').trim() === n; }); });
+                    push('　　⚠️ 竞价看板有买但 stocksData 未记录（会丢失继承）共 ' + _leak.length + ' 只：' + (_leak.length > 0 ? _leak.join('、') : '(无)'));
+
+                    try {
+                        push('　　localStorage[obsBought_' + today + '] = ' + (localStorage.getItem('obsBought_' + today) || '(未设置)'));
+                        push('　　localStorage[boughtEnsured_' + today + '] = ' + (localStorage.getItem('boughtEnsured_' + today) || '(未设置)'));
+                        push('　　localStorage[obsBoughtRemoved_' + today + '] = ' + (localStorage.getItem('obsBoughtRemoved_' + today) || '(未设置)'));
+                        push('　　localStorage[obsAutoAdded_' + today + '] = ' + (localStorage.getItem('obsAutoAdded_' + today) || '(未设置)'));
+                    } catch (e2) {
+                        push('　　读取 localStorage 失败：' + e2.message);
                     }
+
+                    // 今日 auctionData 中所有 obsAutoAdded=true 的股票快照（即继承补入的结果）
+                    const _todayAuto = (auctionData[today] || []).filter(function(s) { return s && s.obsAutoAdded === true; });
+                    push('　　今日 auctionData[' + today + '] 中 obsAutoAdded=true 共 ' + _todayAuto.length + ' 只：');
+                    _todayAuto.forEach(function(s) {
+                        push('　　  ' + (s.stock || '') + ' | bought=' + (s.bought === true) + ' | selected=' + (s.selected === true) + ' | sold=' + (s.sold === true));
+                    });
                 } catch (e) {
-                    push('　　排查异常：' + (e && e.message ? e.message : String(e)));
+                    push('　　买入继承排查异常：' + (e && e.message ? e.message : String(e)));
                 }
                 push('');
 
@@ -22695,31 +22708,58 @@
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
 
+            _dbgLog('[BOUGHT-ENSURE] enter date=' + date + ' prevDay=' + prevDay);
+
             // 权威来源只用 getStocksData()（点击"卖/买/持有"标签直接写入的地方，
             // 只有用户真正操作过的股票才会出现），不再看 auctionData[prevDay]。
             const prevStocksTags = getStocksData()[prevDay];
             // 昨天完全没有手动标签数据 → 数据未就绪，等下次渲染重试，不设标记（与观察组同一语义）
-            if (!prevStocksTags || prevStocksTags.length === 0) return;
+            if (!prevStocksTags || prevStocksTags.length === 0) {
+                _dbgLog('[BOUGHT-ENSURE] getStocksData[' + prevDay + '] 为空，return。注意：若昨日在竞价看板点过"买"但未同步到股票列表页，这里读不到');
+                return;
+            }
+            _dbgLog('[BOUGHT-ENSURE] prevStocksTags 共 ' + prevStocksTags.length + ' 条');
 
             // 持有中 = 买了 或 持有，且没卖（已卖出的明确排除）
             const holdingNames = [];
-            const holdingIsBought = {}; // name -> true(买) / false(持)
             prevStocksTags.forEach(function(s) {
                 if (!s || !s.name) return;
                 const nameTrim = s.name.trim();
-                if (s.sold === true) return;
+                if (s.sold === true) {
+                    _dbgLog('[BOUGHT-ENSURE] 跳过(已卖) ' + nameTrim);
+                    return;
+                }
                 const wasBought = s.bought === true;
                 const wasHeld = s.hold === true;
                 if (wasBought || wasHeld) {
                     holdingNames.push(nameTrim);
-                    holdingIsBought[nameTrim] = wasBought && !wasHeld;
+                    _dbgLog('[BOUGHT-ENSURE] 命中持有 ' + nameTrim + ' | bought=' + wasBought + ' hold=' + wasHeld);
                 }
             });
+            _dbgLog('[BOUGHT-ENSURE] holdingNames 共 ' + holdingNames.length + ' 只：' + (holdingNames.length > 0 ? holdingNames.join('、') : '(无)'));
+
+            // 对照打印：auctionData[prevDay] 中 bought=true 的股票——排查"竞价看板有买但 stocksData 没有"的数据不一致
+            try {
+                const _aucPrev = (getAuctionData()[prevDay] || []).filter(function(s) { return s && s.stock; });
+                const _aucBoughtNames = _aucPrev.filter(function(s) { return s.bought === true && s.sold !== true; }).map(function(s) { return s.stock.trim(); });
+                _dbgLog('[BOUGHT-ENSURE] 对照 auctionData[' + prevDay + '] bought=true未卖 共 ' + _aucBoughtNames.length + ' 只：' + (_aucBoughtNames.length > 0 ? _aucBoughtNames.join('、') : '(无)'));
+                const _leak = _aucBoughtNames.filter(function(n) { return holdingNames.indexOf(n) < 0; });
+                if (_leak.length > 0) {
+                    _dbgLog('[BOUGHT-ENSURE] ⚠️ 竞价看板有买但 stocksData 未记录（会丢失继承）：' + _leak.join('、'));
+                }
+            } catch (e) {
+                _dbgLog('[BOUGHT-ENSURE] 对照 auctionData 异常：' + e.message);
+            }
 
             // 签名 = 排序后的"应继承持有名单"拼接。名单不变则跳过；名单一变（新增/减少持有
             // 股票，或代码修复让判定结果变化）就重新跑一次，不再被历史遗留的 '1' 标记死锁住。
-            const signature = holdingNames.slice().sort().join('|');
-            if (localStorage.getItem('boughtEnsured_' + date) === signature) return;
+            // 末尾 |v2 = 映射版本标记（昨日买→今日"持"修复），改动映射逻辑时升级以强制重跑一次。
+            const signature = holdingNames.slice().sort().join('|') + '|v2';
+            if (localStorage.getItem('boughtEnsured_' + date) === signature) {
+                _dbgLog('[BOUGHT-ENSURE] 签名一致跳过（boughtEnsured_' + date + '=' + signature + '）');
+                return;
+            }
+            _dbgLog('[BOUGHT-ENSURE] 签名变化重算（旧=' + (localStorage.getItem('boughtEnsured_' + date) || '(无)') + ' → 新=' + signature + '）');
 
             // 无论今日有没有，都记录"昨日买未卖/持有"集合——渲染层据此显示"买"/"持"字
             localStorage.setItem('obsBought_' + date, JSON.stringify(holdingNames));
@@ -22731,25 +22771,36 @@
             const autoAddedSet = new Set(autoAdded);
             // 用户手动从观察组删除过的股票名单：出现在这里的，即使持有名单里还有，也不再自动加回。
             const manuallyRemoved = new Set(JSON.parse(localStorage.getItem('obsBoughtRemoved_' + date) || '[]'));
+            _dbgLog('[BOUGHT-ENSURE] 今日已有 ' + existingNames.size + ' 只；manuallyRemoved 共 ' + manuallyRemoved.size + ' 只' + (manuallyRemoved.size > 0 ? '：' + [...manuallyRemoved].join('、') : ''));
 
             let hasNew = false;
+            let addedCount = 0;
             holdingNames.forEach(function(name) {
-                if (!existingNames.has(name) && !manuallyRemoved.has(name)) {
-                    // 不在今日列表 → 自动加入观察组：延续昨天是"买"还是"持"的状态
-                    if (holdingIsBought[name]) {
-                        dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, bought: true });
-                    } else {
-                        dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, selected: true });
-                    }
-                    autoAddedSet.add(name);
-                    hasNew = true;
+                if (existingNames.has(name)) {
+                    _dbgLog('[BOUGHT-ENSURE] 跳过(今日已有) ' + name);
+                    return;
                 }
+                if (manuallyRemoved.has(name)) {
+                    _dbgLog('[BOUGHT-ENSURE] 跳过(用户已手动删除) ' + name);
+                    return;
+                }
+                // 昨日"买"或"持"→今日均补入为"持"(selected=true)。
+                // 与 copyToTomorrow 一致：昨日 bought 复制到下一交易日为 hold（渲染层 hold→selected 显示"持"），
+                // 不再区分买/持统一映射到 selected，避免"昨日买→今日仍显示买"的不一致。
+                dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, selected: true });
+                autoAddedSet.add(name);
+                hasNew = true;
+                addedCount++;
+                _dbgLog('[BOUGHT-ENSURE] ✅ 补入观察组(持) ' + name);
             });
 
             if (hasNew) {
                 auctionData[date] = dayList;
                 markAuctionDirty(date);
                 scheduleCloudPush();
+                _dbgLog('[BOUGHT-ENSURE] 新增 ' + addedCount + ' 只，已写回 auctionData[' + date + ']');
+            } else {
+                _dbgLog('[BOUGHT-ENSURE] 本轮无新增');
             }
             localStorage.setItem('obsAutoAdded_' + date, JSON.stringify([...autoAddedSet]));
             localStorage.setItem('boughtEnsured_' + date, signature);
