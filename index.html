@@ -14012,18 +14012,24 @@
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
                 });
 
-                // 用"股票列表"页（getStocksData）当天的真实买/卖/持标签为准，
-                // 修正 existingMap 里可能残留的脏状态（例如：早盘竞价页当天先标记了"买"，
-                // 之后在股票列表页把它标记为"已卖出"，但 auctionData 那一行的 bought/fixed
-                // 没跟着清掉——覆盖时如果直接沿用旧值，会把"已卖出"的股票继续显示成浅红色背景+"买"）。
-                // 同时这里也是后面"保留观察组继承股票"环节判断是否已卖出的依据。
-                const todayStocksForFix = getStocksData()[targetDate] || [];
-                const todayStocksMap = {};
-                todayStocksForFix.forEach(function(s) {
-                    if (s && s.name) todayStocksMap[s.name.trim()] = s;
-                });
+                // 用"股票列表"页（getStocksData）里该股票【最近一次】出现的真实买/卖/持标签为准，
+                // 修正 existingMap 里可能残留的脏状态。
+                // 注意：不能只查 targetDate 当天——很多情况下用户是在"买入的那一天"（可能早于
+                // targetDate）操作的买入/卖出，targetDate 当天的股票列表里根本没有这只股票的
+                // 记录，此时必须往前找最近一次出现的记录，否则会误沿用 auctionData 里残留的
+                // 旧 bought:true，导致已经卖出的股票继续显示成浅红色背景+"买"。
+                function findLatestStockTag(name) {
+                    const stocksData = getStocksData();
+                    const allDates = Object.keys(stocksData).filter(function(d) { return d <= targetDate; }).sort();
+                    for (let i = allDates.length - 1; i >= 0; i--) {
+                        const list = stocksData[allDates[i]] || [];
+                        const found = list.find(function(s) { return s && s.name && s.name.trim() === name; });
+                        if (found) return found;
+                    }
+                    return null;
+                }
                 function applyLatestTag(name, row) {
-                    const tag = todayStocksMap[name];
+                    const tag = findLatestStockTag(name);
                     if (!tag) return row;
                     if (tag.sold === true) {
                         row.sold = true; row.bought = false; row.selected = false; row.fixed = true;
@@ -14109,6 +14115,17 @@
                 auctionData[targetDate] = newList;
                 saveModule('auction');
                 invalidateTopicCache();
+
+                // 关键修复：不管此前"观察组继承"（ensureObservationStocks）和"买入/持有进
+                // 次日观察组"（ensureBoughtStocksForDate）有没有跑过、跑的时候数据是否齐全，
+                // 这里整体覆盖了 auctionData[targetDate] 之后，必须清除两者的防重复标记，
+                // 让下一次 renderAuction() 重新计算一遍——否则如果继承函数曾经在"最近多板
+                // 覆盖之前"就先执行过一次（例如用户一进页面就直接点了"获取最近多板"），
+                // 覆盖后即使继承来的股票（如汇得科技）已经丢失，也不会再补回来。
+                try {
+                    localStorage.removeItem('obsEnsured_' + targetDate);
+                    localStorage.removeItem('boughtEnsured_' + targetDate);
+                } catch (e) {}
 
                 // 同步到云端：列表增删 + code 列 —— 全部按 targetDate，不受期间日期切换影响
                 markAuctionDirty(targetDate);
@@ -18314,6 +18331,32 @@
             // "昨日买未卖"股票集合（ensureBoughtStocksForDate 写入）：名称后显示红色上标"买"
             const _obsBoughtSet = new Set(JSON.parse(localStorage.getItem('obsBought_' + currentDate) || '[]'));
 
+            // 兜底修正集合：以"股票列表"页（getStocksData，权威来源）里每只股票【最近一次】
+            // 出现的记录为准，找出"最近状态其实是已卖出"的股票名单。
+            // 不能只查当天——很多情况下用户买入/卖出操作是在更早的某一天做的，当天的股票列表
+            // 里根本没有这只股票的记录，若只查当天会漏判，导致 auctionData 里残留的旧
+            // bought:true 继续显示成浅红色背景+"买"。这里对当前渲染列表涉及的股票名一次性
+            // 预计算，避免每行都重新扫描全部历史日期。
+            const _confirmedSoldSet = (function() {
+                const result = new Set();
+                const stocksData = getStocksData();
+                const allDates = Object.keys(stocksData).filter(function(d) { return d <= currentDate; }).sort();
+                const namesToCheck = new Set(auctionList.map(function(it) { return it.stock ? it.stock.trim() : ''; }).filter(Boolean));
+                if (namesToCheck.size === 0) return result;
+                const latestTagByName = {};
+                allDates.forEach(function(d) {
+                    (stocksData[d] || []).forEach(function(s) {
+                        if (!s || !s.name) return;
+                        const n = s.name.trim();
+                        if (namesToCheck.has(n)) latestTagByName[n] = s; // 按日期升序遍历，后面的覆盖前面的，最终留下最近一次
+                    });
+                });
+                Object.keys(latestTagByName).forEach(function(n) {
+                    if (latestTagByName[n].sold === true) result.add(n);
+                });
+                return result;
+            })();
+
             // 拆分渲染顺序：观察组 + 常规组
             // "竞/昨"关闭时：保持原样，观察组整体置顶、虚线分隔，与之前行为一致。
             // "竞/昨"打开时：观察组不再整体置顶——
@@ -18379,12 +18422,12 @@
                 
                 const isHighlight = ratioValue >= 10;
                 const isHighlightLight = ratioValue >= 4.5 && ratioValue < 10;
-                // 兜底：以"股票列表"页（getStocksData，权威来源）当天的真实卖出状态为准，
-                // 防止 item.sold 因为某些路径（如"获取最近多板"覆盖）未及时同步而误留红色背景+"买"字。
-                // 只要股票列表页确认当天已卖出，早盘竞价这一行就必须回到"无标记的常规展示"——
+                // 兜底：以"股票列表"页（getStocksData，权威来源）里该股票最近一次的真实卖出
+                // 状态为准（见上方 _confirmedSoldSet 预计算），防止 item.sold 因为某些路径
+                // （如"获取最近多板"覆盖）未及时同步而误留红色背景+"买"字。
+                // 只要确认最近状态是已卖出，早盘竞价这一行就必须回到"无标记的常规展示"——
                 // 不显示灰色 sold 样式，也不显示浅红色背景，不加任何"买/持"上标。
-                const _todayTagStock = item.stock ? (getStocksData()[currentDate] || []).find(function(s) { return s && s.name && s.name.trim() === item.stock.trim(); }) : null;
-                const isConfirmedSold = item.sold === true || (_todayTagStock && _todayTagStock.sold === true);
+                const isConfirmedSold = item.sold === true || (item.stock && _confirmedSoldSet.has(item.stock.trim()));
                 const isSelected = !isConfirmedSold && item.selected === true;
                 const isBought = !isConfirmedSold && item.bought === true;
                 const isSold = item.sold === true; // 仅用于灰色 sold 样式（当天手动标为已卖出时才显示灰色）
