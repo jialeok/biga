@@ -22613,13 +22613,11 @@
 
         // ============================================================
         // 观察组自动继承：将上一交易日"竞/昨"达标股票自动添加到当日列表
+        // 防重复机制同 ensureBoughtStocksForDate：用"应继承名单"签名代替死板的 '1' 标记，
+        // 名单变化（含逻辑修复导致的判定结果变化）会自动重新计算，不会被历史遗留标记卡死。
         // ============================================================
         function ensureObservationStocks(date) {
             if (!date) return;
-            // 防重复：每日期只执行一次
-            if (localStorage.getItem('obsEnsured_' + date) === '1') {
-                return;
-            }
 
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
@@ -22630,6 +22628,9 @@
                 // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionMemCache 会有值）
                 return;
             }
+
+            const signature = [...obsStocks].sort().join('|');
+            if (localStorage.getItem('obsEnsured_' + date) === signature) return;
 
             // 当日已有股票名集合
             const auctionData = getAuctionData();
@@ -22661,7 +22662,7 @@
 
             // 保存 autoAdded 集合（即使没有新增，也要保存空集合以区分 * 标记）
             localStorage.setItem('obsAutoAdded_' + date, JSON.stringify([...autoAddedSet]));
-            localStorage.setItem('obsEnsured_' + date, '1');
+            localStorage.setItem('obsEnsured_' + date, signature);
         }
 
         // 买入/持有股票进次日观察组（早盘竞价 tab 专属，与 ensureObservationStocks 平行）：
@@ -22680,10 +22681,16 @@
         // 的实时同步）优先判断，只有当天没有再打标签时才回退用 obsBought_<date> 集合的继承快照；
         // 这样如果继承进来后又用"复制到交易日"等方式把标签改成了"持"，上标会跟着变，不会锁死成"买"。
         // 观察组继承来的（obsAutoAdded=true）即使 bought=true 也不给红色背景（用户明确不要背景）。
+        //
+        // 防重复机制说明（曾经的坑）：原来用一个死板的 'boughtEnsured_<date>'='1' 标记，一旦设置
+        // 就永久跳过，本意是"不要把用户手动从观察组删掉的股票强行加回来"。但这导致只要标记
+        // 曾经被设置过（哪怕是旧版本代码、或数据还没就绪时的一次执行），后续代码逻辑升级、
+        // 或者"昨日持有名单"发生变化，都不会重新计算——表现为"某只股票明明该进观察组，
+        // 但页面上死活不出现"。现在改为签名机制：签名 = 当前应继承的持有名单（排序拼接），
+        // 名单变化就重新跑一次补入逻辑；名单没变而用户手动删除过某只股票，则不会被强行加回
+        // （见下方 obsBoughtRemoved_ 集合）。
         function ensureBoughtStocksForDate(date) {
             if (!date) return;
-            // 防重复：每日期只执行一次
-            if (localStorage.getItem('boughtEnsured_' + date) === '1') return;
 
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
@@ -22709,6 +22716,11 @@
                 }
             });
 
+            // 签名 = 排序后的"应继承持有名单"拼接。名单不变则跳过；名单一变（新增/减少持有
+            // 股票，或代码修复让判定结果变化）就重新跑一次，不再被历史遗留的 '1' 标记死锁住。
+            const signature = holdingNames.slice().sort().join('|');
+            if (localStorage.getItem('boughtEnsured_' + date) === signature) return;
+
             // 无论今日有没有，都记录"昨日买未卖/持有"集合——渲染层据此显示"买"/"持"字
             localStorage.setItem('obsBought_' + date, JSON.stringify(holdingNames));
 
@@ -22717,10 +22729,12 @@
             const existingNames = new Set(dayList.map(function(s) { return s.stock ? s.stock.trim() : ''; }));
             const autoAdded = JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]');
             const autoAddedSet = new Set(autoAdded);
+            // 用户手动从观察组删除过的股票名单：出现在这里的，即使持有名单里还有，也不再自动加回。
+            const manuallyRemoved = new Set(JSON.parse(localStorage.getItem('obsBoughtRemoved_' + date) || '[]'));
 
             let hasNew = false;
             holdingNames.forEach(function(name) {
-                if (!existingNames.has(name)) {
+                if (!existingNames.has(name) && !manuallyRemoved.has(name)) {
                     // 不在今日列表 → 自动加入观察组：延续昨天是"买"还是"持"的状态
                     if (holdingIsBought[name]) {
                         dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true, bought: true });
@@ -22738,7 +22752,7 @@
                 scheduleCloudPush();
             }
             localStorage.setItem('obsAutoAdded_' + date, JSON.stringify([...autoAddedSet]));
-            localStorage.setItem('boughtEnsured_' + date, '1');
+            localStorage.setItem('boughtEnsured_' + date, signature);
         }
 
         function getAuctionStockHistory(stockName, endDate, count, dataSource='auction') {
