@@ -22796,8 +22796,22 @@
             _dbgLog('[TAG-CLEANSE] 一次性标签清洗完成：涉及 ' + touchedDates + ' 个日期、' + touchedRows + ' 行（备份键 auctionData_tag_cleanse_backup）');
         }
 
+        // 返回本地"今天"日期字符串（YYYY-MM-DD），与 goToday() 使用同一套本地时区取法，
+        // 避免用 UTC（new Date().toISOString().slice(0,10)）导致的跨时区错位。
+        function _getLocalTodayStr() {
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
         function ensureObservationStocks(date) {
             if (!date) return;
+            // 历史锁定：只对"今天"生效。打开/查看历史日期时绝不自动继承或清理任何股票，
+            // 只如实显示保存时的样子——避免用户之后的操作（买/卖标记变化等）反过来回溯
+            // 改写已经保存好的历史日期列表，造成"历史记录全乱了"的问题。
+            if (date !== _getLocalTodayStr()) return;
 
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
@@ -22898,6 +22912,8 @@
         // 名单变化就重新跑一次补入逻辑。权威来源只认 getStocksData()，无记录即清除。
         function ensureBoughtStocksForDate(date) {
             if (!date) return;
+            // 历史锁定：与 ensureObservationStocks 一致，只对"今天"生效，历史日期只读不改。
+            if (date !== _getLocalTodayStr()) return;
 
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
