@@ -10797,25 +10797,17 @@
                 catch(e) { console.warn('syncAuctionListForDate 失败:', dirtyDates[i], e); }
             }
 
-            // 2. 当前日期：仅当状态签名变化时才推送（避免无变化的重复推送）
-            if (dirtyDates.indexOf(currentDate) < 0) {
-                // 阶段六 影子bug6：状态签名只统计正式成员，避免影子记录状态变化触发无意义推送
-                const todayList = (getAuctionData()[currentDate] || []).filter(function(s) { return s && s.stock && s.in_watchlist === true; });
-                if (todayList.length > 0) {
-                    var statusSig = JSON.stringify(todayList.map(function(s) {
-                        return { s: s.stock, sel: s.selected || false, b: s.bought || false,
-                                 so: s.sold || false, f: s.fixed || false };
-                    }));
-                    if (statusSig !== _lastPushedAuctionStatus) {
-                        try {
-                            await pushAuctionStatusForDate(currentDate);
-                            _lastPushedAuctionStatus = statusSig;
-                        } catch(e) { console.warn('pushAuctionStatusForDate 失败:', e); }
-                    }
-                }
-            }
+            // 说明：曾经这里还有一个"当前日期：仅当状态签名变化时才推送"的兜底分支，
+            // 每次都读取*触发这一刻*的 currentDate。但 scheduleCloudPush 是 2 秒防抖，
+            // 如果用户在这 2 秒内切换了日期（保存后立刻翻页很常见），
+            // 计时器触发时 currentDate 已经是新日期——导致把"刚编辑的那天"的推送，
+            // 错误地当成"当前打开的这天"的状态推送来源，产生跨日期写串的问题
+            // （表现为"今天的股票被写进了历史日期"）。
+            // 所有真实编辑路径（saveAuction/导入/标签变化等）都已经在编辑发生的
+            // 那一刻调用 markAuctionDirty(编辑时的日期)，dirtyDates 才是唯一可信来源，
+            // 不需要也不应该再按"触发时刻的 currentDate"做兜底推送。
 
-            // 3. 清空脏日期标记
+            // 2. 清空脏日期标记
             if (window._auctionDirtyDates) window._auctionDirtyDates.clear();
             } finally {
                 _closeAuctionShield(2000);
