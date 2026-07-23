@@ -14012,11 +14012,34 @@
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
                 });
 
+                // 用"股票列表"页（getStocksData）当天的真实买/卖/持标签为准，
+                // 修正 existingMap 里可能残留的脏状态（例如：早盘竞价页当天先标记了"买"，
+                // 之后在股票列表页把它标记为"已卖出"，但 auctionData 那一行的 bought/fixed
+                // 没跟着清掉——覆盖时如果直接沿用旧值，会把"已卖出"的股票继续显示成浅红色背景+"买"）。
+                // 同时这里也是后面"保留观察组继承股票"环节判断是否已卖出的依据。
+                const todayStocksForFix = getStocksData()[targetDate] || [];
+                const todayStocksMap = {};
+                todayStocksForFix.forEach(function(s) {
+                    if (s && s.name) todayStocksMap[s.name.trim()] = s;
+                });
+                function applyLatestTag(name, row) {
+                    const tag = todayStocksMap[name];
+                    if (!tag) return row;
+                    if (tag.sold === true) {
+                        row.sold = true; row.bought = false; row.selected = false; row.fixed = true;
+                    } else if (tag.bought === true) {
+                        row.bought = true; row.sold = false; row.selected = false; row.fixed = true;
+                    } else if (tag.hold === true) {
+                        row.selected = true; row.sold = false; row.bought = false; row.fixed = true;
+                    }
+                    return row;
+                }
+
                 // 合并：新成分股列表为准，保留已有股票的备注/状态/行情
                 const newList = constituents.map(function(c) {
                     const name = (c.name || '').trim();
                     const existing = existingMap[name];
-                    return {
+                    const row = {
                         stock: name,
                         code: c.ticker || (existing ? (existing.code || '') : ''),
                         volume: existing ? (existing.volume || '') : '',
@@ -14034,6 +14057,37 @@
                         // 判断当成"字段缺失"脏数据整批过滤掉，导致提示成功但列表不显示。
                         in_watchlist: true
                     };
+                    return applyLatestTag(name, row);
+                });
+
+                // 保留"观察组继承"进来、但不在本次最近多板新名单里的股票（例如汇得科技：
+                // 昨日买入未卖，理应作为次日观察组继续展示，但它当天不在最近多板成分股里，
+                // 之前"获取最近多板"整体覆盖会把这一行连带删掉）。
+                // 条件：existing 行是 obsAutoAdded=true（观察组自动补入，非用户手动导入的正式成分股）
+                // 且未被标记为已卖出，才补回；已卖出的不需要再观察，让它自然消失即可。
+                const newListNames = new Set(newList.map(function(r) { return r.stock; }));
+                existingList.forEach(function(s) {
+                    if (!s || !s.stock) return;
+                    const name = s.stock.trim();
+                    if (newListNames.has(name)) return;
+                    if (s.obsAutoAdded !== true) return; // 不是观察组继承来的，不额外保留
+                    const row = applyLatestTag(name, {
+                        stock: name,
+                        code: s.code || '',
+                        volume: s.volume || '',
+                        yestVolume: s.yestVolume || '',
+                        note: s.note || '',
+                        changePct: s.changePct || '',
+                        topics: s.topics || '',
+                        selected: s.selected || false,
+                        bought: s.bought || false,
+                        sold: s.sold || false,
+                        fixed: s.fixed || false,
+                        in_watchlist: true,
+                        obsAutoAdded: true
+                    });
+                    if (row.sold === true) return; // 已卖出：不再保留到次日观察组
+                    newList.push(row);
                 });
 
                 // 更新 stockCodeMap（name → ticker）
@@ -18325,9 +18379,15 @@
                 
                 const isHighlight = ratioValue >= 10;
                 const isHighlightLight = ratioValue >= 4.5 && ratioValue < 10;
-                const isSelected = item.selected === true;
-                const isBought = item.bought === true;
-                const isSold = item.sold === true;
+                // 兜底：以"股票列表"页（getStocksData，权威来源）当天的真实卖出状态为准，
+                // 防止 item.sold 因为某些路径（如"获取最近多板"覆盖）未及时同步而误留红色背景+"买"字。
+                // 只要股票列表页确认当天已卖出，早盘竞价这一行就必须回到"无标记的常规展示"——
+                // 不显示灰色 sold 样式，也不显示浅红色背景，不加任何"买/持"上标。
+                const _todayTagStock = item.stock ? (getStocksData()[currentDate] || []).find(function(s) { return s && s.name && s.name.trim() === item.stock.trim(); }) : null;
+                const isConfirmedSold = item.sold === true || (_todayTagStock && _todayTagStock.sold === true);
+                const isSelected = !isConfirmedSold && item.selected === true;
+                const isBought = !isConfirmedSold && item.bought === true;
+                const isSold = item.sold === true; // 仅用于灰色 sold 样式（当天手动标为已卖出时才显示灰色）
                 const isFixed = item.fixed === true;
                 // 观察组继承来的买入（obsAutoAdded=true 且 bought=true）：用户明确不要红色背景，
                 // 只显示名称后的"买"字上标；背景只给"当天手动标记买入"（非观察组继承）的股票
@@ -18337,6 +18397,8 @@
                 let itemClass = 'auction-item';
                 if (isSold) {
                     itemClass = 'auction-item sold'; // 卖出状态显示浅灰色（最高优先级）
+                } else if (isConfirmedSold) {
+                    itemClass = 'auction-item'; // 已确认卖出但当天不是"手动标记已卖出"这一行为本身：常规展示，不加背景
                 } else if (isBought && !isObsInheritedBought) {
                     itemClass = 'auction-item bought'; // 当天手动买入：浅红色
                 } else if (isSelected && isFixed) {
@@ -18420,8 +18482,8 @@
                 // 见 13517/17561 行）判断显示"买"还是"持"——而不是只看 _obsBoughtSet（继承那一刻的静态快照）。
                 // 这样如果继承进来后又用"复制到交易日"把标签变成了"持"，或者当天改了标签，上标能跟着更新，
                 // 不会一直固定显示成继承时的"买"。已卖出（isSold）则完全不显示这个上标。
-                const _isObsBought = item.stock && _obsBoughtSet.has(item.stock.trim());
-                if (!isSold) {
+                const _isObsBought = !isConfirmedSold && item.stock && _obsBoughtSet.has(item.stock.trim());
+                if (!isSold && !isConfirmedSold) {
                     if (isSelected) {
                         _stockNameDisplay += '<sup style="color:#2563eb;font-size:10px;font-weight:700;margin-left:2px;">持</sup>';
                     } else if (_isObsBought || isBought) {
