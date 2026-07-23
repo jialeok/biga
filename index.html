@@ -22685,6 +22685,15 @@
         // 这正是"华电能源误标买"（更早日期的 bought 被带回）和"幽灵灰色卖出"（残留 sold）
         // 两个 bug 的根因，所有入口统一走这里后从根上杜绝。
         // ============================================================
+        // 继承链条防二次传递（v3-0803）：只有"当天真实产生"的持有记录才能作为次日继承的源头；
+        // 继承来的持有（inheritedHold===true）本身不能再往下传，从根上把"只传一天"变成硬限制，
+        // 不再依赖 getStocksData() 里当天到底有没有记录这个间接信号——避免任何写入路径
+        // （云端回拉、复制到交易日、未来新增的自动化逻辑等）意外把继承状态"坐实"成可再传递的持有。
+        //   · todayRec.inheritedHold === true：这条记录本身就是继承而来（未被用户真实确认），
+        //     即使它 hold===true，也不能作为下一天的继承源头，只能到此为止。
+        //   · 只有 bought===true（标记买入，唯一的真实操作入口）或
+        //     hold===true 且 inheritedHold !== true（用户在股票列表页手动勾选的持有），
+        //     才允许继续往下传一天。
         function deriveAuctionTagState(name, date) {
             const result = { sold: false, bought: false, selected: false, source: 'none' };
             if (!name || !date) return result;
@@ -22699,7 +22708,10 @@
             const prevDay = getPreviousTradingDay(date);
             if (prevDay) {
                 const prevRec = (stocksData[prevDay] || []).find(function(s) { return s && s.name && s.name.trim() === name; });
-                if (prevRec && prevRec.sold !== true && (prevRec.bought === true || prevRec.hold === true)) {
+                // 关键防护：前一日记录若本身就是继承来的（inheritedHold===true，未经用户真实确认），
+                // 到这里为止，不再往下传——这是"只继承一天"从"看似成立"变成"代码强制保证"的核心一行。
+                const prevIsInheritedOnly = prevRec && prevRec.inheritedHold === true;
+                if (prevRec && !prevIsInheritedOnly && prevRec.sold !== true && (prevRec.bought === true || prevRec.hold === true)) {
                     result.selected = true; result.source = 'inherited';
                 }
             }
@@ -32621,6 +32633,11 @@
                 bought: false, // 已买入（复制时重置）
                 sold: false, // 已卖出（复制时重置）
                 hold: sourceBought || stock.hold || false, // 持有（如果源有已买入，则变成持有）
+                // 继承链条防二次传递：这条 hold 是"复制到交易日"自动搬运产生的，不是用户在新日期
+                // 重新确认的持有；打上标记后，deriveAuctionTagState 就不会把它当作再传一天的源头。
+                // 只有源记录本身不是继承来的（sourceBought=当天真实买入 或 stock.hold 是用户在
+                // 股票列表页手动勾选的）才会走到这里，此时的复制行为本身仍视为"未经新日期确认"。
+                inheritedHold: (sourceBought || stock.hold || false) ? true : undefined,
                 watch: sourceSold || stock.watch || false, // 观望（如果源有已卖出，则变成观望）
                 dragon: stock.dragon || false, // 设置为龙头股
                 recentMulti: stock.recentMulti || false, // 最近多板
@@ -32743,6 +32760,8 @@
                 bought: false, // 已买入（复制时重置）
                 sold: false, // 已卖出（复制时重置）
                 hold: sourceBought || stock.hold || false, // 持有（如果源有已买入，则变成持有）
+                // 继承链条防二次传递：同 copyToTomorrow，复制产生的 hold 不作为下一天继承的源头
+                inheritedHold: (sourceBought || stock.hold || false) ? true : undefined,
                 watch: sourceSold || stock.watch || false, // 观望（如果源有已卖出，则变成观望）
                 dragon: stock.dragon || false, // 设置为龙头股
                 recentMulti: stock.recentMulti || false, // 最近多板
