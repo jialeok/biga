@@ -8638,7 +8638,11 @@
                     selected: row.selected || false,
                     bought: row.bought || false,
                     sold: row.sold || false,
-                    fixed: row.fixed || false
+                    fixed: row.fixed || false,
+                    // 修复：之前漏映射 obs_auto_added（与 pullAuctionFromTable 同一个坑），
+                    // 回拉后观察组继承行身份丢失，ensure 死循环修正、[PATCH]/[BOUGHT-ENSURE] 刷屏
+                    obs_auto_added: row.obs_auto_added || false,
+                    obsAutoAdded: row.obs_auto_added || false
                 };
             }).concat(localObsStocks);
             _auctionMemCache[date] = normalizedRows;
@@ -9537,7 +9541,11 @@
                         selected: row.selected || false,
                         bought: row.bought || false,
                         sold: row.sold || false,
-                        fixed: row.fixed || false
+                        fixed: row.fixed || false,
+                        // 修复：之前漏映射 obs_auto_added，云端回拉后观察组继承行"身份丢失"，
+                        // 导致 ensureBoughtStocksForDate 每轮都判定字段错误反复修正（日志刷屏/空转推送）
+                        obs_auto_added: row.obs_auto_added || false,
+                        obsAutoAdded: row.obs_auto_added || false
                     });
                     // 返回值只含 in_watchlist=true 行，供调用方做 length 检查
                     // （Bug 1+2 修好后渲染读 _auctionMemCache，不再依赖此返回值；
@@ -10215,6 +10223,7 @@
                             bought: item.bought || false,
                             sold: item.sold || false,
                             fixed: item.fixed || false,
+                            obs_auto_added: !!item.obsAutoAdded, // 之前漏更新，云端该列一直是插入时的旧值
                             in_watchlist: true,
                             updated_at: now,
                             updated_by: 'main'
@@ -10285,6 +10294,7 @@
                             .update({
                                 selected: item.selected || false, bought: item.bought || false,
                                 sold: item.sold || false, fixed: item.fixed || false,
+                                obs_auto_added: !!item.obsAutoAdded, // 之前漏更新（插入时写过一次就不再变）
                                 in_watchlist: true,
                                 updated_at: now, updated_by: 'main'
                             })
@@ -10475,6 +10485,7 @@
                     in_watchlist: !!existingWatchlistNames[nameTrim],
                     selected: item.selected || false, bought: item.bought || false,
                     sold: item.sold || false, fixed: item.fixed || false,
+                    obs_auto_added: !!item.obsAutoAdded,
                     updated_at: now, updated_by: 'main'
                 };
             });
@@ -10824,6 +10835,7 @@
                     in_watchlist: !!existingWatchlistNames[nameTrim],
                     selected: item.selected || false, bought: item.bought || false,
                     sold: item.sold || false, fixed: item.fixed || false,
+                    obs_auto_added: !!item.obsAutoAdded,
                     updated_at: now, updated_by: 'main'
                 };
             });
@@ -11064,6 +11076,19 @@
                     }
                 } catch(e) {
                     console.warn('[RECONCILE] 对账调用失败:', e.message);
+                }
+
+                // 一次性标签清洗（stockApp_v42_tag_cleanse_v1）：云端拉取完成后执行，
+                // 按 deriveAuctionTagState 重算所有日期竞价行的 bought/sold/selected/fixed，
+                // 清除历史遗留脏位（误标"买"、幽灵灰色"卖出"），并推送云端覆盖脏行。
+                // 只跑一次；清洗前自动备份到 auctionData_tag_cleanse_backup。
+                try {
+                    if (typeof cleanseAuctionTagsOnce === 'function') {
+                        await cleanseAuctionTagsOnce();
+                        if (typeof renderAuction === 'function') renderAuction(currentGroup);
+                    }
+                } catch(e) {
+                    console.warn('[TAG-CLEANSE] 清洗调用失败:', e.message);
                 }
 
                 // 从 bidding_data 独立表拉取 bidding 数据（云端表是唯一权威来源）
@@ -11311,7 +11336,7 @@
             currentDate = `${year}-${month}-${day}`;
         }
         if (currentDate < '2025-01-01') currentDate = '2025-01-01';
-        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate);
+        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0801（汇得科技影子记录+华电能源跨日继承修复）');
 
         let isStrengthSortEnabled = false;
 
@@ -13524,29 +13549,12 @@
                 });
             }
 
-            // 检查股票是否有"已买入"或"持有"标签，并标记选中状态
-            const todayStocks = getStocksData()[currentDate] || [];
+            // 标签对称同步：统一走 deriveAuctionTagState 派生（当天卡片记录 > 前一日买/持继承 > 无标签）。
+            // 旧写法只在"当天有记录"时设置、从不清除，旧版本残留的脏标签位会一直显示——
+            // 改为 applyDerivedTagToRow 后，无依据的 bought/sold 残留会被主动洗掉。
             auctionList.forEach(item => {
-                const stockInList = todayStocks.find(s => s.name && s.name.trim() === item.stock.trim());
-                if (stockInList) {
-                    // 优先级：已卖出 > 已买入 > 持有
-                    if (stockInList.sold === true) {
-                        item.sold = true; // 已卖出显示浅灰色
-                        item.bought = false;
-                        item.selected = false;
-                        item.fixed = true; // 固定状态，不能通过点击取消
-                    } else if (stockInList.bought === true) {
-                        item.bought = true; // 已买入显示浅红色
-                        item.sold = false;
-                        item.selected = false;
-                        item.fixed = true; // 固定状态，不能通过点击取消
-                    } else if (stockInList.hold === true) {
-                        item.selected = true; // 持有显示浅紫色
-                        item.sold = false;
-                        item.bought = false;
-                        item.fixed = true; // 固定状态，不能通过点击取消
-                    }
-                }
+                if (!item || !item.stock) return;
+                applyDerivedTagToRow(item, item.stock.trim(), currentDate);
             });
 
             auctionData[currentDate] = auctionList;
@@ -14012,39 +14020,22 @@
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
                 });
 
-                // 用"股票列表"页（getStocksData）里该股票【最近一次】出现的真实买/卖/持标签为准，
-                // 修正 existingMap 里可能残留的脏状态。
-                // 注意：不能只查 targetDate 当天——很多情况下用户是在"买入的那一天"（可能早于
-                // targetDate）操作的买入/卖出，targetDate 当天的股票列表里根本没有这只股票的
-                // 记录，此时必须往前找最近一次出现的记录，否则会误沿用 auctionData 里残留的
-                // 旧 bought:true，导致已经卖出的股票继续显示成浅红色背景+"买"。
-                function findLatestStockTag(name) {
-                    // 只看前一交易日（targetDate 的前一交易日），不再扫描全部历史日期。
-                    // 原来扫全部 ≤targetDate 历史，会把很久以前的 bought/hold/sold 标签带回来，
-                    // 例如华电能源7月22日没记录，却从更早日期继承 bought=true 显示"买"——与用户
-                    // 的交互逻辑不符（用户只认可"前一交易日的状态决定今日显示"）。
-                    const stocksData = getStocksData();
-                    const prevDay = getPreviousTradingDay(targetDate);
-                    if (!prevDay) return null;
-                    const list = stocksData[prevDay] || [];
-                    const found = list.find(function(s) { return s && s.name && s.name.trim() === name; });
-                    return found || null;
-                }
+                // 标签口径：统一由 deriveAuctionTagState 派生（权威=股票卡片 stocksData，
+                // 详见 ensureObservationStocks 上方注释），修正 existingMap/云端回灌残留的脏状态；
+                // 无依据的标签位会被主动清除，不再"只设不清"。
                 function applyLatestTag(name, row) {
-                    const tag = findLatestStockTag(name);
-                    if (!tag) {
-                        _dbgLog('[APPLY-TAG] ' + name + ' 前一交易日无记录，不设标签');
-                        return row;
-                    }
-                    if (tag.sold === true) {
-                        row.sold = true; row.bought = false; row.selected = false; row.fixed = true;
-                        _dbgLog('[APPLY-TAG] ' + name + ' ← 前日=sold');
-                    } else if (tag.bought === true || tag.hold === true) {
-                        // 昨日"买"或"持"→今日"持"(selected)，与 copyToTomorrow/ensureBoughtStocksForDate 一致
-                        row.selected = true; row.sold = false; row.bought = false; row.fixed = true;
+                    // 标签统一走 deriveAuctionTagState 派生（权威=股票卡片 stocksData）：
+                    // 当天有记录按当天；当天无记录只看前一交易日（买/持未卖→继承"持"）；
+                    // 其余情况由 applyDerivedTagToRow 主动清除残留标签位。
+                    // 旧写法的两个坑：①更旧的版本扫全部历史，把更早日期的 bought 带回误标"买"；
+                    // ②改成只看前一日后，"前日无记录"又直接 return row 保留旧值——
+                    // ①写入的脏位（含云端回灌的）永远清不掉，还带出一片幽灵灰色"卖出"。
+                    const d = deriveAuctionTagState(name, targetDate);
+                    applyDerivedTagToRow(row, name, targetDate);
+                    if (d.source === 'today') {
+                        _dbgLog('[APPLY-TAG] ' + name + ' ← 当天=' + (d.sold ? 'sold' : d.bought ? 'bought' : 'hold'));
+                    } else if (d.source === 'inherited') {
                         _dbgLog('[APPLY-TAG] ' + name + ' ← 前日=bought/hold → 今日持');
-                    } else {
-                        _dbgLog('[APPLY-TAG] ' + name + ' 前日有记录但无买/持/卖标签');
                     }
                     return row;
                 }
@@ -17336,7 +17327,6 @@
                     try {
                         push('　　localStorage[obsBought_' + today + '] = ' + (localStorage.getItem('obsBought_' + today) || '(未设置)'));
                         push('　　localStorage[boughtEnsured_' + today + '] = ' + (localStorage.getItem('boughtEnsured_' + today) || '(未设置)'));
-                        push('　　localStorage[obsBoughtRemoved_' + today + '] = ' + (localStorage.getItem('obsBoughtRemoved_' + today) || '(未设置)'));
                         push('　　localStorage[obsAutoAdded_' + today + '] = ' + (localStorage.getItem('obsAutoAdded_' + today) || '(未设置)'));
                     } catch (e2) {
                         push('　　读取 localStorage 失败：' + e2.message);
@@ -18000,39 +17990,15 @@
                 }
             }
 
-            // 实时检查股票列表中的标签，自动标记颜色并锁定（早盘竞价专属：写回 auction 本地存储）
+            // 标签对称同步（早盘竞价专属：写回 auction 本地存储）：
+            // 统一走 deriveAuctionTagState 派生——当天卡片记录 > 前一日买/持继承 > 无标签。
+            // 与旧写法的关键区别：无标签依据时主动"清除"残留 bought/sold（旧写法只设不清，
+            // 导致旧版本写错的标签位永远显示——华电能源误标买、幽灵灰色卖出的根因）。
             if (dataSource === 'auction') {
-                const todayStocks = getStocksData()[currentDate] || [];
                 let hasUpdate = false;
                 auctionList.forEach(item => {
-                    const stockInList = todayStocks.find(s => s.name && s.name.trim() === item.stock.trim());
-                    if (stockInList) {
-                        // 优先级：已卖出 > 已买入 > 持有
-                        // 如果有卖出标签，标记为浅灰色并锁定（最高优先级）
-                        if (stockInList.sold === true && item.sold !== true) {
-                            item.sold = true;
-                            item.bought = false;
-                            item.selected = false;
-                            item.fixed = true;
-                            hasUpdate = true;
-                        }
-                        // 如果有买入标签，标记为浅红色并锁定
-                        else if (stockInList.bought === true && item.bought !== true) {
-                            item.bought = true;
-                            item.sold = false;
-                            item.selected = false;
-                            item.fixed = true;
-                            hasUpdate = true;
-                        }
-                        // 如果有持有标签，标记为浅紫色并锁定
-                        else if (stockInList.hold === true && item.selected !== true) {
-                            item.selected = true;
-                            item.sold = false;
-                            item.bought = false;
-                            item.fixed = true;
-                            hasUpdate = true;
-                        }
-                    }
+                    if (!item || !item.stock) return;
+                    if (applyDerivedTagToRow(item, item.stock.trim(), currentDate)) hasUpdate = true;
                 });
                 // 如果有更新，保存数据
                 if (hasUpdate) {
@@ -18412,14 +18378,13 @@
             })();
 
             // 拆分渲染顺序：观察组 + 常规组
-            // "竞/昨"关闭时：保持原样，观察组整体置顶、虚线分隔，与之前行为一致。
-            // "竞/昨"打开时：观察组不再整体置顶——
-            //   · 若观察组股票今天也重新达标，或本来就是用户自己导入的（非系统自动补入），则并入常规组正常排序；
-            //     其中"非用户导入、但今天重新达标"的，名称后加蓝色小号上标"观"以便识别；
-            //   · 只有"系统自动补入 且 今天未达标"的观察组股票才会被隐藏（不渲染，但数据仍完整保留在 auctionList/存储中，供抓取程序继续同步）。
-            const _obsIndicesRaw = (_obsStocks && _obsStocks.size > 0)
-                ? renderOrder.filter(i => auctionList[i] && auctionList[i].stock && _obsStocks.has(auctionList[i].stock.trim()))
-                : [];
+            // 观察组成员 = 上一交易日"竞/昨"达标 ∪ "昨日买/持未卖"继承集合（obsBought，剔除已确认卖出）。
+            // 之前观察组只看 _obsStocks（昨日竞/昨达标），导致"昨日买入、但今日不在最近多板池"的
+            // 继承股（如汇得科技）永远进不了观察组；且"竞/昨"打开时还会被当作"自动补入且未达标"
+            // 直接隐藏——这是"昨日买未卖股票次日消失"的真正消失点。
+            const _obsBoughtVisibleSet = new Set([..._obsBoughtSet].filter(function(n) { return !_confirmedSoldSet.has(n); }));
+            const _isObsMember = function(name) { return (_obsStocks && _obsStocks.has(name)) || _obsBoughtVisibleSet.has(name); };
+            const _obsIndicesRaw = renderOrder.filter(i => auctionList[i] && auctionList[i].stock && _isObsMember(auctionList[i].stock.trim()));
 
             let _obsIndices, _regularIndices, _hiddenObsIndices;
             if (jingYestToggleChecked) {
@@ -18429,14 +18394,18 @@
                     const stockName = auctionList[i].stock.trim();
                     const _isAutoAdded = _autoAddedSet.has(stockName);
                     const _matchesToday = jingYestHighlightSet && jingYestHighlightSet.has(stockName);
-                    if (_isAutoAdded && !_matchesToday) {
-                        _hiddenObsIndices.push(i); // 纯自动补入且今天未达标 → 隐藏（仅隐藏展示，数据不受影响）
+                    const _isBoughtInherited = _obsBoughtVisibleSet.has(stockName);
+                    if (_isAutoAdded && !_matchesToday && !_isBoughtInherited) {
+                        _hiddenObsIndices.push(i); // 纯自动补入且今天未达标（非买入继承）→ 隐藏（仅隐藏展示，数据不受影响）
                     } else {
-                        _mergedRegular.push(i); // 用户自己导入的，或今天重新达标的 → 并入常规组
+                        _mergedRegular.push(i); // 用户自己导入的 / 今天重新达标的 / 昨日买入继承的 → 并入常规组正常显示
                     }
                 });
                 _obsIndices = [];
                 _regularIndices = renderOrder.filter(i => _hiddenObsIndices.indexOf(i) < 0);
+                if (_hiddenObsIndices.length > 0) {
+                    _dbgLog('[RENDER-OBS] 竞/昨开：隐藏纯自动补入未达标 ' + _hiddenObsIndices.length + ' 只：' + _hiddenObsIndices.map(function(i) { return auctionList[i].stock; }).join('、'));
+                }
             } else {
                 _obsIndices = _obsIndicesRaw;
                 _regularIndices = renderOrder.filter(i => _obsIndices.indexOf(i) < 0);
@@ -18757,11 +18726,9 @@
                 });
 
                 // 绑定点击序号展开/收起趋势图
+                // （已删除 [BIND] 逐批日志：增量更新路径下每行都会触发一次，每次渲染刷几十条，纯属噪音）
                 const _bindStartTs = performance.now();
                 const _triggerNodes = scopeEl.querySelectorAll('.auction-trend-trigger');
-                if (_triggerNodes.length > 0) {
-                    _dbgLog('[BIND] 绑定行内事件，本批 .auction-trend-trigger 节点数=' + _triggerNodes.length);
-                }
                 _triggerNodes.forEach(el => {
                     if (el.dataset.boundTrigger === '1') return;
                     el.dataset.boundTrigger = '1';
@@ -22670,6 +22637,115 @@
         // 防重复机制同 ensureBoughtStocksForDate：用"应继承名单"签名代替死板的 '1' 标记，
         // 名单变化（含逻辑修复导致的判定结果变化）会自动重新计算，不会被历史遗留标记卡死。
         // ============================================================
+        // ============================================================
+        // 标签派生唯一口径（所有同步入口共用，替代过去 4 处各自为政的写法）
+        // 权威来源只有 getStocksData()（股票卡片的手动标签）：
+        //   · 当天有记录 → 以当天记录为准（sold > bought > hold 三态）
+        //   · 当天无记录 → 只看前一交易日：买或持且未卖 → 继承"持"(selected)
+        //   · 其他情况（含前一日已卖、更早的历史记录）→ 无任何标签
+        // 注意：卖出不继承（卖出后次日默认无标记、不进观察组）；更早的历史一律不看——
+        // 这正是"华电能源误标买"（更早日期的 bought 被带回）和"幽灵灰色卖出"（残留 sold）
+        // 两个 bug 的根因，所有入口统一走这里后从根上杜绝。
+        // ============================================================
+        function deriveAuctionTagState(name, date) {
+            const result = { sold: false, bought: false, selected: false, source: 'none' };
+            if (!name || !date) return result;
+            const stocksData = getStocksData();
+            const todayRec = (stocksData[date] || []).find(function(s) { return s && s.name && s.name.trim() === name; });
+            if (todayRec) {
+                if (todayRec.sold === true) { result.sold = true; result.source = 'today'; }
+                else if (todayRec.bought === true) { result.bought = true; result.source = 'today'; }
+                else if (todayRec.hold === true) { result.selected = true; result.source = 'today'; }
+                return result;
+            }
+            const prevDay = getPreviousTradingDay(date);
+            if (prevDay) {
+                const prevRec = (stocksData[prevDay] || []).find(function(s) { return s && s.name && s.name.trim() === name; });
+                if (prevRec && prevRec.sold !== true && (prevRec.bought === true || prevRec.hold === true)) {
+                    result.selected = true; result.source = 'inherited';
+                }
+            }
+            return result;
+        }
+
+        // 把派生状态对称应用到竞价行（有依据则设置、无依据则清除），返回是否有改动。
+        // 保护规则：selected 只有在 fixed===true（标签同步路径设置的锁定）时才会被清除——
+        // 竞价板上用户手动点选（toggleAuctionRowSelect 只动 selected、不碰 fixed/bought/sold）
+        // 的选择不受影响。bought/sold 两位没有任何独立 UI 入口，只能来自标签同步，可安全清除。
+        function applyDerivedTagToRow(row, name, date) {
+            const d = deriveAuctionTagState(name, date);
+            let changed = false;
+            if (d.sold) {
+                if (row.sold !== true) { row.sold = true; changed = true; }
+                if (row.bought !== false) { row.bought = false; changed = true; }
+                if (row.selected !== false) { row.selected = false; changed = true; }
+                if (row.fixed !== true) { row.fixed = true; changed = true; }
+            } else if (d.bought) {
+                if (row.bought !== true) { row.bought = true; changed = true; }
+                if (row.sold !== false) { row.sold = false; changed = true; }
+                if (row.selected !== false) { row.selected = false; changed = true; }
+                if (row.fixed !== true) { row.fixed = true; changed = true; }
+            } else if (d.selected) {
+                if (row.selected !== true) { row.selected = true; changed = true; }
+                if (row.sold !== false) { row.sold = false; changed = true; }
+                if (row.bought !== false) { row.bought = false; changed = true; }
+                if (row.fixed !== true) { row.fixed = true; changed = true; }
+            } else {
+                // 无标签依据：清掉 bought/sold 残留（历史脏位的真正清除点）；
+                // selected 仅在 fixed===true（标签锁）时一并清除，保留手动点选
+                if (row.sold === true) { row.sold = false; changed = true; }
+                if (row.bought === true) { row.bought = false; changed = true; }
+                if (row.fixed === true) {
+                    row.fixed = false;
+                    if (row.selected === true) row.selected = false;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        // 一次性标签清洗（stockApp_v42_tag_cleanse_v1）：治"存量"脏数据。
+        // 旧版本（扫全部历史继承、只设不清）把错误的 bought/sold 写进了本地和云端，
+        // 运行时的对称清除只能治"以后"——本函数在启动时（云端拉取完成后）跑一次，
+        // 按 deriveAuctionTagState 重算所有日期竞价行的标签位，并推送云端覆盖脏行。
+        // 清洗前自动备份到 auctionData_tag_cleanse_backup（需要恢复时可从备份还原）。
+        async function cleanseAuctionTagsOnce() {
+            const FLAG = 'stockApp_v42_tag_cleanse_v1';
+            try { if (localStorage.getItem(FLAG)) return; } catch (e) { return; }
+            const auctionData = getAuctionData();
+            const dates = Object.keys(auctionData).filter(function(d) {
+                return Array.isArray(auctionData[d]) && auctionData[d].length > 0;
+            });
+            // 清洗前备份整个 auction 数据（超容量时仅告警，不阻断清洗）
+            try {
+                localStorage.setItem('auctionData_tag_cleanse_backup', JSON.stringify({
+                    time: new Date().toISOString(), data: auctionData
+                }));
+            } catch (e) { console.warn('[TAG-CLEANSE] 备份失败（可能超出容量），仍继续清洗:', e); }
+            let touchedDates = 0, touchedRows = 0;
+            dates.forEach(function(date) {
+                let dateChanged = false;
+                auctionData[date].forEach(function(row) {
+                    if (!row || !row.stock) return;
+                    if (applyDerivedTagToRow(row, row.stock.trim(), date)) {
+                        dateChanged = true;
+                        touchedRows++;
+                    }
+                });
+                if (dateChanged) { touchedDates++; markAuctionDirty(date); }
+            });
+            if (touchedDates > 0) {
+                saveModule('auction');
+                scheduleCloudPush(); // 推送覆盖云端脏行（云端不洗，本地洗完还会被回灌）
+            }
+            try {
+                localStorage.setItem(FLAG, JSON.stringify({
+                    time: new Date().toISOString(), touchedDates: touchedDates, touchedRows: touchedRows
+                }));
+            } catch (e) {}
+            _dbgLog('[TAG-CLEANSE] 一次性标签清洗完成：涉及 ' + touchedDates + ' 个日期、' + touchedRows + ' 行（备份键 auctionData_tag_cleanse_backup）');
+        }
+
         function ensureObservationStocks(date) {
             if (!date) return;
 
@@ -22741,8 +22817,7 @@
         // 曾经被设置过（哪怕是旧版本代码、或数据还没就绪时的一次执行），后续代码逻辑升级、
         // 或者"昨日持有名单"发生变化，都不会重新计算——表现为"某只股票明明该进观察组，
         // 但页面上死活不出现"。现在改为签名机制：签名 = 当前应继承的持有名单（排序拼接），
-        // 名单变化就重新跑一次补入逻辑；名单没变而用户手动删除过某只股票，则不会被强行加回
-        // （见下方 obsBoughtRemoved_ 集合）。
+        // 名单变化就重新跑一次补入逻辑。权威来源只认 getStocksData()，无记录即清除。
         function ensureBoughtStocksForDate(date) {
             if (!date) return;
 
@@ -22797,9 +22872,9 @@
             const existingNames = new Set(dayList.map(function(s) { return s.stock ? s.stock.trim() : ''; }));
             const autoAdded = JSON.parse(localStorage.getItem('obsAutoAdded_' + date) || '[]');
             const autoAddedSet = new Set(autoAdded);
-            // 用户手动从观察组删除过的股票名单：出现在这里的，即使持有名单里还有，也不再自动加回。
-            const manuallyRemoved = new Set(JSON.parse(localStorage.getItem('obsBoughtRemoved_' + date) || '[]'));
-            _dbgLog('[BOUGHT-ENSURE] 今日已有 ' + existingNames.size + ' 只；manuallyRemoved 共 ' + manuallyRemoved.size + ' 只' + (manuallyRemoved.size > 0 ? '：' + [...manuallyRemoved].join('、') : ''));
+            // （已删除 obsBoughtRemoved_ "用户手动删除不再加回"机制：该键在全代码库只有读取、
+            // 从未有任何写入，是失效的死代码；删除不影响任何现有行为）
+            _dbgLog('[BOUGHT-ENSURE] 今日已有 ' + existingNames.size + ' 只');
 
             // 检查今日 auctionData 是否已完整正确包含所有 holdingNames（含字段：in_watchlist/obsAutoAdded/selected）。
             // 这是签名机制的关键：不只是看 holdingNames 名单有没有变，还要看今日列表里这些股票是否真正存在且字段正确。
@@ -22809,7 +22884,6 @@
             dayList.forEach(function(s) { if (s && s.stock) _existingRowMap[s.stock.trim()] = s; });
             const _missingOrWrong = [];
             holdingNames.forEach(function(n) {
-                if (manuallyRemoved.has(n)) return; // 用户手动删除的不算缺失
                 const row = _existingRowMap[n];
                 if (!row) {
                     _missingOrWrong.push(n + '(缺失)');
@@ -22835,10 +22909,6 @@
             let hasNew = false;
             let addedCount = 0;
             holdingNames.forEach(function(name) {
-                if (manuallyRemoved.has(name)) {
-                    _dbgLog('[BOUGHT-ENSURE] 跳过(用户已手动删除) ' + name);
-                    return;
-                }
                 if (existingNames.has(name)) {
                     // 已在今日列表：检查字段是否正确。汇得科技曾被作为 in_watchlist=false 影子记录存在，
                     // 导致渲染层 getTodayAuction()/getTodayGroupList() 过滤掉它看不到。
