@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>股票日记 v259</title>
+    <title>股票日记 v260</title>
     <style>
         * {
             margin: 0;
@@ -8603,9 +8603,25 @@
             }
         }
 
+        // 正在执行"获取最近多板"等整表覆盖式导入操作的日期集合。
+        // 修复：导入函数（如 fetchLadderConstituentsMain）本地写入 _auctionMemCache 到
+        // 云端推送完成之间有一段异步窗口（网络耗时 + 2 秒推送防抖）。若这期间 Realtime
+        // 收到任何其它变更通知（哪怕是同一次导入自己触发的、或另一台设备的无关操作），
+        // pullAuctionMarketDataForDate 会用云端"旧数据"整段替换 _auctionMemCache[date]，
+        // 把刚导入还没来得及推送上云的新列表整个冲掉——表现为"导入最近多板，页面自动
+        // 刷新后列表被清空/变乱、出现重复股票"。用这个锁在导入期间让 Realtime 拉取直接跳过
+        // 该日期，导入完成后解锁，之后的 Realtime 通知才正常生效。
+        if (!window._auctionImportLockedDates) window._auctionImportLockedDates = new Set();
+        function lockAuctionDateForImport(date) { if (date) window._auctionImportLockedDates.add(date); }
+        function unlockAuctionDateForImport(date) { if (date) window._auctionImportLockedDates.delete(date); }
+
         // 拉取某日期的行情数据并合并到本地（只更新行情列，保留本地状态标记）
         async function pullAuctionMarketDataForDate(date) {
             if (!_auctionTableAvailable) return;
+            if (window._auctionImportLockedDates && window._auctionImportLockedDates.has(date)) {
+                _dbgLog && _dbgLog('[AUCTION-PULL] ' + date + ' 正在导入中（锁定），跳过本次 Realtime 回拉，避免冲掉刚写入的数据');
+                return;
+            }
             const sb = getSupabase();
             const { data, error } = await sb.from('auction_data')
                 .select('stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed,updated_at,updated_by,obs_auto_added')
@@ -11336,7 +11352,7 @@
             currentDate = `${year}-${month}-${day}`;
         }
         if (currentDate < '2025-01-01') currentDate = '2025-01-01';
-        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0801（汇得科技影子记录+华电能源跨日继承修复）');
+        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0802（已卖出股票不再继承进观察组+最近多板导入竞态锁修复）');
 
         let isStrengthSortEnabled = false;
 
@@ -14002,6 +14018,9 @@
             // 锁定"点击那一刻"的日期，全程只认这一个值，杜绝异步等待期间日期漂移
             const targetDate = currentDate;
             setBtnLoading(btn, true);
+            // 导入期间锁定该日期：期间任何 Realtime 触发的回拉都会跳过这一天，
+            // 防止导入还没推送完成时被云端"旧数据"整段覆盖（见 lockAuctionDateForImport 注释）
+            lockAuctionDateForImport(targetDate);
             try {
                 const data = await fuyaoApiGet('/api/a-share-index/constituents/ths-stock-list', { thscode: LADDER_THSCODE });
                 const constituents = (data && data.item) || [];
@@ -14156,6 +14175,11 @@
                 setApiStatus('thsApiStatus', '❌ ' + msg, false);
             } finally {
                 setBtnLoading(btn, false);
+                // 延迟解锁：scheduleCloudPush 是 2 秒防抖，加上网络推送本身的耗时，
+                // 提前解锁会让解锁后、真正推送完成前这段窗口内到达的 Realtime 通知
+                // 仍然读到"推送前的云端旧数据"把刚导入的列表冲掉。延迟到留出安全余量
+                // （3.5 秒）之后再解锁，确保这次导入自己的推送已经完成。
+                setTimeout(function() { unlockAuctionDateForImport(targetDate); }, 3500);
             }
         }
 
@@ -18225,6 +18249,20 @@
             // 若开启"平行"，今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面（不满足的排后面）
             // 注意：无论如何排序，每行显示的"序号"始终是该股票的原始序号（不重新编号）
             let renderOrder = auctionList.map((item, idx) => idx);
+            if (dataSource === 'auction') {
+                // 二次防御（与 ensureObservationStocks 的数据层清理配套）：即使某只观察组继承
+                // 股票（obsAutoAdded=true）因为渲染时机/异步竞态未及时从数据里删除，只要
+                // deriveAuctionTagState 判定为已卖出（权威来源=股票列表页 stocksData），
+                // 整行都不参与本次渲染——从展示层彻底杜绝"已标记卖出的股票仍残留显示"的
+                // 脏数据问题（华电能源同类情况）。真实"最近多板"成分股不带 obsAutoAdded
+                // 标记，不受此过滤影响。
+                renderOrder = renderOrder.filter(function(idx) {
+                    const it = auctionList[idx];
+                    if (!it || !it.stock) return true;
+                    if (it.obsAutoAdded === true && deriveAuctionTagState(it.stock.trim(), currentDate).sold) return false;
+                    return true;
+                });
+            }
             const sortByDataEnabled = document.getElementById(_p + 'SortByDataToggle')?.checked;
             const sortByRatioEnabled = document.getElementById(_p + 'SortByRatioToggle')?.checked;
             const sortByParallelEnabled = document.getElementById(_p + 'SortByParallelToggle')?.checked;
@@ -22753,14 +22791,19 @@
             if (!prevDay) return;
 
             // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
-            const obsStocks = getJingYestHighlightSetForDate(prevDay);
-            if (!obsStocks || obsStocks.size === 0) {
+            const obsStocksRaw = getJingYestHighlightSetForDate(prevDay);
+            if (!obsStocksRaw || obsStocksRaw.size === 0) {
                 // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionMemCache 会有值）
                 return;
             }
 
-            const signature = [...obsStocks].sort().join('|');
-            if (localStorage.getItem('obsEnsured_' + date) === signature) return;
+            // 修复：手动标记"卖"的股票不应作为观察组继承进入次日列表——
+            // 即使它在前一交易日"竞/昨"达标，只要 deriveAuctionTagState 判定为已卖出
+            // （权威来源=股票卡片 stocksData），就必须从本次继承名单里剔除。
+            // 这与 ensureBoughtStocksForDate / 获取最近多板 两处"已卖出不继承"的口径保持一致。
+            const obsStocks = new Set([...obsStocksRaw].filter(function(name) {
+                return !deriveAuctionTagState(name, date).sold;
+            }));
 
             // 当日已有股票名集合
             const auctionData = getAuctionData();
@@ -22772,19 +22815,42 @@
             var autoAddedSet = new Set(autoAdded);
 
             var hasNew = false;
-            obsStocks.forEach(function(name) {
-                if (!existingNames.has(name)) {
-                    // 不在当日列表中 → 自动添加
-                    // 阶段六 影子清单修复：显式设置 in_watchlist: true（正式列表成员），
-                    // 避免 undefined 脏数据被过滤条件误判
-                    dayList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true });
-                    autoAddedSet.add(name);
+
+            // 脏数据清理：已存在于当日列表、且是"观察组自动继承"来的行（obsAutoAdded===true），
+            // 如果 deriveAuctionTagState 判定为已卖出、且它不是当日真实"最近多板"成分股
+            // （真实成分股由获取最近多板写入，不带 obsAutoAdded 标记），则整行移出当日列表——
+            // 而不是仅仅隐藏展示。这是"华电能源已标记卖出仍残留在次日列表"问题的根本清理点。
+            const cleanedList = dayList.filter(function(s) {
+                if (!s || !s.stock) return true;
+                if (s.obsAutoAdded !== true) return true; // 非观察组继承行（用户导入/最近多板成分股），不动
+                const name = s.stock.trim();
+                if (deriveAuctionTagState(name, date).sold) {
+                    _dbgLog('[OBS-ENSURE] 清除已确认卖出的观察组继承脏行: ' + name);
+                    autoAddedSet.delete(name);
                     hasNew = true;
+                    return false;
                 }
+                return true;
             });
 
+            const signature = [...obsStocks].sort().join('|');
+            const alreadyEnsured = !hasNew && localStorage.getItem('obsEnsured_' + date) === signature;
+
+            if (!alreadyEnsured) {
+                obsStocks.forEach(function(name) {
+                    if (!existingNames.has(name)) {
+                        // 不在当日列表中 → 自动添加
+                        // 阶段六 影子清单修复：显式设置 in_watchlist: true（正式列表成员），
+                        // 避免 undefined 脏数据被过滤条件误判
+                        cleanedList.push({ stock: name, volume: '', yestVolume: '', note: '', in_watchlist: true, obsAutoAdded: true });
+                        autoAddedSet.add(name);
+                        hasNew = true;
+                    }
+                });
+            }
+
             if (hasNew) {
-                auctionData[date] = dayList;
+                auctionData[date] = cleanedList;
                 saveModule('auction');
                 markAuctionDirty(date);
                 scheduleCloudPush();
