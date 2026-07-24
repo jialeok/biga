@@ -8517,6 +8517,8 @@
         let _biddingTableAvailable = false; // bidding_data 表是否可用
         let _biddingRealtimeChannel = null; // bidding_data 表的 Realtime 订阅
         let _justPushedBidding = false; // 刚推送 bidding_data，忽略自己触发的 Realtime 通知
+        let _justPushedHighlights = false; // 刚推送 daily_highlights，忽略自己触发的 Realtime 通知（防自循环）
+        let _justPushedHotHighlights = false; // 刚推送 hot_stocks_highlights，忽略自己触发的 Realtime 通知（防自循环）
 
         // jiwang（记忘看板/昨日复盘）持久内存缓存，做法与 _biddingMemCache 一致：
         // 不随 allData=null 重置而清空，只由 pullJiwangFromTable()/本地编辑保存来更新。
@@ -9790,6 +9792,21 @@
             const now = new Date().toISOString();
             const stockNames = highlightSet ? [...highlightSet] : [];
 
+            // [FIX 2026-07-24 自循环根治] 写入前与本地缓存比对，集合未变化时直接跳过。
+            // 原实现每次 renderAuction 都无条件"全置false + 重新upsert"重写当日全部行；
+            // daily_highlights 的 Realtime 订阅原先没有自推送屏蔽，收到自己刚写的变更后
+            // 又触发 _scheduleAuctionRealtimeReload → renderAuction → 再次推送 → 无限自循环。
+            // 实测线上每 4~5 秒重写一次当日全部行并整体重渲染看板（卡顿/耗电主因）。
+            const cached = _dailyHighlightsCache[date];
+            if (cached && cached.size === stockNames.length &&
+                stockNames.every(function(n) { return cached.has(n); })) {
+                return; // 内容未变化：不写库、不触发 Realtime、不打断用户交互
+            }
+
+            // 自推送屏蔽：本次写入触发的 Realtime 通知直接忽略，避免自己卷自己
+            _justPushedHighlights = true;
+            setTimeout(function() { _justPushedHighlights = false; }, 5000);
+
             // 1. 先把该日期所有行标记为 false（清除旧高光）
             const { error: updErr } = await sb.from('daily_highlights')
                 .update({ jing_yest_highlight: false, updated_at: now })
@@ -9834,6 +9851,7 @@
                     .on('postgres_changes', {
                         event: '*', schema: 'public', table: 'daily_highlights'
                     }, function(payload) {
+                        if (_justPushedHighlights) return; // 自己刚推的，忽略（防自循环）
                         var row = payload.new || payload.old;
                         if (!row || !row.date) return;
                         // 汇入与 auction_data 共用的统一防抖池，避免两张表几乎同时变更时
@@ -9991,6 +10009,18 @@
             const now = new Date().toISOString();
             const stockNames = highlightSet ? [...highlightSet] : [];
 
+            // [FIX 2026-07-24 自循环根治] 与 pushDailyHighlights 同款：集合未变化时跳过写库，
+            // 否则"renderHotStocks → 写 highlights → Realtime 回显 → renderHotStocks"无限自循环。
+            const cached = _hotHighlightsCache[date];
+            if (cached && cached.size === stockNames.length &&
+                stockNames.every(function(n) { return cached.has(n); })) {
+                return;
+            }
+
+            // 自推送屏蔽：本次写入触发的 Realtime 通知直接忽略
+            _justPushedHotHighlights = true;
+            setTimeout(function() { _justPushedHotHighlights = false; }, 5000);
+
             // 1. 先把该日期所有行标记为 false（清除旧高光）
             const { error: updErr } = await sb.from('hot_stocks_highlights')
                 .update({ jing_yest_highlight: false, updated_at: now })
@@ -10099,6 +10129,7 @@
                     .on('postgres_changes', {
                         event: '*', schema: 'public', table: 'hot_stocks_highlights'
                     }, function(payload) {
+                        if (_justPushedHotHighlights) return; // 自己刚推的，忽略（防自循环）
                         var row = payload.new || payload.old;
                         if (!row || !row.date) return;
                         // 汇入统一防抖池，避免和 hot_stocks / hot_stock_trends 各自独立触发重渲染
@@ -11440,7 +11471,22 @@
                     stockEtfData: JSON.parse(localStorage.getItem('stockEtfData') || '{}'),
                     stockEtfComment: JSON.parse(localStorage.getItem('stockEtfComment') || '{}'),
                     coreTopics: JSON.parse(localStorage.getItem('coreTopics') || '[]'),
-                    biddingDefaultTemplate: JSON.parse(localStorage.getItem('biddingDefaultTemplate_v41') || '[]'),
+                    // [FIX 2026-07-24] 本地没有模板时绝不把空数组推上云。
+                    // 云端 biddingDefaultTemplate 是 Worker 自动抓取的行名来源：
+                    // 某次推送把 [] 带上云后，Worker 读不到任何行 → 当天自动抓取整天空白
+                    // （2026-07-24 实发事故）。本地缺失时用硬编码默认模板兜底并自愈 localStorage。
+                    biddingDefaultTemplate: (function() {
+                        try {
+                            const t = JSON.parse(localStorage.getItem('biddingDefaultTemplate_v41') || 'null');
+                            if (Array.isArray(t) && t.length > 0) return t;
+                        } catch (e) {}
+                        const d = [
+                            { name: '最近多板%' }, { name: '板块ETF(48)' }, { name: '昨日资金前十' },
+                            { name: '大盘ETF' }, { name: '大盘（%）' }, { name: '账号溢价' }
+                        ];
+                        try { localStorage.setItem('biddingDefaultTemplate_v41', JSON.stringify(d)); } catch (e) {}
+                        return d;
+                    })(),
                     scoreSettings: scoreSettings,
                     hasFumianTopics: hasFumianTopics,
                     summaries: summaries,
