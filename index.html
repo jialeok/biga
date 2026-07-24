@@ -18155,12 +18155,26 @@
             //     的 Vue computed 在 stocksData 变化时重算。enrichAuctionItem 内部调
             //     deriveAuctionTagState 实时派生 bought/sold/selected，不再需要
             //     applyDerivedTagToRow 预先写入 auctionData 行。
+            // 性能修复：切换日期等场景里，renderList() 等入口在同一次交互中会连续多次
+            // 调用 renderAuction('auction')（比如 renderList 本身 + 内部各 render* 副作用
+            // 链路重入），如果这多次 bump 之间恰好穿插了一次 Vue 组件访问（读取）computed，
+            // 就会导致 Page2/Page3/Stats 这些重计算被触发不止一次，实测可达同一批看板
+            // 重算 2 遍、单帧阻塞近 16 秒。这里把 bump 合并到同一个微任务周期：连续多次
+            // 调用只会在本轮同步代码执行完毕后统一 +1 一次，不影响"数据变了要让 computed
+            // 失效"这个语义，只是把多次冗余的"失效信号"合并成一次。
             if (dataSource === 'auction') {
-                auctionStore.stocksDataVersion = (auctionStore.stocksDataVersion || 0) + 1;
-                // [PERF-DEBUG] 这一行是全量失效信号：无论本次 renderAuction 是否真的
-                // 涉及标签变化，都会让四块看板（主列表/第二页/第三页/统计）的 Vue
-                // computed 在下次访问时判定为脏并重算。这里打点确认它的触发频率。
-                _dbgLog('[PERF] stocksDataVersion → ' + auctionStore.stocksDataVersion + '（本次调用会让4块看板 computed 全部标记为待重算）');
+                window._pendingStocksDataVersionBump = true;
+                if (!window._stocksDataVersionBumpScheduled) {
+                    window._stocksDataVersionBumpScheduled = true;
+                    Promise.resolve().then(function() {
+                        window._stocksDataVersionBumpScheduled = false;
+                        if (window._pendingStocksDataVersionBump) {
+                            window._pendingStocksDataVersionBump = false;
+                            auctionStore.stocksDataVersion = (auctionStore.stocksDataVersion || 0) + 1;
+                            _dbgLog('[PERF] stocksDataVersion → ' + auctionStore.stocksDataVersion + '（本次调用会让4块看板 computed 全部标记为待重算，已合并同微任务周期内的重复bump）');
+                        }
+                    });
+                }
             }
             // (2) 高光推送 + 竞/昨空集警示（与 innerHTML 路径 18308-18316 同口径）
             {
@@ -23109,11 +23123,19 @@
         //   · 只有 bought===true（标记买入，唯一的真实操作入口）或
         //     hold===true 且 inheritedHold !== true（用户在股票列表页手动勾选的持有），
         //     才允许继续往下传一天。
-        function deriveAuctionTagState(name, date) {
+        // 性能优化：可选传入按股票名索引的 Map（{stocksDataToday, stocksDataPrev}），
+        // 避免调用方在渲染循环里对同一个 stocksData[date] 数组反复 .find() 做 O(n) 查找。
+        // 不传时行为与原来完全一致（自己现查 getStocksData()），保证其余调用点零风险。
+        function deriveAuctionTagState(name, date, _cache) {
             const result = { sold: false, bought: false, selected: false, source: 'none' };
             if (!name || !date) return result;
             const stocksData = getStocksData();
-            const todayRec = (stocksData[date] || []).find(function(s) { return s && s.name && s.name.trim() === name; });
+            let todayRec;
+            if (_cache && _cache.todayMap) {
+                todayRec = _cache.todayMap.get(name);
+            } else {
+                todayRec = (stocksData[date] || []).find(function(s) { return s && s.name && s.name.trim() === name; });
+            }
             if (todayRec) {
                 if (todayRec.sold === true) { result.sold = true; result.source = 'today'; }
                 else if (todayRec.bought === true) { result.bought = true; result.source = 'today'; }
@@ -23122,7 +23144,12 @@
             }
             const prevDay = getPreviousTradingDay(date);
             if (prevDay) {
-                const prevRec = (stocksData[prevDay] || []).find(function(s) { return s && s.name && s.name.trim() === name; });
+                let prevRec;
+                if (_cache && _cache.prevMap) {
+                    prevRec = _cache.prevMap.get(name);
+                } else {
+                    prevRec = (stocksData[prevDay] || []).find(function(s) { return s && s.name && s.name.trim() === name; });
+                }
                 // 关键防护：前一日记录若"仅"是继承来的（inheritedHold===true 且用户未在该日期手动确认
                 // bought=true），不再往下传——这是"只继承一天"的核心硬限制。
                 // 但如果用户在继承来的日期上重新标记了"买"(bought=true)，那是真实确认，应当可以继续
@@ -23134,6 +23161,21 @@
                 }
             }
             return result;
+        }
+
+        // 配合 deriveAuctionTagState 的 _cache 参数使用：为指定 date 预建 {todayMap, prevMap}。
+        // todayMap/prevMap 均为 姓名(trim后)→记录 的 Map，供同一次渲染内所有 deriveAuctionTagState
+        // 调用复用，避免 O(每行 × stocksData长度) 的重复线性扫描。
+        function _buildTagStateCache(date) {
+            const stocksData = getStocksData();
+            const prevDay = getPreviousTradingDay(date);
+            const todayMap = new Map();
+            (stocksData[date] || []).forEach(function(s) { if (s && s.name) todayMap.set(s.name.trim(), s); });
+            const prevMap = new Map();
+            if (prevDay) {
+                (stocksData[prevDay] || []).forEach(function(s) { if (s && s.name) prevMap.set(s.name.trim(), s); });
+            }
+            return { todayMap, prevMap };
         }
 
         // 方案 B：applyDerivedTagToRow 已删除。
@@ -36439,6 +36481,11 @@
                 const __prevAuctionByName = new Map();
                 prevAuctionList.forEach(it => { if (it && it.stock) __prevAuctionByName.set(it.stock.trim(), it); });
 
+                // 性能修复：deriveAuctionTagState 原本每次调用都对 stocksData[date] 做 O(n) 线性
+                // 查找，而它在下方每一行都会被调用一次，同样是 O(总行数 × stocksData长度) 的量级。
+                // 这里预建一次 {todayMap, prevMap}，全程复用。
+                const __tagStateCache = _buildTagStateCache(currentDate);
+
                 const highRatioInfo2 = getHighRatioStocksForDate(currentDate, dataSource);
                 // sort toggles（读 store：renderAuctionPage2 入口已把 DOM 开关同步到 store）
                 const _ss2 = auctionStore.sortStateP2[_p];
@@ -36610,7 +36657,7 @@
                         let rowClass = 'auction-topic-row';
                         if (auctionItem) {
                             // 方案 B：标签从 stocksData 实时派生，不读 auctionItem.bought/sold/fixed
-                            const _ts2 = deriveAuctionTagState(auctionItem.stock.trim(), currentDate);
+                            const _ts2 = deriveAuctionTagState(auctionItem.stock.trim(), currentDate, __tagStateCache);
                             if (_ts2.sold) rowClass = 'auction-topic-row sold';
                             else if (_ts2.bought) rowClass = 'auction-topic-row bought';
                             else if (_ts2.selected) rowClass = 'auction-topic-row selected';
