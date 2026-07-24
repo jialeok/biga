@@ -21552,11 +21552,18 @@
         // 按 dateStr 缓存一个 Map(topic -> count)，同一天同一题材只算一次。
         // 缓存失效条件：rankData[dateStr] 的数组引用变化（编辑保存/清空/云端拉取都会换新引用），
         // 数组不存在时（如被 delete）也会自然 miss 缓存并返回 0，与原逻辑一致。
-        window._rankCacheStats = { hit: 0, missNoEntry: 0, missRefChanged: 0, missNoTopic: 0 };
+        window._rankCacheStats = { hit: 0, missNoEntry: 0, missRefChanged: 0, missNoTopic: 0, calls: 0, earlyReturn: 0 };
         function getTopicRankCountByDate(topic, dateStr) {
+            window._rankCacheStats.calls++;
             const rankData = getRankData();
             const dayRank = rankData[dateStr];
-            if (!dayRank || !Array.isArray(dayRank)) return 0;
+            if (window._rankCacheStats.calls <= 5 && typeof _dbgLog === 'function') {
+                _dbgLog('[RANK-CACHE] 第' + window._rankCacheStats.calls + '次调用 topic=' + topic + ' dateStr=' + dateStr + ' | rankData类型=' + (rankData ? typeof rankData : String(rankData)) + ' | dayRank是否数组=' + Array.isArray(dayRank) + ' | dayRank长度=' + (Array.isArray(dayRank) ? dayRank.length : 'N/A'));
+            }
+            if (!dayRank || !Array.isArray(dayRank)) {
+                window._rankCacheStats.earlyReturn++;
+                return 0;
+            }
 
             let entry = _topicRankByDateCache.get(dateStr);
             if (!entry) {
@@ -36826,7 +36833,7 @@
                         const strength = group.stocks.length > 0 ? Math.round((strongCount / group.stocks.length) * 100) : 0;
                         let rankAppearCount = 0;
                         const __rcT0 = performance.now();
-                        try { rankAppearCount = getTopicRankCountByDate(group.topic, dateStr); } catch (e) {}
+                        try { rankAppearCount = getTopicRankCountByDate(group.topic, dateStr); } catch (e) { if (typeof _dbgLog === 'function') _dbgLog('[RANK-CACHE] ⚠️ getTopicRankCountByDate 抛出异常: ' + (e && e.message) + ' | topic=' + group.topic + ' dateStr=' + dateStr); }
                         __segRankCountTotal += performance.now() - __rcT0;
                         allTopicData[group.topic].push({
                             date: dateStr, rankCount: rankAppearCount, starCount: group.starCount,
@@ -36955,7 +36962,7 @@
 
                 const __segGrandTotal = performance.now() - __segT0;
                 _dbgLog('[PERF-SEG] Page3ViewData/' + dataSource + ' 总耗时=' + __segGrandTotal.toFixed(1) + 'ms ｜ 循环=' + __segLoopTotal.toFixed(1) + 'ms(getTopicGroups=' + __segGetTopicGroupsTotal.toFixed(1) + '/' + __segGetTopicGroupsCalls + '次, rankCount=' + __segRankCountTotal.toFixed(1) + 'ms) ｜ 补全=' + __segFillTotal.toFixed(1) + 'ms ｜ 箭头=' + __segArrowTotal.toFixed(1) + 'ms ｜ 排序=' + __segSortTotal.toFixed(1) + 'ms ｜ 组装HTML=' + __segBuildTotal.toFixed(1) + 'ms（' + validTopics.length + '个题材）');
-                _dbgLog('[RANK-CACHE] hit=' + window._rankCacheStats.hit + ' missNoEntry=' + window._rankCacheStats.missNoEntry + ' missRefChanged=' + window._rankCacheStats.missRefChanged + ' missNoTopic=' + window._rankCacheStats.missNoTopic + ' | cache当前共缓存' + _topicRankByDateCache.size + '天 | allData是否为null=' + (allData === null));
+                _dbgLog('[RANK-CACHE] calls=' + window._rankCacheStats.calls + ' earlyReturn=' + window._rankCacheStats.earlyReturn + ' hit=' + window._rankCacheStats.hit + ' missNoEntry=' + window._rankCacheStats.missNoEntry + ' missRefChanged=' + window._rankCacheStats.missRefChanged + ' missNoTopic=' + window._rankCacheStats.missNoTopic + ' | cache当前共缓存' + _topicRankByDateCache.size + '天 | allData是否为null=' + (allData === null));
 
                 return { empty: false, dataSource, topics: enrichedTopics, isStrengthSortEnabled };
             }
