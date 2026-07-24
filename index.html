@@ -11490,7 +11490,7 @@
         }
         if (currentDate < '2025-01-01') currentDate = '2025-01-01';
         if (auctionStore) auctionStore.currentDate = currentDate; // Vue 化：初始同步
-        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0802（已卖出股票不再继承进观察组+最近多板导入竞态锁修复）');
+        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0803-RANKCACHE-DEBUG2（rank缓存诊断增强版：入口打印+异常不再吞掉）');
 
         let isStrengthSortEnabled = false;
 
