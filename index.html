@@ -11490,7 +11490,7 @@
         }
         if (currentDate < '2025-01-01') currentDate = '2025-01-01';
         if (auctionStore) auctionStore.currentDate = currentDate; // Vue 化：初始同步
-        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0803-RANKCACHE-DEBUG2（rank缓存诊断增强版：入口打印+异常不再吞掉）');
+        _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0804-RANKCACHE-FIX（找到真正瓶颈：getRankData每题材调用N次→改为每次渲染只调用1次，避免反复触发响应式store写入）');
 
         let isStrengthSortEnabled = false;
 
@@ -19213,11 +19213,15 @@
         const _topicRankWeekDayCache = new Map();  // dateStr -> { ref, coreTopicsRaw, map: Map(topicName -> boolean) }
 
         // 统计本周题材在昨日最大成交额看板中出现的次数（缓存版，逻辑与原实现完全一致）
-        function getTopicRankCountThisWeek(topicName) {
+        // 同样支持可选传入 rankData/coreTopics，原因与 getTopicRankCountByDate 一致：
+        // 避免在"按题材分组逐个调用"的循环里，每次都重新触发 getRankData()（→ loadAllData()
+        // → syncStocksDataToStore() 写响应式 store）和 getCoreTopics()（→ 读 localStorage）。
+        // 不传参时行为与原来完全一致。
+        function getTopicRankCountThisWeek(topicName, rankDataParam, coreTopicsParam) {
             try {
                 const weekDays = getLast5TradingDays();
-                const rankData = getRankData();
-                const coreTopics = getCoreTopics();
+                const rankData = rankDataParam || getRankData();
+                const coreTopics = coreTopicsParam || getCoreTopics();
                 
                 if (!weekDays || weekDays.length === 0 || !rankData || !coreTopics) {
                     return 0;
@@ -21552,10 +21556,19 @@
         // 按 dateStr 缓存一个 Map(topic -> count)，同一天同一题材只算一次。
         // 缓存失效条件：rankData[dateStr] 的数组引用变化（编辑保存/清空/云端拉取都会换新引用），
         // 数组不存在时（如被 delete）也会自然 miss 缓存并返回 0，与原逻辑一致。
+        //
+        // 【关键发现】诊断日志显示 calls === earlyReturn（100%提前返回），但耗时依然很高——
+        // 说明真正的热点根本不在这个函数的扫描逻辑里，而在于原实现内部每次都调用
+        // getRankData() → loadAllData() → syncStocksDataToStore()，而后者会给 Vue 响应式
+        // store 的 stocksData 属性重新赋值（哪怕值没变），每次赋值都会触发响应式通知。
+        // 这个函数在一次 Page3 渲染里会被调用 天数×题材数（约100+）次，等于每次渲染
+        // 都触发 100+ 次不必要的响应式写入。加了可选的 rankData 参数，调用方（Vue computed）
+        // 可以在循环开始前只调用一次 getRankData()，把结果传进来，避免重复触发。
+        // 不传参时行为与原来完全一致（向后兼容第 20060/20434 行的旧调用点）。
         window._rankCacheStats = { hit: 0, missNoEntry: 0, missRefChanged: 0, missNoTopic: 0, calls: 0, earlyReturn: 0 };
-        function getTopicRankCountByDate(topic, dateStr) {
+        function getTopicRankCountByDate(topic, dateStr, rankDataParam) {
             window._rankCacheStats.calls++;
-            const rankData = getRankData();
+            const rankData = rankDataParam || getRankData();
             const dayRank = rankData[dateStr];
             if (window._rankCacheStats.calls <= 5 && typeof _dbgLog === 'function') {
                 _dbgLog('[RANK-CACHE] 第' + window._rankCacheStats.calls + '次调用 topic=' + topic + ' dateStr=' + dateStr + ' | rankData类型=' + (rankData ? typeof rankData : String(rankData)) + ' | dayRank是否数组=' + Array.isArray(dayRank) + ' | dayRank长度=' + (Array.isArray(dayRank) ? dayRank.length : 'N/A'));
@@ -36408,6 +36421,10 @@
                 const groups = getTopicGroups(auctionList);
                 const __p2AfterGroups = performance.now();
                 if (groups.length === 0) return { empty: true, placeholder: '暂无题材分类数据（双击打开核心词管理）' };
+                // 性能修复：整个渲染只调用一次 getRankData()/getCoreTopics()（而不是每个题材调用一次），
+                // 避免反复触发 loadAllData() 内的 syncStocksDataToStore() 响应式写入，以及重复读 localStorage。
+                const __rankDataForThisRender = getRankData();
+                const __coreTopicsForThisRender = getCoreTopics();
 
                 const prevDate = getPreviousTradingDay(currentDate);
                 const auctionData = getGroupData(dataSource);
@@ -36544,7 +36561,7 @@
                 let page2RowSeq = 0;
                 const enrichedGroups = sortedGroups.map(group => {
                     let rankAppearCount = 0;
-                    try { rankAppearCount = getTopicRankCountThisWeek(group.topic); } catch (e) {}
+                    try { rankAppearCount = getTopicRankCountThisWeek(group.topic, __rankDataForThisRender, __coreTopicsForThisRender); } catch (e) {}
                     const rankAppearText = rankAppearCount > 0 ? ' 上榜' + rankAppearCount + '次' : '';
                     const starText = group.topic !== '其它' ? getStarSymbols(group.starCount) : '';
                     const strengthText = (group.topic !== '其它' && group.strength !== null) ? ' 强度<span style="color:#ef4444;">' + group.strength + '%</span>' : '';
@@ -36791,6 +36808,9 @@
                 if (allTradingDays.length === 0) return { empty: true, placeholder: '暂无交易日数据' };
                 const tradingDays = allTradingDays.slice(0, 5);
                 const auctionData = getGroupData(dataSource);
+                // 性能修复：整个渲染只调用一次 getRankData()（而不是每个题材×每天都调用一次），
+                // 避免反复触发 loadAllData() 内的 syncStocksDataToStore() 响应式写入。
+                const __rankDataForThisRender = getRankData();
                 const allTopicData = {};
                 const __segGetDays = performance.now() - __segT0;
 
@@ -36833,7 +36853,7 @@
                         const strength = group.stocks.length > 0 ? Math.round((strongCount / group.stocks.length) * 100) : 0;
                         let rankAppearCount = 0;
                         const __rcT0 = performance.now();
-                        try { rankAppearCount = getTopicRankCountByDate(group.topic, dateStr); } catch (e) { if (typeof _dbgLog === 'function') _dbgLog('[RANK-CACHE] ⚠️ getTopicRankCountByDate 抛出异常: ' + (e && e.message) + ' | topic=' + group.topic + ' dateStr=' + dateStr); }
+                        try { rankAppearCount = getTopicRankCountByDate(group.topic, dateStr, __rankDataForThisRender); } catch (e) { if (typeof _dbgLog === 'function') _dbgLog('[RANK-CACHE] ⚠️ getTopicRankCountByDate 抛出异常: ' + (e && e.message) + ' | topic=' + group.topic + ' dateStr=' + dateStr); }
                         __segRankCountTotal += performance.now() - __rcT0;
                         allTopicData[group.topic].push({
                             date: dateStr, rankCount: rankAppearCount, starCount: group.starCount,
