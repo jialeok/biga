@@ -8309,6 +8309,44 @@
             try { sessionStorage.setItem(_DBG_LOG_KEY, JSON.stringify(window._dbgLogBuffer)); } catch (e) {}
             console.log(line);
         }
+
+        // ============================================================
+        // [PERF-DEBUG] Vue 看板性能诊断日志（临时调试用，问题定位后可整块删除）
+        // ------------------------------------------------------------
+        // 诊断目标：验证"一次交互 → renderAuction 触发 stocksDataVersion++ →
+        // 四块看板 computed 全部失效重算"的猜想，并量化每块的重算耗时。
+        // 用 requestAnimationFrame 把同一帧内的多次 computed 重算聚合成一条
+        // 日志，这样能直接看到"4 块是否总在同一帧里一起重算"。
+        // ============================================================
+        window._perfPending = window._perfPending || [];
+        window._perfFrameScheduled = false;
+        window._perfLog = function (boardName, dataSource, ms) {
+            window._perfPending.push(boardName + '/' + dataSource + ':' + ms.toFixed(1) + 'ms');
+            if (window._perfFrameScheduled) return;
+            window._perfFrameScheduled = true;
+            requestAnimationFrame(function () {
+                window._perfFrameScheduled = false;
+                const items = window._perfPending;
+                window._perfPending = [];
+                if (items.length === 0) return;
+                const total = items.reduce(function (sum, s) { return sum + parseFloat(s.split(':')[1]); }, 0);
+                _dbgLog('[PERF] 同帧内 computed 重算 x' + items.length + '，合计 ' + total.toFixed(1) + 'ms → ' + items.join(' | '));
+            });
+        };
+        // renderAuction 调用频率计数器：每次 stocksDataVersion++ 都会强制让
+        // 四块看板的 computed 在下次访问时重新判定为脏，用它来看交互频率
+        // 是否远高于"真正需要重算"的频率。
+        window._renderAuctionCallCount = 0;
+        window._renderAuctionLastLogTs = 0;
+        window._logRenderAuctionCall = function (caller) {
+            window._renderAuctionCallCount++;
+            const now = performance.now();
+            // 频率太高时不是每次都打日志（避免日志本身拖慢速度），改为按 300ms 节流汇总
+            if (now - window._renderAuctionLastLogTs > 300) {
+                window._renderAuctionLastLogTs = now;
+                _dbgLog('[PERF] renderAuction() 累计调用 ' + window._renderAuctionCallCount + ' 次（来源: ' + caller + '），stocksDataVersion=' + (window.auctionStore ? auctionStore.stocksDataVersion : '?'));
+            }
+        };
         function showDebugLog() {
             const lines = window._dbgLogBuffer.length ? window._dbgLogBuffer.join('\n') : '（暂无调试日志）';
             const overlay = document.createElement('div');
@@ -18024,6 +18062,9 @@
         let _lastHotRenderDate = null;
 
         function renderAuction(dataSource='auction') {
+            // [PERF-DEBUG] 记录 renderAuction 的调用来源和频率，用于确认每次交互
+            // 是否都触发了 stocksDataVersion++（进而让四块看板 computed 全部失效）
+            window._logRenderAuctionCall((new Error()).stack ? (new Error()).stack.split('\n')[2] || 'unknown' : 'unknown');
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
             // 同步第一页排序开关到 store（Vue 路径读 store；innerHTML 路径仍读 DOM）
             _syncSortStateToStore(dataSource, 1);
@@ -18076,6 +18117,10 @@
             //     applyDerivedTagToRow 预先写入 auctionData 行。
             if (dataSource === 'auction') {
                 auctionStore.stocksDataVersion = (auctionStore.stocksDataVersion || 0) + 1;
+                // [PERF-DEBUG] 这一行是全量失效信号：无论本次 renderAuction 是否真的
+                // 涉及标签变化，都会让四块看板（主列表/第二页/第三页/统计）的 Vue
+                // computed 在下次访问时判定为脏并重算。这里打点确认它的触发频率。
+                _dbgLog('[PERF] stocksDataVersion → ' + auctionStore.stocksDataVersion + '（本次调用会让4块看板 computed 全部标记为待重算）');
             }
             // (2) 高光推送 + 竞/昨空集警示（与 innerHTML 路径 18308-18316 同口径）
             {
@@ -36104,7 +36149,13 @@
                 directives: { longpress: LongPressDirective },
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
-                    const view = Vue.computed(() => computeAuctionViewData(props.dataSource));
+                    const view = Vue.computed(() => {
+                        const __t0 = performance.now();
+                        const __r = computeAuctionViewData(props.dataSource);
+                        const __dt = performance.now() - __t0;
+                        window._perfLog && window._perfLog('AuctionBoard(page1)', props.dataSource, __dt);
+                        return __r;
+                    });
                     const obsItems = Vue.computed(() => view.value.items.slice(0, view.value.obsIndices.length));
                     const regItems = Vue.computed(() => view.value.items.slice(view.value.obsIndices.length));
                     const hasObs = Vue.computed(() => view.value.obsIndices.length > 0);
@@ -36463,7 +36514,12 @@
                 directives: { longpress: LongPressDirective },
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
-                    const view = Vue.computed(() => computeAuctionPage2ViewData(props.dataSource));
+                    const view = Vue.computed(() => {
+                        const __t0 = performance.now();
+                        const __r = computeAuctionPage2ViewData(props.dataSource);
+                        window._perfLog && window._perfLog('Page2Board', props.dataSource, performance.now() - __t0);
+                        return __r;
+                    });
                     function onStrengthSort() { toggleStrengthSort(); }
                     function onStockClick(stock) {
                         const nm = (typeof stock === 'string') ? stock : stock;
@@ -36795,7 +36851,12 @@
                 name: 'Page3Board',
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
-                    const view = Vue.computed(() => computeAuctionPage3ViewData(props.dataSource));
+                    const view = Vue.computed(() => {
+                        const __t0 = performance.now();
+                        const __r = computeAuctionPage3ViewData(props.dataSource);
+                        window._perfLog && window._perfLog('Page3Board', props.dataSource, performance.now() - __t0);
+                        return __r;
+                    });
                     function copyAll(topic) { copyAllTopicStocks(topic, props.dataSource); }
                     function copy5(topic) { copyTopicStocks(topic, 5, props.dataSource); }
                     function copy2(topic) { copyTopicStocks(topic, 2, props.dataSource); }
@@ -36998,7 +37059,12 @@
                 name: 'StatsBoard',
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
-                    const view = Vue.computed(() => computeAuctionStatsViewData(props.dataSource));
+                    const view = Vue.computed(() => {
+                        const __t0 = performance.now();
+                        const __r = computeAuctionStatsViewData(props.dataSource);
+                        window._perfLog && window._perfLog('StatsBoard', props.dataSource, performance.now() - __t0);
+                        return __r;
+                    });
                     return { view };
                 },
                 template: `
