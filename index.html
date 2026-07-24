@@ -11546,6 +11546,7 @@
             const savedDate = localStorage.getItem('lastEditedDate_v42');
             if (savedDate && savedDate >= '2025-01-01') {
                 currentDate = savedDate;
+                if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = savedDate;
             }
             // 触发原有的 DOMContentLoaded 逻辑（已绑定在页面底部）
             _appInit();
@@ -21532,6 +21533,7 @@
             // 仅切换内存中的 currentDate，不调用 saveData()
             // 避免临时跳转日期被写入 lastEditedDate，导致下次打开App日期错乱
             currentDate = dateStr;
+            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = dateStr;
             updateDateDisplay();
             
             // 清除所有高亮
@@ -21594,11 +21596,13 @@
             // 恢复策略：有记录用记录，无记录用 lastEditedDate 兜底，确保日期不乱
             if (jumpInfo && jumpInfo.originalDateStr) {
                 currentDate = jumpInfo.originalDateStr;
+                if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = jumpInfo.originalDateStr;
             } else {
                 // 兜底：从 localStorage 读取上次正常保存的日期
                 const savedDate = localStorage.getItem('lastEditedDate_' + DATA_VERSION);
                 if (savedDate && savedDate >= '2025-01-01') {
                     currentDate = savedDate;
+                    if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = savedDate;
                 }
             }
             updateDateDisplay();
@@ -33656,6 +33660,7 @@
             if (today < '2025-01-01') today = '2025-01-01';
             
             currentDate = today;
+            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = today;
             _persistCurrentDateAsLastEdited(today);
             allData = null;
             setFilter('all');
@@ -33689,6 +33694,7 @@
             if (beforeDate < '2025-01-01') beforeDate = '2025-01-01';
             
             currentDate = beforeDate;
+            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = beforeDate;
             _persistCurrentDateAsLastEdited(beforeDate);
             allData = null;
             setFilter('all');
@@ -33967,6 +33973,7 @@
                 // 找到交易日
                 if (isTradingDay(prevDateStr)) {
                     currentDate = prevDateStr;
+                    if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = prevDateStr;
                     _persistCurrentDateAsLastEdited(prevDateStr);
                     allData = null;
                     showHint('上一交易日');
@@ -34006,6 +34013,7 @@
                 // 找到交易日
                 if (isTradingDay(nextDateStr)) {
                     currentDate = nextDateStr;
+                    if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = nextDateStr;
                     _persistCurrentDateAsLastEdited(nextDateStr);
                     allData = null;
                     showHint('下一交易日');
@@ -35362,6 +35370,7 @@
                             const latestDate = allDates[allDates.length - 1];
                             if (latestDate >= '2025-01-01') {
                                 currentDate = latestDate;
+                                if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = latestDate;
                                 localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
                                 const datePicker = document.getElementById('datePicker');
                                 if (datePicker) datePicker.value = currentDate;
@@ -35612,6 +35621,7 @@
                         const latestDate = allDates[allDates.length - 1];
                         if (latestDate >= '2025-01-01') {
                             currentDate = latestDate;
+                            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = latestDate;
                             localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
                             const datePicker = document.getElementById('datePicker');
                             if (datePicker) datePicker.value = currentDate;
@@ -35778,6 +35788,7 @@
                     _dbgLog('_appInit: currentDate 从 ' + currentDate + ' 跳转为 lastEditedDate=' + lastEditedDate);
                 }
                 currentDate = lastEditedDate;
+                if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = lastEditedDate;
             }
 
             // 延迟执行数据初始化和渲染
@@ -36076,24 +36087,25 @@
             // 只有被读到的行/字段变化才会唤醒对应看板，无关日期写入不再连坐。
             function _buildViewFp(slot, dataSource) {
                 const g = getGroupData(dataSource);
-                const prevDate = getPreviousTradingDay(currentDate);
+                const fpDate = auctionStore.currentDate;
+                const prevDate = getPreviousTradingDay(fpDate);
                 const prevPrevDate = prevDate ? getPreviousTradingDay(prevDate) : null;
                 const sd = auctionStore.stocksData || {};
                 const tab = dataSource === 'hot' ? 'hot' : 'auction';
                 const topicVer = (window._topicCacheVersion || 0);
-                let str = currentDate + '|' + tab + '|' + slot + '|v' + topicVer;
+                let str = fpDate + '|' + tab + '|' + slot + '|v' + topicVer;
                 let rankRef = null;
                 if (slot === 'p1') {
                     const ss = auctionStore.sortState[tab] || {};
-                    str += '|L' + _fpList(g[currentDate]) + 'P' + _fpList(g[prevDate]) + 'Q' + _fpList(g[prevPrevDate]);
-                    str += '|T' + _fpTags(sd[currentDate]) + _fpTags(sd[prevDate]) + '|S' + _fpSoldAll(sd);
-                    str += '|O' + (localStorage.getItem('obsAutoAdded_' + currentDate) || '') + (localStorage.getItem('obsBought_' + currentDate) || '');
+                    str += '|L' + _fpList(g[fpDate]) + 'P' + _fpList(g[prevDate]) + 'Q' + _fpList(g[prevPrevDate]);
+                    str += '|T' + _fpTags(sd[fpDate]) + _fpTags(sd[prevDate]) + '|S' + _fpSoldAll(sd);
+                    str += '|O' + (localStorage.getItem('obsAutoAdded_' + fpDate) || '') + (localStorage.getItem('obsBought_' + fpDate) || '');
                     str += '|R' + (ss.byData ? 1 : 0) + (ss.byRatio ? 1 : 0) + (ss.byParallel ? 1 : 0) + (ss.byJingYest ? 1 : 0);
                     str += '|H' + (auctionStore.highlightStock || '') + '|D' + _fpDuibanLink();
                 } else if (slot === 'p2') {
                     const ss2 = auctionStore.sortStateP2[tab] || {};
-                    str += '|L' + _fpList(g[currentDate]) + 'P' + _fpList(g[prevDate]);
-                    str += '|T' + _fpTags(sd[currentDate]) + _fpTags(sd[prevDate]);
+                    str += '|L' + _fpList(g[fpDate]) + 'P' + _fpList(g[prevDate]);
+                    str += '|T' + _fpTags(sd[fpDate]) + _fpTags(sd[prevDate]);
                     str += '|R' + (ss2.byRatio ? 1 : 0) + (ss2.byParallel ? 1 : 0) + (ss2.byJingYest ? 1 : 0) + (auctionStore.strengthSortEnabled ? 1 : 0);
                     str += '|H' + (auctionStore.highlightStock || '');
                     str += '|C' + (localStorage.getItem('coreTopics') || '');
@@ -36106,8 +36118,8 @@
                     str += '|C' + (localStorage.getItem('coreTopics') || '');
                     rankRef = getRankData();
                 } else { // stats
-                    const yest = getYesterdayDate(currentDate);
-                    str += '|L' + _fpList(g[currentDate]) + 'Y' + _fpList(g[yest]);
+                    const yest = getYesterdayDate(fpDate);
+                    str += '|L' + _fpList(g[fpDate]) + 'Y' + _fpList(g[yest]);
                     str += '|C' + (localStorage.getItem('coreTopics') || '');
                 }
                 return { str, rankRef };
@@ -36131,14 +36143,14 @@
                     return (entry && entry.result) ? entry.result : _VIEW_EMPTY[slot];
                 }
                 const fp = _buildViewFp(slot, dataSource);
-                if (entry && entry.result && entry.fp === fp.str && entry.rankRef === fp.rankRef) {
-                    return entry.result; // 指纹命中：同引用返回，Vue 下游 computed/模板全部跳过
+                if (entry && entry.result && entry.fp === fp.str && entry.rankRef === fp.rankRef && entry.date === storeDate) {
+                    return entry.result; // 指纹命中且日期一致：同引用返回，Vue 下游 computed/模板全部跳过
                 }
                 const __t0 = performance.now();
                 const result = computeFn(dataSource);
                 const __dt = performance.now() - __t0;
                 window._perfLog && window._perfLog(_PERF_BOARD_NAME[slot] || slot, dataSource, __dt);
-                bucket[tab] = { fp: fp.str, rankRef: fp.rankRef, result };
+                bucket[tab] = { fp: fp.str, rankRef: fp.rankRef, result, date: storeDate };
                 return result;
             }
             // 数据被外部强制刷新后（如切换交易日全部重拉），memo 会随指纹自然失效，
@@ -36299,19 +36311,20 @@
             // 把 renderAuction 的纯计算前半段抽成纯数据函数（不碰 DOM、不写副作用）
             function computeAuctionViewData(dataSource) {
                 dataSource = dataSource || 'auction';
+                const viewDate = auctionStore.currentDate;
                 _touchReactiveCtx();
                 const _p = dataSource === 'hot' ? 'hot' : 'auction';
                 buildTopicCache();
                 const auctionList = getTodayGroupList(dataSource);
                 const auctionData = getGroupData(dataSource);
-                const prevDate = getPreviousTradingDay(currentDate);
+                const prevDate = getPreviousTradingDay(viewDate);
                 const prevAuctionList = prevDate ? (auctionData[prevDate] || []) : [];
                 const prevPrevDate = prevDate ? getPreviousTradingDay(prevDate) : null;
                 const prevPrevAuctionList = prevPrevDate ? (auctionData[prevPrevDate] || []) : [];
                 // [PERF-CORE] 预建标签派生缓存：enrich 每行 2 次 deriveAuctionTagState
                 // 原本各自对 stocksData[当日/前日] 做 O(n) 线性 find，整表 O(行数²)，
                 // 预建 Map 后每行 O(1)（与 Page2 已验证的做法一致）。
-                const __tagStateCache = _buildTagStateCache(currentDate);
+                const __tagStateCache = _buildTagStateCache(viewDate);
 
                 // sort toggles（读 store：renderAuction 入口已把 DOM 开关同步到 store；
                 // store 响应式，开关变化时本 computed 自动重算）
@@ -36322,9 +36335,9 @@
                 const sortByJingYestEnabled = _ss.byJingYest;
                 const jingYestToggleChecked = sortByJingYestEnabled;
 
-                const highRatioToday = getHighRatioStocksForDate(currentDate, dataSource);
-                const parallelStocksToday = getParallelStocksForDate(currentDate, dataSource);
-                const jingYestHighlightSet = getJingYestHighlightSetForDate(currentDate, dataSource);
+                const highRatioToday = getHighRatioStocksForDate(viewDate, dataSource);
+                const parallelStocksToday = getParallelStocksForDate(viewDate, dataSource);
+                const jingYestHighlightSet = getJingYestHighlightSetForDate(viewDate, dataSource);
 
                 // duiban tushi 链接（跨看板，与 renderAuction 18096-18106 同口径）
                 const duibanList = getTodayDuiban();
