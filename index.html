@@ -36430,6 +36430,15 @@
                 const auctionData = getGroupData(dataSource);
                 const prevAuctionList = prevDate ? (auctionData[prevDate] || []) : [];
 
+                // 性能修复：enrichedGroups 里同一只股票可能因命中多个题材而重复出现多次，
+                // 原代码对每一行都执行 auctionList.find()/prevAuctionList.find() 做 O(n) 线性查找，
+                // 导致总耗时是 O(题材展开后总行数 × 列表长度) 量级，是"分组后处理"耗时2秒+的主因。
+                // 这里预建 股票名→记录 的 Map，把每行的查找降到 O(1)。
+                const __auctionByName = new Map();
+                auctionList.forEach(it => { if (it && it.stock) __auctionByName.set(it.stock.trim(), it); });
+                const __prevAuctionByName = new Map();
+                prevAuctionList.forEach(it => { if (it && it.stock) __prevAuctionByName.set(it.stock.trim(), it); });
+
                 const highRatioInfo2 = getHighRatioStocksForDate(currentDate, dataSource);
                 // sort toggles（读 store：renderAuctionPage2 入口已把 DOM 开关同步到 store）
                 const _ss2 = auctionStore.sortStateP2[_p];
@@ -36453,7 +36462,7 @@
                     g.stocks.forEach(s => {
                         let hasDown = false;
                         if (prevAuctionList.length > 0 && s.stock) {
-                            const pi = prevAuctionList.find(p => p.stock && p.stock.trim() === s.stock.trim());
+                            const pi = __prevAuctionByName.get(s.stock.trim());
                             if (pi && pi.yestVolume) {
                                 const pv = parseFloat(pi.volume) || 0, py = parseFloat(pi.yestVolume) || 0;
                                 if (py > 0) {
@@ -36486,16 +36495,15 @@
                 // 组内排序（与 renderAuctionPage2 19564-19658 同口径）
                 function sortGroupStocks(stocks) {
                     if (sortByRatioEnabled2) {
-                        const prevForSort = prevAuctionList;
                         return stocks.map((s, pos) => {
                             const nm = s.stock ? s.stock.trim() : '';
                             if (!nm) return { s, pos, ratio: null, digitGap: null, tier: 2 };
-                            const ti = auctionList.find(it => it.stock && it.stock.trim() === nm);
+                            const ti = __auctionByName.get(nm);
                             const tv = ti ? getNumericVolume(ti.volume) : null;
                             const yv = ti ? getNumericVolume(ti.yestVolume) : null;
                             let r = null;
                             if (tv !== null && tv !== 0) {
-                                const pi = prevForSort.find(p => p.stock && p.stock.trim() === nm);
+                                const pi = __prevAuctionByName.get(nm);
                                 const pv = pi ? getNumericVolume(pi.volume) : null;
                                 if (pv !== null && pv !== 0) r = tv / pv;
                             }
@@ -36575,7 +36583,7 @@
 
                         let ratioArrow = '';
                         if (prevAuctionList.length > 0 && stock.stock) {
-                            const pi = prevAuctionList.find(p => p.stock && p.stock.trim() === stock.stock.trim());
+                            const pi = __prevAuctionByName.get(stock.stock.trim());
                             if (pi && pi.yestVolume) {
                                 const pv = parseFloat(pi.volume) || 0, py = parseFloat(pi.yestVolume) || 0;
                                 if (py > 0) {
@@ -36598,7 +36606,7 @@
                         else if (topicCount === 2) { stockStyle = 'color:#1f2937;font-weight:500;'; topicNameStyle = 'color:#6b7280;font-weight:400;'; }
                         else { stockStyle = 'color:rgba(0,0,0,0.6);font-weight:500;'; topicNameStyle = 'color:#6b7280;font-weight:400;'; }
 
-                        const auctionItem = auctionList.find(it => it.stock && it.stock.trim() === stock.stock.trim());
+                        const auctionItem = __auctionByName.get(stock.stock ? stock.stock.trim() : '');
                         let rowClass = 'auction-topic-row';
                         if (auctionItem) {
                             // 方案 B：标签从 stocksData 实时派生，不读 auctionItem.bought/sold/fixed
