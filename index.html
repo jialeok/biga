@@ -36530,6 +36530,7 @@
                 // 渲染顺序 + 四种排序（与 renderAuction 18312-18445 同口径，委托既有 helper）
                 // auction 专属防御：已卖出观察组继承行不参与渲染
                 let renderOrder = auctionList.map((it, idx) => idx);
+                const __rawRenderOrderLen = renderOrder.length; // [TEMP-DEBUG-MEMOVIEW]
                 if (dataSource === 'auction') {
                     renderOrder = renderOrder.filter(function (idx) {
                         const it = auctionList[idx];
@@ -36537,6 +36538,12 @@
                         if (it.obsAutoAdded === true && deriveAuctionTagState(it.stock.trim(), currentDate, __tagStateCache).sold) return false;
                         return true;
                     });
+                }
+                // [TEMP-DEBUG-MEMOVIEW] 打印 auctionList/renderOrder 各阶段长度，定位是哪一步把数组吃空
+                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
+                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] computeAuctionViewData 中段: date=' + currentDate +
+                        ' auctionList.length=' + auctionList.length +
+                        ' rawRenderOrder=' + __rawRenderOrderLen + ' 过滤后renderOrder=' + renderOrder.length);
                 }
                 if (sortByDataEnabled) {
                     const cnt = renderOrder.map(idx => {
@@ -36669,6 +36676,12 @@
                 };
                 const fullOrder = obsIndices.concat(regularIndices);
                 const items = fullOrder.map((i, pos) => enrichAuctionItem(auctionList[i], i, ctx));
+                // [TEMP-DEBUG-MEMOVIEW] 打印最终各阶段长度，定位 items 变空的具体环节
+                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
+                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] computeAuctionViewData 末段: date=' + currentDate +
+                        ' obsIndices=' + obsIndices.length + ' regularIndices=' + regularIndices.length +
+                        ' fullOrder=' + fullOrder.length + ' items=' + items.length);
+                }
 
                 // 聚合统计（与 renderAuction 18170-18304 同口径）
                 const __prevMapForStats = _histRowMapFor(prevAuctionList);
