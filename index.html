@@ -19290,9 +19290,12 @@
 
         // 获取题材分组（使用核心词匹配）
         function getTopicGroups(auctionList) {
+            const __tgT0 = performance.now();
             const coreTopics = getCoreTopics();
+            const __tgAfterCore = performance.now();
             // 预构建历史题材缓存，供当日 note 为空时回退使用
             buildTopicCache();
+            const __tgAfterBuild = performance.now();
             const coreGroups = {};
             
             coreTopics.forEach(core => {
@@ -19300,12 +19303,17 @@
             });
             
             const otherStocks = {};
+            let __tgHistoryFallbackCalls = 0;
+            let __tgHistoryFallbackTime = 0;
             
             auctionList.forEach(item => {
                 let topics = extractTopics(item.note);
                 // 当日 note 为空时，回退到历史题材缓存（从历史日期的 note 中提取）
                 if (topics.length === 0 && item.stock) {
+                    const __hfT0 = performance.now();
                     const historyNote = getStockHistoryTopics(item.stock);
+                    __tgHistoryFallbackTime += performance.now() - __hfT0;
+                    __tgHistoryFallbackCalls++;
                     if (historyNote) {
                         topics = extractTopics(historyNote);
                     }
@@ -19476,6 +19484,10 @@
                 });
             }
 
+            const __tgTotal = performance.now() - __tgT0;
+            if (__tgTotal > 50) {
+                _dbgLog('[PERF-SEG] getTopicGroups 耗时' + __tgTotal.toFixed(1) + 'ms（共' + auctionList.length + '只股票）：getCoreTopics(localStorage)=' + (__tgAfterCore - __tgT0).toFixed(1) + 'ms，buildTopicCache=' + (__tgAfterBuild - __tgAfterCore).toFixed(1) + 'ms，历史题材回退=' + __tgHistoryFallbackTime.toFixed(1) + 'ms（' + __tgHistoryFallbackCalls + '只触发回退，均值' + (__tgHistoryFallbackTime / Math.max(1, __tgHistoryFallbackCalls)).toFixed(2) + 'ms/只），主循环及排序剩余=' + (__tgTotal - (__tgAfterBuild - __tgT0) - __tgHistoryFallbackTime).toFixed(1) + 'ms');
+            }
             return validGroups;
         }
 
@@ -36700,16 +36712,23 @@
                 dataSource = dataSource || 'auction';
                 _touchReactiveCtx();
                 const isStrengthSortEnabled = auctionStore.strengthSortEnabled; // 响应式镜像
+                const __segT0 = performance.now();
                 const allTradingDays = getLastNTradingDays(6);
                 if (allTradingDays.length === 0) return { empty: true, placeholder: '暂无交易日数据' };
                 const tradingDays = allTradingDays.slice(0, 5);
                 const auctionData = getGroupData(dataSource);
                 const allTopicData = {};
+                const __segGetDays = performance.now() - __segT0;
 
+                let __segGetTopicGroupsTotal = 0;
+                let __segGetTopicGroupsCalls = 0;
                 allTradingDays.forEach(dateStr => {
                     const dayAuctionList = auctionData[dateStr] || [];
                     if (dayAuctionList.length === 0) return;
+                    const __gtgT0 = performance.now();
                     const groups = getTopicGroups(dayAuctionList);
+                    __segGetTopicGroupsTotal += performance.now() - __gtgT0;
+                    __segGetTopicGroupsCalls++;
                     groups.forEach(group => {
                         if (group.topic === '其它' || group.topic === '并购重组') return;
                         if (!allTopicData[group.topic]) allTopicData[group.topic] = [];
@@ -36745,6 +36764,7 @@
                         });
                     });
                 });
+                _dbgLog('[PERF-SEG] Page3ViewData/' + dataSource + '：getLastNTradingDays=' + __segGetDays.toFixed(1) + 'ms，getTopicGroups累计=' + __segGetTopicGroupsTotal.toFixed(1) + 'ms（调用' + __segGetTopicGroupsCalls + '次，均值' + (__segGetTopicGroupsTotal / Math.max(1, __segGetTopicGroupsCalls)).toFixed(1) + 'ms/次），_topicCache是否已建=' + (typeof _topicCacheBuilt !== 'undefined' ? _topicCacheBuilt : '?'));
 
                 // 只保留 5 天 + 补全缺失日期
                 const topicData = {};
