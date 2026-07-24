@@ -20297,14 +20297,22 @@
             // 复刻原 .auction-topic-history-* 结构以复用现有 CSS；复制按钮走既有
             // copyAllTopicStocks / copyTopicStocks 全局 handler。数据层无副作用。挂载失败时回退 innerHTML。
             if (typeof window.mountPage3BoardSandbox === 'function') {
+                const __rp3T0 = performance.now();
                 const _vueEl = document.getElementById(_p + 'Content3');
                 if (_vueEl) {
                     if (!window._auctionVuePage3Apps) window._auctionVuePage3Apps = {};
-                    if (!window._auctionVuePage3Apps[_p] || !_vueEl.querySelector('.auction-topic-history-group,.auction-topic-placeholder')) {
+                    const __alreadyMounted = !!window._auctionVuePage3Apps[_p];
+                    const __hasMarker = !!_vueEl.querySelector('.auction-topic-history-group,.auction-topic-placeholder');
+                    if (!__alreadyMounted || !__hasMarker) {
+                        _dbgLog('[PERF-MOUNT] renderAuctionPage3/' + dataSource + ' 判定需要(重新)挂载：已挂载标记=' + __alreadyMounted + '，DOM含标记类=' + __hasMarker);
                         try { window._auctionVuePage3Apps[_p] = window.mountPage3BoardSandbox(dataSource, _p + 'Content3'); }
                         catch (e) { _dbgLog('[AUCTION-VUE] Page3 挂载失败，回退 innerHTML：' + e.message); }
                     }
                     if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
+                    const __rp3Total = performance.now() - __rp3T0;
+                    if (__rp3Total > 30) {
+                        _dbgLog('[PERF-MOUNT] renderAuctionPage3/' + dataSource + ' 总耗时=' + __rp3Total.toFixed(1) + 'ms（含querySelector判断+可能的挂载）');
+                    }
                     return;
                 }
             }
@@ -37237,6 +37245,9 @@
             };
 
             function mountPage3BoardSandbox(dataSource, mountElId) {
+                const __mT0 = performance.now();
+                window._page3MountCount = (window._page3MountCount || 0) + 1;
+                _dbgLog('[PERF-MOUNT] mountPage3BoardSandbox 被调用！第' + window._page3MountCount + '次，dataSource=' + dataSource + '，mountElId=' + mountElId + '（如果这条日志频繁出现，说明 Page3 的 Vue app 被反复重新创建，而不是复用已挂载实例——这是比 computed 重算严重得多的开销）');
                 const el = document.getElementById(mountElId);
                 if (!el) { console.warn('[AUCTION-VUE] Page3 挂载点不存在: ' + mountElId); return null; }
                 const app = Vue.createApp({
@@ -37244,7 +37255,9 @@
                     template: '<page3-board :data-source="ds"></page3-board>',
                     data() { return { ds: dataSource || 'auction' }; }
                 });
-                return app.mount(el);
+                const __result = app.mount(el);
+                _dbgLog('[PERF-MOUNT] mountPage3BoardSandbox 创建+挂载耗时=' + (performance.now() - __mT0).toFixed(1) + 'ms');
+                return __result;
             }
 
             function mountStatsBoardSandbox(dataSource, mountElId) {
