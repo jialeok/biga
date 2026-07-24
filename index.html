@@ -11554,6 +11554,10 @@
 
         function loadAllData() {
             if (!allData) {
+                if (typeof _dbgLog === 'function') {
+                    window._allDataRebuildCount = (window._allDataRebuildCount || 0) + 1;
+                    _dbgLog('[RANK-CACHE] loadAllData 重建 allData（第' + window._allDataRebuildCount + '次，会让 rank 所有日期换新数组引用，rank缓存全部失效）｜来源:' + (new Error().stack || '').split('\n').slice(2, 4).join(' <- '));
+                }
                 if (!localStorage.getItem(_moduleKey('_migrated'))) {
                     _migrateFromV41();
                 }
@@ -21548,20 +21552,28 @@
         // 按 dateStr 缓存一个 Map(topic -> count)，同一天同一题材只算一次。
         // 缓存失效条件：rankData[dateStr] 的数组引用变化（编辑保存/清空/云端拉取都会换新引用），
         // 数组不存在时（如被 delete）也会自然 miss 缓存并返回 0，与原逻辑一致。
+        window._rankCacheStats = { hit: 0, missNoEntry: 0, missRefChanged: 0, missNoTopic: 0 };
         function getTopicRankCountByDate(topic, dateStr) {
             const rankData = getRankData();
             const dayRank = rankData[dateStr];
             if (!dayRank || !Array.isArray(dayRank)) return 0;
 
             let entry = _topicRankByDateCache.get(dateStr);
-            if (!entry || entry.ref !== dayRank) {
+            if (!entry) {
+                window._rankCacheStats.missNoEntry++;
+                entry = { ref: dayRank, map: new Map() };
+                _topicRankByDateCache.set(dateStr, entry);
+            } else if (entry.ref !== dayRank) {
+                window._rankCacheStats.missRefChanged++;
                 entry = { ref: dayRank, map: new Map() };
                 _topicRankByDateCache.set(dateStr, entry);
             }
 
             if (entry.map.has(topic)) {
+                window._rankCacheStats.hit++;
                 return entry.map.get(topic);
             }
+            window._rankCacheStats.missNoTopic++;
 
             let count = 0;
             dayRank.forEach(item => {
@@ -36943,6 +36955,7 @@
 
                 const __segGrandTotal = performance.now() - __segT0;
                 _dbgLog('[PERF-SEG] Page3ViewData/' + dataSource + ' 总耗时=' + __segGrandTotal.toFixed(1) + 'ms ｜ 循环=' + __segLoopTotal.toFixed(1) + 'ms(getTopicGroups=' + __segGetTopicGroupsTotal.toFixed(1) + '/' + __segGetTopicGroupsCalls + '次, rankCount=' + __segRankCountTotal.toFixed(1) + 'ms) ｜ 补全=' + __segFillTotal.toFixed(1) + 'ms ｜ 箭头=' + __segArrowTotal.toFixed(1) + 'ms ｜ 排序=' + __segSortTotal.toFixed(1) + 'ms ｜ 组装HTML=' + __segBuildTotal.toFixed(1) + 'ms（' + validTopics.length + '个题材）');
+                _dbgLog('[RANK-CACHE] hit=' + window._rankCacheStats.hit + ' missNoEntry=' + window._rankCacheStats.missNoEntry + ' missRefChanged=' + window._rankCacheStats.missRefChanged + ' missNoTopic=' + window._rankCacheStats.missNoTopic + ' | cache当前共缓存' + _topicRankByDateCache.size + '天 | allData是否为null=' + (allData === null));
 
                 return { empty: false, dataSource, topics: enrichedTopics, isStrengthSortEnabled };
             }
