@@ -9885,11 +9885,38 @@
                 offset += pageSize;
             }
             _hotAuctionTableAvailable = true;
-            // Vue 化：保持 _hotAuctionData 与 store 代理同引用（与 pullAuctionFromTable 同策略），
-            // 清空旧 keys 后把 result 的日期数组挂到代理上，而非整体替换变量，确保响应式不丢。
+            // [PERF-FIX 2026-07-24] 原实现对响应式代理逐 key delete 再逐 key 赋值
+            // （211 个日期 = 400+ 次独立响应式 trigger），每次 trigger 都可能让
+            // 依赖它的 Vue computed（hot 分组的 AuctionBoard/Page2Board 等）判定为脏
+            // 并在读取时重算，形成"改一点、算一次，算的过程又读到刚变脏的其它日期"
+            // 的连锁反应，实测单帧内计算耗时可达 3000ms+，导致页面卡到无法点击。
+            // 修复：先在普通对象上做完整个 diff（哪些日期要删、哪些要加/更新、哪些
+            // 内容未变可以跳过），只对真正变化的 key 做响应式写入，且只在最后
+            // bump 一次 stocksDataVersion 作为统一失效信号，而不是让每次单独的
+            // 属性增删各自触发一轮依赖失效判定。
             if (auctionStore && _hotAuctionData === auctionStore.hotAuctionData) {
-                Object.keys(_hotAuctionData).forEach(function(d) { delete _hotAuctionData[d]; });
-                Object.keys(result).forEach(function(d) { _hotAuctionData[d] = result[d]; });
+                const _t0 = performance.now();
+                const oldKeys = Object.keys(_hotAuctionData);
+                const newKeys = Object.keys(result);
+                const newKeySet = new Set(newKeys);
+                let _removed = 0, _changed = 0, _unchanged = 0;
+                // 1) 删除云端已不存在的日期
+                oldKeys.forEach(function (d) {
+                    if (!newKeySet.has(d)) { delete _hotAuctionData[d]; _removed++; }
+                });
+                // 2) 只有内容真正变化（JSON 不同）才写入，内容相同的日期跳过，
+                //    避免给没有变化的日期也触发一次响应式 set
+                newKeys.forEach(function (d) {
+                    const oldVal = _hotAuctionData[d];
+                    const newVal = result[d];
+                    if (oldVal === undefined || JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+                        _hotAuctionData[d] = newVal;
+                        _changed++;
+                    } else {
+                        _unchanged++;
+                    }
+                });
+                _dbgLog('[PERF-FIX] loadHotStocksFromCloud 响应式写入：删除' + _removed + '/变化' + _changed + '/未变跳过' + _unchanged + '，diff+写入耗时=' + (performance.now() - _t0).toFixed(1) + 'ms');
             } else {
                 _hotAuctionData = result;
             }
