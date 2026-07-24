@@ -36332,10 +36332,13 @@
                 dataSource = dataSource || 'auction';
                 _touchReactiveCtx();
                 const isStrengthSortEnabled = auctionStore.strengthSortEnabled; // 响应式镜像
+                const __p2T0 = performance.now();
                 const _p = dataSource === 'hot' ? 'hot' : 'auction';
                 const auctionList = getTodayGroupList(dataSource);
                 if (auctionList.length === 0) return { empty: true, placeholder: '暂无数据' };
+                const __p2BeforeGroups = performance.now();
                 const groups = getTopicGroups(auctionList);
+                const __p2AfterGroups = performance.now();
                 if (groups.length === 0) return { empty: true, placeholder: '暂无题材分类数据（双击打开核心词管理）' };
 
                 const prevDate = getPreviousTradingDay(currentDate);
@@ -36551,7 +36554,7 @@
                     };
                 });
 
-                return {
+                const __p2Result = {
                     empty: false,
                     dataSource, _p,
                     groups: enrichedGroups,
@@ -36561,6 +36564,9 @@
                         jingYestCount: jingYestHighlightSet2 ? jingYestHighlightSet2.size : 0
                     }
                 };
+                const __p2Total = performance.now() - __p2T0;
+                _dbgLog('[PERF-SEG] Page2ViewData/' + dataSource + ' 总耗时=' + __p2Total.toFixed(1) + 'ms ｜ getTodayGroupList前=' + (__p2BeforeGroups - __p2T0).toFixed(1) + 'ms ｜ getTopicGroups=' + (__p2AfterGroups - __p2BeforeGroups).toFixed(1) + 'ms ｜ 分组后处理(排序/组装HTML)=' + (__p2Total - (__p2AfterGroups - __p2T0)).toFixed(1) + 'ms（' + groups.length + '个分组）');
+                return __p2Result;
             }
 
             const Page2Board = {
@@ -36722,6 +36728,8 @@
 
                 let __segGetTopicGroupsTotal = 0;
                 let __segGetTopicGroupsCalls = 0;
+                let __segRankCountTotal = 0;
+                const __loopT0 = performance.now();
                 allTradingDays.forEach(dateStr => {
                     const dayAuctionList = auctionData[dateStr] || [];
                     if (dayAuctionList.length === 0) return;
@@ -36756,7 +36764,9 @@
                         });
                         const strength = group.stocks.length > 0 ? Math.round((strongCount / group.stocks.length) * 100) : 0;
                         let rankAppearCount = 0;
+                        const __rcT0 = performance.now();
                         try { rankAppearCount = getTopicRankCountByDate(group.topic, dateStr); } catch (e) {}
+                        __segRankCountTotal += performance.now() - __rcT0;
                         allTopicData[group.topic].push({
                             date: dateStr, rankCount: rankAppearCount, starCount: group.starCount,
                             starText: getStarSymbols(group.starCount), strength, stockCount: group.stocks.length,
@@ -36764,9 +36774,10 @@
                         });
                     });
                 });
-                _dbgLog('[PERF-SEG] Page3ViewData/' + dataSource + '：getLastNTradingDays=' + __segGetDays.toFixed(1) + 'ms，getTopicGroups累计=' + __segGetTopicGroupsTotal.toFixed(1) + 'ms（调用' + __segGetTopicGroupsCalls + '次，均值' + (__segGetTopicGroupsTotal / Math.max(1, __segGetTopicGroupsCalls)).toFixed(1) + 'ms/次），_topicCache是否已建=' + (typeof _topicCacheBuilt !== 'undefined' ? _topicCacheBuilt : '?'));
+                const __segLoopTotal = performance.now() - __loopT0;
 
                 // 只保留 5 天 + 补全缺失日期
+                const __fillT0 = performance.now();
                 const topicData = {};
                 Object.keys(allTopicData).forEach(topic => {
                     topicData[topic] = allTopicData[topic].filter(d => tradingDays.includes(d.date));
@@ -36779,8 +36790,10 @@
                         }
                     });
                 });
+                const __segFillTotal = performance.now() - __fillT0;
 
                 // 强度箭头（规则 A/B），与原 20309-20347 同口径
+                const __arrowT0 = performance.now();
                 Object.keys(topicData).forEach(topic => {
                     topicData[topic].forEach(dayData => {
                         if (!dayData.hasData) { dayData.strengthUp = false; return; }
@@ -36801,13 +36814,18 @@
                         } else dayData.strengthUp = true;
                     });
                 });
+                const __segArrowTotal = performance.now() - __arrowT0;
 
                 const validTopics = Object.entries(topicData)
                     .filter(([topic, data]) => data.filter(d => d.hasData).length >= 2)
                     .map(([topic, data]) => ({ topic, data }));
-                if (validTopics.length === 0) return { empty: true, placeholder: '暂无符合条件的题材（需5日内出现2次以上）' };
+                if (validTopics.length === 0) {
+                    _dbgLog('[PERF-SEG] Page3ViewData/' + dataSource + ' 提前返回(empty)：getLastNTradingDays=' + __segGetDays.toFixed(1) + 'ms，循环总耗时=' + __segLoopTotal.toFixed(1) + 'ms（其中getTopicGroups=' + __segGetTopicGroupsTotal.toFixed(1) + 'ms/' + __segGetTopicGroupsCalls + '次，getTopicRankCountByDate=' + __segRankCountTotal.toFixed(1) + 'ms），补全=' + __segFillTotal.toFixed(1) + 'ms，箭头=' + __segArrowTotal.toFixed(1) + 'ms');
+                    return { empty: true, placeholder: '暂无符合条件的题材（需5日内出现2次以上）' };
+                }
 
                 // 排序（强度模式 / 5 级优先），与原 20359-20425 同口径
+                const __sortT0 = performance.now();
                 validTopics.sort((a, b) => {
                     const todayDate = tradingDays[0], prevDate = tradingDays[1];
                     const aTodayData = a.data.find(d => d.date === todayDate);
@@ -36843,8 +36861,10 @@
                     const bTotal = b.data.filter(d => d.hasData).reduce((s, d) => s + (d.starCount || 0), 0);
                     return bTotal - aTotal;
                 });
+                const __segSortTotal = performance.now() - __sortT0;
 
                 // 组装每行展示数据 + 箭头，与原 20429-20582 同口径
+                const __buildT0 = performance.now();
                 const enrichedTopics = validTopics.map(({ topic, data }) => {
                     data.sort((a, b) => b.date.localeCompare(a.date));
                     const todayData = data.find(d => d.date === currentDate);
@@ -36870,6 +36890,10 @@
                     });
                     return { topic, hasTodayData, rows };
                 });
+                const __segBuildTotal = performance.now() - __buildT0;
+
+                const __segGrandTotal = performance.now() - __segT0;
+                _dbgLog('[PERF-SEG] Page3ViewData/' + dataSource + ' 总耗时=' + __segGrandTotal.toFixed(1) + 'ms ｜ 循环=' + __segLoopTotal.toFixed(1) + 'ms(getTopicGroups=' + __segGetTopicGroupsTotal.toFixed(1) + '/' + __segGetTopicGroupsCalls + '次, rankCount=' + __segRankCountTotal.toFixed(1) + 'ms) ｜ 补全=' + __segFillTotal.toFixed(1) + 'ms ｜ 箭头=' + __segArrowTotal.toFixed(1) + 'ms ｜ 排序=' + __segSortTotal.toFixed(1) + 'ms ｜ 组装HTML=' + __segBuildTotal.toFixed(1) + 'ms（' + validTopics.length + '个题材）');
 
                 return { empty: false, dataSource, topics: enrichedTopics, isStrengthSortEnabled };
             }
