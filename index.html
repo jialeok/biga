@@ -19197,7 +19197,18 @@
             return matchedCores;
         }
 
-        // 统计本周题材在昨日最大成交额看板中出现的次数
+        // ============ 题材上榜次数缓存（性能优化） ============
+        // getTopicRankCountByDate / getTopicRankCountThisWeek 原实现每次调用都会
+        // 重新遍历当天（或本周5天）的完整 rank 列表，且被"按题材分组"逐个调用，
+        // 导致 O(天数 × 题材数 × 当天条目数) 的重复扫描，题材/天数越多越卡，
+        // 且这两个函数在同一次渲染里会被反复触发（Vue computed 重算）。
+        // 这里改为"结果按 (日期,题材) 缓存"，缓存失效只依赖 rankData[dateStr] 的
+        // 数组引用是否变化（手动编辑保存/清除当天数据/云端拉取都会换新数组或删除该 key），
+        // 不需要额外维护版本号，也不改变原有的匹配逻辑，只是不重复算。
+        const _topicRankByDateCache = new Map();   // dateStr -> { ref, map: Map(topic -> count) }
+        const _topicRankWeekDayCache = new Map();  // dateStr -> { ref, coreTopicsRaw, map: Map(topicName -> boolean) }
+
+        // 统计本周题材在昨日最大成交额看板中出现的次数（缓存版，逻辑与原实现完全一致）
         function getTopicRankCountThisWeek(topicName) {
             try {
                 const weekDays = getLast5TradingDays();
@@ -19207,22 +19218,37 @@
                 if (!weekDays || weekDays.length === 0 || !rankData || !coreTopics) {
                     return 0;
                 }
+                const coreTopicsRaw = JSON.stringify(coreTopics);
                 
                 let appearDays = 0;
                 
                 weekDays.forEach(day => {
                     const dayRankList = rankData[day] || [];
-                    // 检查这一天是否有匹配该题材的股票
-                    const hasTopic = dayRankList.some(item => {
-                        if (!item.concept) return false;
-                        // 提取题材概念中的题材
-                        const concepts = item.concept.split(/[,，、\s]+/).filter(c => c.trim());
-                        // 检查是否有匹配核心词的题材
-                        return concepts.some(concept => {
-                            const matchedCores = matchTopicToCore(concept, coreTopics);
-                            return matchedCores.includes(topicName);
+
+                    // 每天的"题材→是否出现"判定结果缓存，key=当天数组引用+coreTopics内容
+                    let dayEntry = _topicRankWeekDayCache.get(day);
+                    if (!dayEntry || dayEntry.ref !== dayRankList || dayEntry.coreTopicsRaw !== coreTopicsRaw) {
+                        dayEntry = { ref: dayRankList, coreTopicsRaw, map: new Map() };
+                        _topicRankWeekDayCache.set(day, dayEntry);
+                    }
+
+                    let hasTopic;
+                    if (dayEntry.map.has(topicName)) {
+                        hasTopic = dayEntry.map.get(topicName);
+                    } else {
+                        // 检查这一天是否有匹配该题材的股票（与原逻辑完全一致）
+                        hasTopic = dayRankList.some(item => {
+                            if (!item.concept) return false;
+                            // 提取题材概念中的题材
+                            const concepts = item.concept.split(/[,，、\s]+/).filter(c => c.trim());
+                            // 检查是否有匹配核心词的题材
+                            return concepts.some(concept => {
+                                const matchedCores = matchTopicToCore(concept, coreTopics);
+                                return matchedCores.includes(topicName);
+                            });
                         });
-                    });
+                        dayEntry.map.set(topicName, hasTopic);
+                    }
                     
                     if (hasTopic) {
                         appearDays++;
@@ -21517,18 +21543,33 @@
             return '★'.repeat(starCount);
         }
 
-        // 获取指定日期的题材上榜次数
+        // 获取指定日期的题材上榜次数（缓存版，逻辑与原实现完全一致）
+        // 原实现每次调用都会重新 forEach 整个当天 rank 列表；这里改成
+        // 按 dateStr 缓存一个 Map(topic -> count)，同一天同一题材只算一次。
+        // 缓存失效条件：rankData[dateStr] 的数组引用变化（编辑保存/清空/云端拉取都会换新引用），
+        // 数组不存在时（如被 delete）也会自然 miss 缓存并返回 0，与原逻辑一致。
         function getTopicRankCountByDate(topic, dateStr) {
             const rankData = getRankData();
             const dayRank = rankData[dateStr];
             if (!dayRank || !Array.isArray(dayRank)) return 0;
-            
+
+            let entry = _topicRankByDateCache.get(dateStr);
+            if (!entry || entry.ref !== dayRank) {
+                entry = { ref: dayRank, map: new Map() };
+                _topicRankByDateCache.set(dateStr, entry);
+            }
+
+            if (entry.map.has(topic)) {
+                return entry.map.get(topic);
+            }
+
             let count = 0;
             dayRank.forEach(item => {
                 if (item.concept && item.concept.includes(topic)) {
                     count++;
                 }
             });
+            entry.map.set(topic, count);
             return count;
         }
 
