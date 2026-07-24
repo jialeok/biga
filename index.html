@@ -12226,6 +12226,15 @@
         function invalidateTopicCache() {
             _topicCache = null;
             _topicCacheBuilt = false;
+            // [PERF-DEBUG] 追踪题材缓存失效频率：若在短时间内被频繁失效，
+            // 每次失效后下一次 getTopicGroups/getStockHistoryTopics 都要重新
+            // 全量扫描最近66天数据，是 Page2/Page3 耗时暴涨的可疑来源之一
+            window._topicCacheInvalidateCount = (window._topicCacheInvalidateCount || 0) + 1;
+            const __now = performance.now();
+            if (window._topicCacheLastInvalidateTs && (__now - window._topicCacheLastInvalidateTs) < 2000) {
+                _dbgLog('[PERF-DEBUG] 题材缓存失效过于频繁：距上次失效仅 ' + (__now - window._topicCacheLastInvalidateTs).toFixed(0) + 'ms（累计失效 ' + window._topicCacheInvalidateCount + ' 次）来源: ' + ((new Error()).stack ? (new Error()).stack.split('\n')[2] : '?'));
+            }
+            window._topicCacheLastInvalidateTs = __now;
         }
 
         function getStockHistoryTopics(stockName) {
@@ -36177,10 +36186,16 @@
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
                     const view = Vue.computed(() => {
+                        window._perfDepth = (window._perfDepth || 0) + 1;
+                        const __myDepth = window._perfDepth;
+                        if (__myDepth > 1) {
+                            _dbgLog('[PERF-REENTRY] AuctionBoard(page1)/' + props.dataSource + ' 在深度' + __myDepth + '触发（说明某个 computed 重算过程中又同步触发了另一个 computed 重算，形成链式反应）');
+                        }
                         const __t0 = performance.now();
                         const __r = computeAuctionViewData(props.dataSource);
                         const __dt = performance.now() - __t0;
                         window._perfLog && window._perfLog('AuctionBoard(page1)', props.dataSource, __dt);
+                        window._perfDepth--;
                         return __r;
                     });
                     const obsItems = Vue.computed(() => view.value.items.slice(0, view.value.obsIndices.length));
@@ -36542,9 +36557,15 @@
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
                     const view = Vue.computed(() => {
+                        window._perfDepth = (window._perfDepth || 0) + 1;
+                        const __myDepth = window._perfDepth;
+                        if (__myDepth > 1) {
+                            _dbgLog('[PERF-REENTRY] Page2Board/' + props.dataSource + ' 在深度' + __myDepth + '触发');
+                        }
                         const __t0 = performance.now();
                         const __r = computeAuctionPage2ViewData(props.dataSource);
                         window._perfLog && window._perfLog('Page2Board', props.dataSource, performance.now() - __t0);
+                        window._perfDepth--;
                         return __r;
                     });
                     function onStrengthSort() { toggleStrengthSort(); }
@@ -36879,9 +36900,15 @@
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
                     const view = Vue.computed(() => {
+                        window._perfDepth = (window._perfDepth || 0) + 1;
+                        const __myDepth = window._perfDepth;
+                        if (__myDepth > 1) {
+                            _dbgLog('[PERF-REENTRY] Page3Board/' + props.dataSource + ' 在深度' + __myDepth + '触发');
+                        }
                         const __t0 = performance.now();
                         const __r = computeAuctionPage3ViewData(props.dataSource);
                         window._perfLog && window._perfLog('Page3Board', props.dataSource, performance.now() - __t0);
+                        window._perfDepth--;
                         return __r;
                     });
                     function copyAll(topic) { copyAllTopicStocks(topic, props.dataSource); }
@@ -37087,9 +37114,15 @@
                 props: { dataSource: { type: String, default: 'auction' } },
                 setup(props) {
                     const view = Vue.computed(() => {
+                        window._perfDepth = (window._perfDepth || 0) + 1;
+                        const __myDepth = window._perfDepth;
+                        if (__myDepth > 1) {
+                            _dbgLog('[PERF-REENTRY] StatsBoard/' + props.dataSource + ' 在深度' + __myDepth + '触发');
+                        }
                         const __t0 = performance.now();
                         const __r = computeAuctionStatsViewData(props.dataSource);
                         window._perfLog && window._perfLog('StatsBoard', props.dataSource, performance.now() - __t0);
+                        window._perfDepth--;
                         return __r;
                     });
                     return { view };
