@@ -10561,20 +10561,29 @@
         // localStorage 名单里的行降级为 in_watchlist=false，并推送纠正结果到云端。
         // 仅在首次运行时执行一次（用 localStorage 标志位保证不重复执行）。
         // ============================================================
+        // ⚠️ 2026-07-25 根因修复：本函数曾把云端 in_watchlist=true 的正式记录
+        // 批量"降级"为影子记录（in_watchlist=false）并覆盖推送云端，判断基准是
+        // localStorage['stockApp_v42_auction']。但 auction 模块早已改为纯云端表+
+        // 内存缓存（见 saveModule/saveData 中 `if (name === 'auction') return;`），
+        // 这个 key 从改造那一刻起就不再被写入、永远停留在改造前的旧快照上。
+        // 结果：只要这个"一次性对账"跑过一次，之后任何一天新导入的正式列表
+        // （不可能出现在那份不会再更新的旧名单里）都会被整批误判为"错误提升的
+        // 影子记录"而被打回去，前台按 in_watchlist===true 过滤后自然就消失了。
+        // Vue 化之后是响应式的，误伤结果会立刻体现在两个 tab 界面上，问题才被看见。
+        // 现在把"降级并推云端"这一步禁用，只保留只读诊断日志：正常情况下命中数应
+        // 该永远是 0；如果仍然 >0，说明还有别的写入路径在制造脏的 in_watchlist=true
+        // 行，需要顺着日志里的股票名/日期另外定位那条写入路径。
         async function reconcileAuctionWatchlistFromLocalStorage() {
             const RECONCILE_FLAG = 'stockApp_v42_auction_reconciled_v1';
             try {
-                if (localStorage.getItem(RECONCILE_FLAG)) return { skipped: true, reason: '已执行过' };
                 const raw = localStorage.getItem('stockApp_v42_auction');
-                if (!raw) { localStorage.setItem(RECONCILE_FLAG, '1'); return { skipped: true, reason: 'localStorage 无数据' }; }
+                if (!raw) {
+                    _dbgLog('[RECONCILE-DEBUG] 跳过：localStorage[stockApp_v42_auction] 无数据（auction 已不再写入此 key，属正常现象）');
+                    return { skipped: true, reason: 'localStorage 无数据', disabled: true };
+                }
                 const parsed = JSON.parse(raw);
-                const sb = getSupabase();
-                if (!sb || !_auctionTableAvailable) { localStorage.setItem(RECONCILE_FLAG, '1'); return { skipped: true, reason: '云端表不可用' }; }
-                const now = new Date().toISOString();
-                const allDemoteUpdates = [];
-                const demoteDetail = [];
+                const wouldDemote = [];
                 Object.keys(parsed).forEach(function(date) {
-                    // 兼容旧格式：stock 字段或 name 字段
                     const lsStocks = new Set((parsed[date] || [])
                         .filter(function(s) { return s && (s.stock || s.name); })
                         .map(function(s) { return (s.stock || s.name).trim(); }));
@@ -10582,37 +10591,25 @@
                     const memRows = _auctionMemCache[date] || [];
                     memRows.forEach(function(row) {
                         if (row && row.stock && row.in_watchlist === true && !lsStocks.has(row.stock.trim())) {
-                            // 不在 localStorage 正式名单里，但被错误提升为 in_watchlist=true → 降级
-                            row.in_watchlist = false;
-                            allDemoteUpdates.push({ date: date, stock: row.stock.trim() });
-                            demoteDetail.push({ date: date, stock: row.stock.trim(), volume: row.volume || '' });
+                            wouldDemote.push({ date: date, stock: row.stock.trim(), volume: row.volume || '' });
                         }
                     });
                 });
-                if (allDemoteUpdates.length > 0) {
-                    // 批量推送到云端（每批 25 个）
-                    const batchSize = 25;
-                    for (let i = 0; i < allDemoteUpdates.length; i += batchSize) {
-                        const batch = allDemoteUpdates.slice(i, i + batchSize);
-                        await Promise.all(batch.map(function(item) {
-                            return sb.from('auction_data')
-                                .update({ in_watchlist: false, updated_at: now, updated_by: 'main-reconcile' })
-                                .eq('date', item.date).eq('stock', item.stock);
-                        }));
-                    }
-                    _dbgLog('[RECONCILE] 影子记录对账完成：降级 ' + allDemoteUpdates.length + ' 只股票');
-                    console.log('[RECONCILE] 影子记录对账完成：降级 ' + allDemoteUpdates.length + ' 只股票', demoteDetail);
+                if (wouldDemote.length > 0) {
+                    _dbgLog('[RECONCILE-DEBUG] ⛔ 降级写入已禁用。若未禁用，本次会误将 ' + wouldDemote.length + ' 只正式记录打回影子记录（基准是过期的 localStorage 旧快照，不可信）：' + wouldDemote.map(function(d){ return d.date + ':' + d.stock; }).join(', '));
+                    console.warn('[RECONCILE-DEBUG] 降级写入已禁用，命中详情：', wouldDemote);
                 } else {
-                    _dbgLog('[RECONCILE] 影子记录对账完成：无需降级（内存与 localStorage 一致）');
+                    _dbgLog('[RECONCILE-DEBUG] 本次对账无命中（0 只会被误伤），符合预期');
                 }
                 localStorage.setItem(RECONCILE_FLAG, '1');
-                return { skipped: false, demoted: allDemoteUpdates.length, detail: demoteDetail };
+                return { skipped: false, demoted: 0, wouldHaveDemoted: wouldDemote.length, detail: wouldDemote, disabled: true };
             } catch (e) {
-                console.warn('[RECONCILE] 影子记录对账失败:', e.message);
+                console.warn('[RECONCILE-DEBUG] 诊断执行失败:', e.message);
                 return { skipped: true, reason: e.message, error: true };
             }
         }
-        // 手动触发入口（控制台执行 reconcileAuctionWatchlist() 可重新对账，忽略已执行标志）
+        // 手动触发入口（控制台执行 reconcileAuctionWatchlist() 可重新跑一次诊断，忽略已执行标志）。
+        // 注意：即使 force=true，也只会打印"本来会命中哪些股票"，不会再写云端。
         window.reconcileAuctionWatchlist = async function(force) {
             if (force) localStorage.removeItem('stockApp_v42_auction_reconciled_v1');
             return await reconcileAuctionWatchlistFromLocalStorage();
@@ -12370,7 +12367,17 @@
                 undefinedRows.forEach(function(r) { r.in_watchlist = true; });
                 _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 in_watchlist 字段缺失的行：' + undefinedRows.length + ' 条（已自动修复为正式列表成员并显示）');
             }
-            return list.filter(function(r) { return r && r.in_watchlist === true; });
+            const result = list.filter(function(r) { return r && r.in_watchlist === true; });
+            // [DEBUG-VUE-FIX 2026-07-25] 暴露"后台有导入记录、前台不显示"这类问题的
+            // 第一手证据：原始条数 vs 实际渲染条数 vs 被过滤掉的影子记录名单。
+            // 只在条数发生变化（有过滤发生）时打印，避免刷屏。
+            if (list.length > 0 && result.length !== list.length) {
+                const filteredOut = list.filter(function(r) { return r && r.in_watchlist !== true; })
+                    .map(function(r) { return (r && r.stock ? r.stock.trim() : '(无名)') + '[in_watchlist=' + (r ? r.in_watchlist : '?') + ']'; });
+                _dbgLog('[AUCTION-DEBUG] getTodayGroupList(' + dataSource + ') currentDate=' + currentDate +
+                    ' 原始' + list.length + '条 → 正式列表' + result.length + '条，被过滤' + filteredOut.length + '条：' + filteredOut.join(', '));
+            }
+            return result;
         }
 
         function buildTopicCache() {
@@ -36304,6 +36311,13 @@
                 const entry = bucket[tab];
                 const visible = (storeGroup === tab) && (pageIdx === null || storePage === pageIdx);
                 if (!visible) {
+                    // [DEBUG-VUE-FIX 2026-07-25] 非当前 tab：即使数据已变化也不会重算，
+                    // 一直返回上次缓存的结果，直到用户切到这个 tab 才会重新计算一次。
+                    // 这是刻意的性能优化（背景 tab 没必要算），但如果你怀疑"切换到某个
+                    // tab 时数据是旧的/跟后台对不上"，这条日志能确认当时拿到的是不是缓存。
+                    if (window._DBG_VERBOSE) {
+                        _dbgLog('[VUE-MEMO-DEBUG] ' + slot + '/' + tab + ' 非当前tab(storeGroup=' + storeGroup + ')，跳过重算，返回' + (entry ? '缓存结果' : '空壳'));
+                    }
                     return (entry && entry.result) ? entry.result : _VIEW_EMPTY[slot];
                 }
                 const fp = _buildViewFp(slot, dataSource);
@@ -36314,6 +36328,12 @@
                 const result = computeFn(dataSource);
                 const __dt = performance.now() - __t0;
                 window._perfLog && window._perfLog(_PERF_BOARD_NAME[slot] || slot, dataSource, __dt);
+                // [DEBUG-VUE-FIX 2026-07-25] 指纹未命中触发了真实重算：打印重算前后
+                // 结果条数，方便对照"重算后条数是否等于后台/接口那边的正式列表条数"。
+                if (slot === 'p1') {
+                    _dbgLog('[VUE-MEMO-DEBUG] ' + slot + '/' + tab + ' 指纹未命中，重算完成：items=' + (result.items ? result.items.length : '?') +
+                        '，耗时' + __dt.toFixed(1) + 'ms' + (entry ? '（上次结果条数=' + (entry.result.items ? entry.result.items.length : '?') + '）' : '（首次计算）'));
+                }
                 bucket[tab] = { fp: fp.str, rankRef: fp.rankRef, result };
                 return result;
             }
