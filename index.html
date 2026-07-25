@@ -33809,6 +33809,15 @@
             requestAnimationFrame(() => {
                 renderList();
                 autoCalculateRecentMultiScore();
+                // [BUG-FIX 2026-07-25] 之前这里漏调 renderAuction()：setCurrentDate 只更新
+                // auctionStore.currentDate（响应式数据源），但 Vue 的 _memoizedView 缓存要等
+                // 真正被"读取"一次才会因指纹变化而重算。renderAuction() 是唯一负责触发这次
+                // 读取/挂载的入口（同时也是 ensureObservationStocks 等副作用的触发点）。
+                // 漏调的后果：切换日期后，第一页早盘竞价看板会继续显示切换前那天缓存在
+                // _viewMemo 里的旧数据（表现为"新日期显示了上一个日期的股票"），直到某个
+                // 无关操作偶然触发一次 computed 重新求值，或用户刷新整个页面（重新挂载
+                // Vue app、_viewMemo 清空重建）才会变回正确数据。
+                renderAuction();
                 renderAuctionPage4();
             });
             refreshJiwangForDateSwitch(newDate);
@@ -33835,6 +33844,9 @@
             requestAnimationFrame(() => {
                 renderList();
                 autoCalculateRecentMultiScore();
+                // [BUG-FIX 2026-07-25] 同 changeDate：补上遗漏的 renderAuction() 调用，
+                // 避免点日期选择器切换后第一页早盘竞价看板显示上一个日期缓存的旧数据。
+                renderAuction();
                 renderAuctionPage4();
             });
             refreshJiwangForDateSwitch(date);
@@ -33862,6 +33874,8 @@
             requestAnimationFrame(() => {
                 renderList();
                 autoCalculateRecentMultiScore();
+                // [BUG-FIX 2026-07-25] 同 changeDate：补上遗漏的 renderAuction() 调用。
+                renderAuction();
                 renderAuctionPage4();
             });
             refreshJiwangForDateSwitch(today);
@@ -33895,6 +33909,8 @@
             renderList();
             // 重新计算评分
             autoCalculateRecentMultiScore();
+            // [BUG-FIX 2026-07-25] 同 changeDate：补上遗漏的 renderAuction() 调用。
+            renderAuction();
             refreshJiwangForDateSwitch(beforeDate);
             showHint('已返回');
         }
@@ -36326,6 +36342,17 @@
                 const tab = dataSource === 'hot' ? 'hot' : 'auction';
                 const bucket = _viewMemo[slot];
                 const entry = bucket[tab];
+                // [DEBUG-VUE-FIX 2026-07-25] 防御性校验：响应式 auctionStore.currentDate
+                // 与全局变量 currentDate（_buildViewFp/computeAuctionViewData 实际取数用的
+                // 那个）理应由 setCurrentDate() 统一同步、永远一致。2026-07-25 发现的真实
+                // bug 就是 changeDate/handleDateSelect/goToday/goBackToCurrent 更新了
+                // store.currentDate 却漏调 renderAuction()，导致取数环节在旧日期指纹的
+                // 缓存上"卡住"，界面显示上一个日期的股票（切日期后串数据，刷新才恢复）。
+                // 已在那四个入口补上 renderAuction() 调用；这里留一道兜底告警，防止未来
+                // 再出现新的调用点犯同样的错误却没人发现。
+                if (typeof currentDate !== 'undefined' && storeDate !== currentDate) {
+                    _dbgLog('[VUE-MEMO-WARN] ⚠️ 日期撕裂：auctionStore.currentDate=' + storeDate + ' ≠ 全局currentDate=' + currentDate + '（' + slot + '/' + tab + '）。可能是某个日期切换入口漏调了 renderAuction()，界面这一刻显示的是旧日期缓存。');
+                }
                 const visible = (storeGroup === tab) && (pageIdx === null || storePage === pageIdx);
                 if (!visible) {
                     // [DEBUG-VUE-FIX 2026-07-25] 非当前 tab：即使数据已变化也不会重算，
