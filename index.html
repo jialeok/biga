@@ -10503,7 +10503,34 @@
             // 1. 云端有但本地无的股票：置 in_watchlist=false（不再物理删除，保留全量快照）
             const toRemove = [];
             cloudStocks.forEach(function(s) { if (!localStocks.has(s)) toRemove.push(s); });
+
+            // === 安全护栏（2026-07-25 新增）===
+            // 历史根因：本函数用"调用这一刻 _auctionMemCache[date] 里有什么"作为"用户真实
+            // 删除了什么"的判断依据。如果调用发生在本地内存缓存尚未加载完整/尚未就绪的时刻
+            // （异步竞态：页面刚打开、tab 切换、后台恢复等），localList 会被误判为"很小"或"空"，
+            // 导致云端该日期几乎全部正式记录被当成"本地已删除"，整批降级为影子记录并直接
+            // 覆盖推送云端——这是持久化写入，不会因为刷新/切页自动恢复。这正是 2026-07-23
+            // 当天 58 只股票全部被误判为 in_watchlist=false 的实际发生机制。
+            // 护栏逻辑：只要本次拟移除的数量占云端已有总数的比例过高（>60%）且云端本来不是空的，
+            // 视为"本地快照可疑地不完整"，只记录诊断日志、跳过这次移除和推送，不做任何破坏性
+            // 改动——把"静默数据丢失"变成"当场拒绝执行+可追溯日志"，且完全不影响正常情况下
+            // （用户真的手动删除少数几只股票）的既有行为。
+            const _cloudTotal = cloudStocks.size;
+            const _removeRatio = _cloudTotal > 0 ? (toRemove.length / _cloudTotal) : 0;
+            const _suspiciousWipe = _cloudTotal > 0 && _removeRatio > 0.6;
+            if (_suspiciousWipe) {
+                _dbgLog('[SYNC-GUARD] ⛔ syncAuctionListForDate date=' + date +
+                    ' 疑似本地快照不完整，已跳过本次批量降级！云端共' + _cloudTotal +
+                    '只，本地仅' + localStocks.size + '只，拟移除' + toRemove.length +
+                    '只（比例' + Math.round(_removeRatio * 100) + '%）。' +
+                    '本地样本：' + ([...localStocks].slice(0, 5).join('、') || '(空)') +
+                    '。若该日期确实需要清空，请手动操作确认；本次不做任何改动。');
+                return;
+            }
             if (toRemove.length > 0) {
+                _dbgLog('[SYNC-GUARD] syncAuctionListForDate date=' + date + ' 正常降级 ' +
+                    toRemove.length + ' 只（云端' + _cloudTotal + '只 → 本地' + localStocks.size +
+                    '只）：' + toRemove.join('、'));
                 await Promise.all(toRemove.map(function(stock) {
                     return sb.from('auction_data')
                         .update({ in_watchlist: false, updated_at: now, updated_by: 'main' })
@@ -10634,12 +10661,31 @@
             // 1. 云端有但本地无的股票：置 in_watchlist=false
             const toRemove = [];
             cloudStocks.forEach(function(s) { if (!localStocks.has(s)) toRemove.push(s); });
+
+            // === 安全护栏（2026-07-25 新增，与 syncAuctionListForDate 同一护栏、同一根因）===
+            // 本地内存快照在调用这一刻可能尚未就绪/不完整，不能拿它当"用户真实删除了什么"的
+            // 判断依据去批量降级并覆盖推送云端。比例过高时只记录日志、跳过，不做任何改动。
+            const _cloudTotalHot = cloudStocks.size;
+            const _removeRatioHot = _cloudTotalHot > 0 ? (toRemove.length / _cloudTotalHot) : 0;
+            const _suspiciousWipeHot = _cloudTotalHot > 0 && _removeRatioHot > 0.6;
+            if (_suspiciousWipeHot) {
+                _dbgLog('[SYNC-GUARD] ⛔ syncHotStocksListForDate date=' + date +
+                    ' 疑似本地快照不完整，已跳过本次批量降级！云端共' + _cloudTotalHot +
+                    '只，本地仅' + localStocks.size + '只，拟移除' + toRemove.length +
+                    '只（比例' + Math.round(_removeRatioHot * 100) + '%）。' +
+                    '本地样本：' + ([...localStocks].slice(0, 5).join('、') || '(空)') +
+                    '。若该日期确实需要清空，请手动操作确认；本次不做任何改动。');
+            } else {
             if (toRemove.length > 0) {
+                _dbgLog('[SYNC-GUARD] syncHotStocksListForDate date=' + date + ' 正常降级 ' +
+                    toRemove.length + ' 只（云端' + _cloudTotalHot + '只 → 本地' + localStocks.size +
+                    '只）：' + toRemove.join('、'));
                 await Promise.all(toRemove.map(function(stock) {
                     return sb.from('hot_stocks')
                         .update({ in_watchlist: false, updated_at: now, updated_by: 'main' })
                         .eq('date', date).eq('stock', stock);
                 }));
+            }
             }
 
             // 2. 插入本地新增的股票（云端无的）
