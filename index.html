@@ -12319,12 +12319,6 @@
         // 阶段六 影子清单修复：auction 分组改用严格 === true，hot 分组保持 !== false 兼容。
         function getTodayGroupList(dataSource='auction') {
             const list = getGroupData(dataSource)[currentDate] || [];
-            // [TEMP-DEBUG-MEMOVIEW] 打印每次读取时的 currentDate 和拿到的原始行数，
-            // 用于核对 _auctionMemCache[currentDate] 底层数据本身干不干净
-            if (dataSource === 'auction' && typeof _dbgLog === 'function') {
-                const _fmt = list.slice(0, 3).map(function(r) { return r && r.stock; }).join(',');
-                _dbgLog('[TEMP-DEBUG-MEMOVIEW] getTodayGroupList 读取: date=' + currentDate + ' 原始行数=' + list.length + ' 前3只=' + _fmt);
-            }
             if (dataSource === 'hot') {
                 // hot 分组行对象不带 in_watchlist 字段（undefined），用 !== false 兼容
                 return list.filter(function(r) { return r && r.in_watchlist !== false; });
@@ -18331,6 +18325,15 @@
             // 是否都触发了 stocksDataVersion++（进而让四块看板 computed 全部失效）
             window._logRenderAuctionCall((new Error()).stack ? (new Error()).stack.split('\n')[2] || 'unknown' : 'unknown');
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
+            // [BUGFIX 2026-07-24] 日期串台修复：auctionStore.currentDate/currentGroup 的同步
+            // 之前被放在函数末尾（Vue 挂载分支 return 之前），导致函数前半部分（高光推送、
+            // renderAuctionPage2/3/StatsBoard 等）执行时 store 里还是"上一次渲染"残留的旧日期。
+            // 若这段窗口期内间接触发了 Vue 主列表 p1 computed 求值（例如 stocksDataVersion 变化），
+            // 它会用旧的 auctionStore.currentDate 算出并缓存一份"看似当前、实际是上一个日期"的
+            // 结果；即使随后 store 日期被更新，Vue 也可能判定无需重新求值，界面就此停在错误
+            // 日期的数据上（表现为"切换到历史日期后仍显示切换前那天的股票"）。
+            // 修复：把同步提到函数最开头，确保后续任何代码读到的都已经是最新日期。
+            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
             // 同步第一页排序开关到 store（Vue 路径读 store；innerHTML 路径仍读 DOM）
             _syncSortStateToStore(dataSource, 1);
             // 日期发生变化时，所有排序/展开开关重置为默认关闭状态（不记忆）；按分组各自记录上次渲染日期
@@ -18430,12 +18433,12 @@
                     }
                     if (_vueMounted) {
                         // store 响应式会自动更新主列表；子页面同步渲染
+                        // （auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复）
                         renderAuctionPage2(dataSource);
                         renderAuctionPage3(dataSource);
                         renderAuctionStatsBoard(dataSource);
                         initAuctionSwipe();
                         window.scrollTo(0, _savedScrollY);
-                        if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
                         return;
                     }
                     // 挂载失败：落到下方 innerHTML 回退路径
@@ -19767,6 +19770,9 @@
         // 渲染第二页（题材分类）
         function renderAuctionPage2(dataSource='auction') {
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
+            // [BUGFIX 2026-07-24] 同 renderAuction 主函数：把 store 日期同步提到函数开头，
+            // 避免函数体内后续代码（含 Vue 挂载检测）读到未更新的旧 auctionStore.currentDate。
+            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
             // 同步第二页排序开关到 store（Vue 路径读 store；innerHTML 路径仍读 DOM）
             _syncSortStateToStore(dataSource, 2);
 
@@ -19786,8 +19792,8 @@
                         catch (e) { _dbgLog('[AUCTION-VUE] Page2 挂载失败，回退 innerHTML：' + e.message); }
                     }
                     // store 响应式会自动更新第二页；恢复用户已展开的题材组（Vue 路径下
-                    // 展开状态已在 store.p2ExpandedTopics，render 时自动恢复，无需再调 DOM 版）
-                    if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
+                    // 展开状态已在 store.p2ExpandedTopics，render 时自动恢复，无需再调 DOM 版；
+                    // auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复）
                     return;
                 }
             }
@@ -20562,6 +20568,8 @@
         // 渲染第三页（题材五日统计）
         function renderAuctionPage3(dataSource='auction') {
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
+            // [BUGFIX 2026-07-24] 同 renderAuction 主函数：把 store 日期同步提到函数开头。
+            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
 
             // ===== Vue 化展示层（全量切换：默认走 Vue，不再依赖特性开关）=====
             // 两个 tab 各自挂载独立 Vue 实例（per-tab app），均由 store 响应式驱动。
@@ -20581,7 +20589,7 @@
                         try { window._auctionVuePage3Apps[_p] = window.mountPage3BoardSandbox(dataSource, _p + 'Content3'); }
                         catch (e) { _dbgLog('[AUCTION-VUE] Page3 挂载失败，回退 innerHTML：' + e.message); }
                     }
-                    if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
+                    // auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复
                     const __rp3Total = performance.now() - __rp3T0;
                     if (__rp3Total > 30) {
                         _dbgLog('[PERF-MOUNT] renderAuctionPage3/' + dataSource + ' 总耗时=' + __rp3Total.toFixed(1) + 'ms（含querySelector判断+可能的挂载）');
@@ -21009,6 +21017,9 @@
         let _lastStarStatsShape = null;
         function renderAuctionStatsBoard(dataSource='auction') {
             const container = document.getElementById('starStatsContent');
+            // [BUGFIX 2026-07-24] 同 renderAuction 主函数：把 store 日期同步提到函数开头，
+            // 放在 container 判空和分组守卫之前，确保即使提前 return 也已同步。
+            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
             if (!container) return;
 
             // 分组守卫：星标签统计看板只有一份 DOM，但"早盘竞价"和"热门股票"是两个独立 tab，
@@ -21036,7 +21047,7 @@
                     }
                     catch (e) { _dbgLog('[AUCTION-VUE] Stats 挂载失败，回退 innerHTML：' + e.message); }
                 }
-                if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
+                // auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复
                 // store 响应式会自动更新看板内容（同 tab 的 Realtime 推送）
                 return;
             }
@@ -33742,19 +33753,8 @@
             _persistCurrentDateAsLastEdited(newDate);
             allData = null;
             setFilter('all');
-            // [TEMP-DEBUG-MEMOVIEW] 切换指令下达时刻的日期快照（changeDate："上一天/下一天"按钮走这里）
-            if (typeof _dbgLog === 'function') {
-                _dbgLog('[TEMP-DEBUG-MEMOVIEW] changeDate 切换指令: newDate=' + newDate +
-                    ' 赋值后currentDate=' + currentDate + ' 赋值后auctionStore.currentDate=' + (auctionStore ? auctionStore.currentDate : 'N/A'));
-            }
             // 使用 requestAnimationFrame 延迟渲染，提高翻页响应速度
             requestAnimationFrame(() => {
-                // [TEMP-DEBUG-MEMOVIEW] rAF 回调实际执行时刻的日期快照
-                if (typeof _dbgLog === 'function') {
-                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] changeDate rAF回调执行: 期望date=' + newDate +
-                        ' 此刻currentDate=' + currentDate + ' 此刻auctionStore.currentDate=' + (auctionStore ? auctionStore.currentDate : 'N/A') +
-                        ' 不一致=' + (currentDate !== newDate));
-                }
                 renderList();
                 autoCalculateRecentMultiScore();
                 renderAuctionPage4();
@@ -33781,19 +33781,7 @@
             _persistCurrentDateAsLastEdited(date);
             allData = null;
             setFilter('all');
-            // [TEMP-DEBUG-MEMOVIEW] 切换指令下达时刻的日期快照
-            if (typeof _dbgLog === 'function') {
-                _dbgLog('[TEMP-DEBUG-MEMOVIEW] handleDateSelect 切换指令: newDate=' + date +
-                    ' 赋值后currentDate=' + currentDate + ' 赋值后auctionStore.currentDate=' + (auctionStore ? auctionStore.currentDate : 'N/A'));
-            }
             requestAnimationFrame(() => {
-                // [TEMP-DEBUG-MEMOVIEW] rAF 回调实际执行时刻的日期快照，
-                // 与上面下达指令时的日期对比，确认这段异步窗口期里日期有没有被别的代码改动过
-                if (typeof _dbgLog === 'function') {
-                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] handleDateSelect rAF回调执行: 期望date=' + date +
-                        ' 此刻currentDate=' + currentDate + ' 此刻auctionStore.currentDate=' + (auctionStore ? auctionStore.currentDate : 'N/A') +
-                        ' 不一致=' + (currentDate !== date));
-                }
                 renderList();
                 autoCalculateRecentMultiScore();
                 renderAuctionPage4();
@@ -36289,46 +36277,17 @@
                 const bucket = _viewMemo[slot];
                 const entry = bucket[tab];
                 const visible = (storeGroup === tab) && (pageIdx === null || storePage === pageIdx);
-                // [TEMP-DEBUG-MEMOVIEW] 临时诊断：暴露 storeDate 与全局 currentDate 是否一致，
-                // 以及本次是"命中缓存"还是"重算"，重算/命中时结果首行股票名分别是什么。
-                // 排查"切换历史日期后仍显示今天数据"问题专用，问题定位后应删除本段。
-                if (slot === 'p1' && typeof _dbgLog === 'function') {
-                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] slot=' + slot + ' tab=' + tab + ' storeDate=' + storeDate +
-                        ' globalCurrentDate=' + currentDate + ' dateMismatch=' + (storeDate !== currentDate) +
-                        ' visible=' + visible + ' storeGroup=' + storeGroup + ' storePage=' + storePage);
-                }
                 if (!visible) {
-                    if (slot === 'p1' && typeof _dbgLog === 'function') {
-                        _dbgLog('[TEMP-DEBUG-MEMOVIEW] 不可见分支返回，entry存在=' + !!(entry && entry.result));
-                    }
                     return (entry && entry.result) ? entry.result : _VIEW_EMPTY[slot];
                 }
                 const fp = _buildViewFp(slot, dataSource);
                 if (entry && entry.result && entry.fp === fp.str && entry.rankRef === fp.rankRef) {
-                    // [TEMP-DEBUG-MEMOVIEW] 缓存命中：result.date 是当初算这份缓存时的 currentDate，
-                    // 与本次 storeDate/全局currentDate 对比，即可确认命中的缓存是不是"串日期"了
-                    if (slot === 'p1' && typeof _dbgLog === 'function') {
-                        const _resDate = entry.result && entry.result.date;
-                        const _itemCount = entry.result && entry.result.items ? entry.result.items.length : -1;
-                        _dbgLog('[TEMP-DEBUG-MEMOVIEW] ✅命中缓存 tab=' + tab + ' 期望日期=' + currentDate +
-                            ' 缓存结果.date=' + _resDate + ' 日期不符=' + (_resDate !== currentDate) +
-                            ' items数=' + _itemCount + ' fp=' + fp.str.slice(0, 100));
-                    }
                     return entry.result; // 指纹命中：同引用返回，Vue 下游 computed/模板全部跳过
                 }
                 const __t0 = performance.now();
                 const result = computeFn(dataSource);
                 const __dt = performance.now() - __t0;
                 window._perfLog && window._perfLog(_PERF_BOARD_NAME[slot] || slot, dataSource, __dt);
-                // [TEMP-DEBUG-MEMOVIEW] 重算：核对刚重算出来的 result.date 是不是本次期望的日期
-                if (slot === 'p1' && typeof _dbgLog === 'function') {
-                    const _resDate2 = result && result.date;
-                    const _itemCount2 = result && result.items ? result.items.length : -1;
-                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] 🔄重算完成 tab=' + tab + ' 期望日期=' + currentDate +
-                        ' 重算结果.date=' + _resDate2 + ' 日期不符=' + (_resDate2 !== currentDate) +
-                        ' items数=' + _itemCount2 + ' 旧fp=' + (entry ? entry.fp.slice(0,60) : '(无旧entry)') +
-                        ' 新fp=' + fp.str.slice(0, 100));
-                }
                 bucket[tab] = { fp: fp.str, rankRef: fp.rankRef, result };
                 return result;
             }
@@ -36530,7 +36489,6 @@
                 // 渲染顺序 + 四种排序（与 renderAuction 18312-18445 同口径，委托既有 helper）
                 // auction 专属防御：已卖出观察组继承行不参与渲染
                 let renderOrder = auctionList.map((it, idx) => idx);
-                const __rawRenderOrderLen = renderOrder.length; // [TEMP-DEBUG-MEMOVIEW]
                 if (dataSource === 'auction') {
                     renderOrder = renderOrder.filter(function (idx) {
                         const it = auctionList[idx];
@@ -36538,12 +36496,6 @@
                         if (it.obsAutoAdded === true && deriveAuctionTagState(it.stock.trim(), currentDate, __tagStateCache).sold) return false;
                         return true;
                     });
-                }
-                // [TEMP-DEBUG-MEMOVIEW] 打印 auctionList/renderOrder 各阶段长度，定位是哪一步把数组吃空
-                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
-                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] computeAuctionViewData 中段: date=' + currentDate +
-                        ' auctionList.length=' + auctionList.length +
-                        ' rawRenderOrder=' + __rawRenderOrderLen + ' 过滤后renderOrder=' + renderOrder.length);
                 }
                 if (sortByDataEnabled) {
                     const cnt = renderOrder.map(idx => {
@@ -36676,12 +36628,6 @@
                 };
                 const fullOrder = obsIndices.concat(regularIndices);
                 const items = fullOrder.map((i, pos) => enrichAuctionItem(auctionList[i], i, ctx));
-                // [TEMP-DEBUG-MEMOVIEW] 打印最终各阶段长度，定位 items 变空的具体环节
-                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
-                    _dbgLog('[TEMP-DEBUG-MEMOVIEW] computeAuctionViewData 末段: date=' + currentDate +
-                        ' obsIndices=' + obsIndices.length + ' regularIndices=' + regularIndices.length +
-                        ' fullOrder=' + fullOrder.length + ' items=' + items.length);
-                }
 
                 // 聚合统计（与 renderAuction 18170-18304 同口径）
                 const __prevMapForStats = _histRowMapFor(prevAuctionList);
