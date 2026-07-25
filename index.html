@@ -18158,6 +18158,13 @@
         function renderAuctionForm() {
             const auctionList = getTodayGroupList(currentGroup);
             const formContainer = document.getElementById('auctionFormContainer');
+            // [BUGFIX 2026-07-24] 表单是普通 HTML <form>，不受 Vue 响应式驱动，切换日期时
+            // 不会自动清空/刷新。移动端偶发的隐式提交（页面从后台切回前台时浏览器重放挂起的
+            // 表单提交、或输入法回车触发默认提交）会绕过用户主动点"保存"，此时若表单里还是
+            // 上一个日期渲染的内容，saveAuction 会把这些旧内容误保存进新的 currentDate，
+            // 造成"切换日期后历史日期显示了另一天的股票"。这里打上绑定日期标记供核对。
+            formContainer.dataset.boundDate = currentDate;
+            formContainer.dataset.boundGroup = currentGroup;
 
             if (auctionList.length === 0) {
                 formContainer.innerHTML = `
@@ -18193,6 +18200,20 @@
             e.preventDefault();
 
             const targetDate = auctionStore ? auctionStore.currentDate : currentDate;
+            const formContainer = document.getElementById('auctionFormContainer');
+            // [BUGFIX 2026-07-24] 核对表单实际渲染时绑定的日期/分组，与本次要写入的
+            // targetDate/currentGroup 是否一致。移动端偶发的隐式表单提交（页面从后台
+            // 切回前台时浏览器重放挂起的提交、或输入法回车触发默认提交）可能绕过用户
+            // 主动点"保存"；若此时表单里还是上一个日期渲染的旧内容，直接写入会把旧
+            // 日期的股票误保存进新日期。检测到不一致时拒绝这次保存，只记录日志，不弹窗
+            // 打扰用户（这种提交本就不是用户主动发起的）。
+            const _boundDate = formContainer ? formContainer.dataset.boundDate : null;
+            const _boundGroup = formContainer ? formContainer.dataset.boundGroup : null;
+            if (_boundDate && (_boundDate !== targetDate || _boundGroup !== currentGroup)) {
+                _dbgLog('[AUCTION-GUARD] ⚠️ saveAuction 拒绝保存：表单绑定日期=' + _boundDate + '/' + _boundGroup +
+                    ' ≠ 目标日期=' + targetDate + '/' + currentGroup + '，判定为日期切换期间的意外提交，已阻止写入');
+                return;
+            }
             _dbgLog('[AUCTION-WRITE] saveAuction targetDate=' + targetDate + ' group=' + currentGroup);
 
             // 保存前备份（用于撤回）
@@ -18201,7 +18222,6 @@
             // 预建题材缓存：避免下面循环里对每只无注释的股票单独扫描最近66天历史数据（股票多时会明显卡顿）
             buildTopicCache();
 
-            const formContainer = document.getElementById('auctionFormContainer');
             const rows = formContainer.querySelectorAll('.auction-form-row');
             const existingList = getTodayGroupList(currentGroup);
             const auctionList = [];
