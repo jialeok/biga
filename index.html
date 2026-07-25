@@ -8323,6 +8323,19 @@
             if (window._dbgLogBuffer.length > 200) window._dbgLogBuffer.shift();
             _dbgFlushToSession();
             console.log(line);
+            // #region debug-point Z:forward-to-debug-server
+            try {
+                window._debugServerQueue = window._debugServerQueue || [];
+                window._debugServerQueue.push({ sessionId: 'auction-cross-date-leak', runId: 'post-fix', hypothesisId: 'Z', location: location.href, msg: line, ts: Date.now() });
+                if (!window._debugServerTimer) {
+                    window._debugServerTimer = setInterval(function () {
+                        if (!window._debugServerQueue || !window._debugServerQueue.length) return;
+                        var batch = window._debugServerQueue.splice(0, window._debugServerQueue.length);
+                        fetch('/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch.length === 1 ? batch[0] : batch), keepalive: true }).catch(function () {});
+                    }, 500);
+                }
+            } catch (e) {}
+            // #endregion
         }
 
         // ============================================================
@@ -11437,9 +11450,16 @@
             catch (e) { return ''; }
         }
         function _guardAssertDate(date, source) {
-            if (typeof auctionStore !== 'undefined' && auctionStore && auctionStore.currentDate && date !== auctionStore.currentDate) {
+            try {
+                if (!auctionStore) return;
+                if (date === auctionStore.currentDate) return;
+                var OK = ['pullAuctionFromTable','clearAllAuctionDates','restore','handleFileImport','importAuctionHistoryFill'];
+                if (OK.indexOf(source) >= 0) {
+                    _dbgLog('[AUCTION-GUARD] cross-date-ok date=' + date + ' source=' + source);
+                    return;
+                }
                 _dbgLog('[AUCTION-GUARD] ⚠️ date=' + date + ' ≠ auctionStore.currentDate=' + auctionStore.currentDate + ' source=' + source);
-            }
+            } catch(e){}
         }
         var _auctionFirstClearDumped = false;
         function _dumpAuctionSnapshot(label) {
@@ -11459,6 +11479,9 @@
             _auctionMemCache[date] = newList || [];
             var after = (_auctionMemCache[date] || []).length;
             _dbgLog('[AUCTION-GUARD] set date=' + date + ' before=' + before + ' after=' + after + ' source=' + source + _guardStack());
+            if (auctionStore && date !== auctionStore.currentDate) {
+                try { _dbgLog('[AUCTION-GUARD] sample date=' + date + ' source=' + source + ' stocks=' + (newList||[]).slice(0,3).map(function(r){return r&&r.stock||'?';}).join(',')); } catch(e){}
+            }
             _guardAssertDate(date, source);
         }
         function clearAuctionDateData(date, source) {
@@ -11467,6 +11490,9 @@
             var before = (_auctionMemCache[date] || []).length;
             _auctionMemCache[date] = [];
             _dbgLog('[AUCTION-GUARD] clear date=' + date + ' before=' + before + ' after=0 source=' + source + _guardStack());
+            if (auctionStore && date !== auctionStore.currentDate) {
+                try { _dbgLog('[AUCTION-GUARD] sample-clear date=' + date + ' source=' + source); } catch(e){}
+            }
             _guardAssertDate(date, source);
             if (!_auctionFirstClearDumped) { _auctionFirstClearDumped = true; _dumpAuctionSnapshot('after-first-clear'); }
         }
@@ -11489,6 +11515,9 @@
             });
             var after = list.length;
             _dbgLog('[AUCTION-GUARD] merge date=' + date + ' before=' + before + ' after=' + after + ' source=' + source + _guardStack());
+            if (auctionStore && date !== auctionStore.currentDate) {
+                try { _dbgLog('[AUCTION-GUARD] sample date=' + date + ' source=' + source + ' stocks=' + (rows||[]).slice(0,3).map(function(r){return r&&r.stock||'?';}).join(',')); } catch(e){}
+            }
             _guardAssertDate(date, source);
         }
         function clearAllAuctionDates(source) {
@@ -11620,7 +11649,7 @@
             // currentDate 已在顶层初始化，重新读取一次 localStorage（pullFromCloud 可能更新了）
             const savedDate = localStorage.getItem('lastEditedDate_v42');
             if (savedDate && savedDate >= '2025-01-01') {
-                currentDate = savedDate;
+                setCurrentDate(savedDate);
             }
             // 触发原有的 DOMContentLoaded 逻辑（已绑定在页面底部）
             _appInit();
@@ -11647,10 +11676,20 @@
             const year = now.getFullYear();
             const month = String(now.getMonth() + 1).padStart(2, '0');
             const day = String(now.getDate()).padStart(2, '0');
-            currentDate = `${year}-${month}-${day}`;
+            setCurrentDate(`${year}-${month}-${day}`);
         }
-        if (currentDate < '2025-01-01') currentDate = '2025-01-01';
-        if (auctionStore) auctionStore.currentDate = currentDate; // Vue 化：初始同步
+        if (currentDate < '2025-01-01') setCurrentDate('2025-01-01');
+        // 统一日期写入口：同时更新全局 currentDate 与响应式 auctionStore.currentDate，
+        // 杜绝"全局已切、store 未跟"导致的跨日期写错位（fetchLadderConstituentsMain 等以
+        // auctionStore.currentDate 为 targetDate，store 滞后会把今天的数据写到旧日期）。
+        // 不在此处做 localStorage 持久化——persist 仍由 _persistCurrentDateAsLastEdited 负责，
+        // 以保留 jumpFromPage3ToPage2 等"仅切内存不 persist"的语义。
+        function setCurrentDate(newDate) {
+            currentDate = newDate;
+            if (typeof auctionStore !== 'undefined' && auctionStore) {
+                auctionStore.currentDate = newDate;
+            }
+        }
         _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0804-RANKCACHE-FIX（找到真正瓶颈：getRankData每题材调用N次→改为每次渲染只调用1次，避免反复触发响应式store写入）');
         _dbgLog('[AUCTION-GUARD] selfCheck active=true refIdentity=' + (_auctionMemCache === (typeof auctionStore !== 'undefined' && auctionStore ? auctionStore.auctionData : null)) + ' dates=' + Object.keys(_auctionMemCache || {}).length);
 
@@ -18158,13 +18197,6 @@
         function renderAuctionForm() {
             const auctionList = getTodayGroupList(currentGroup);
             const formContainer = document.getElementById('auctionFormContainer');
-            // [BUGFIX 2026-07-24] 表单是普通 HTML <form>，不受 Vue 响应式驱动，切换日期时
-            // 不会自动清空/刷新。移动端偶发的隐式提交（页面从后台切回前台时浏览器重放挂起的
-            // 表单提交、或输入法回车触发默认提交）会绕过用户主动点"保存"，此时若表单里还是
-            // 上一个日期渲染的内容，saveAuction 会把这些旧内容误保存进新的 currentDate，
-            // 造成"切换日期后历史日期显示了另一天的股票"。这里打上绑定日期标记供核对。
-            formContainer.dataset.boundDate = currentDate;
-            formContainer.dataset.boundGroup = currentGroup;
 
             if (auctionList.length === 0) {
                 formContainer.innerHTML = `
@@ -18200,20 +18232,6 @@
             e.preventDefault();
 
             const targetDate = auctionStore ? auctionStore.currentDate : currentDate;
-            const formContainer = document.getElementById('auctionFormContainer');
-            // [BUGFIX 2026-07-24] 核对表单实际渲染时绑定的日期/分组，与本次要写入的
-            // targetDate/currentGroup 是否一致。移动端偶发的隐式表单提交（页面从后台
-            // 切回前台时浏览器重放挂起的提交、或输入法回车触发默认提交）可能绕过用户
-            // 主动点"保存"；若此时表单里还是上一个日期渲染的旧内容，直接写入会把旧
-            // 日期的股票误保存进新日期。检测到不一致时拒绝这次保存，只记录日志，不弹窗
-            // 打扰用户（这种提交本就不是用户主动发起的）。
-            const _boundDate = formContainer ? formContainer.dataset.boundDate : null;
-            const _boundGroup = formContainer ? formContainer.dataset.boundGroup : null;
-            if (_boundDate && (_boundDate !== targetDate || _boundGroup !== currentGroup)) {
-                _dbgLog('[AUCTION-GUARD] ⚠️ saveAuction 拒绝保存：表单绑定日期=' + _boundDate + '/' + _boundGroup +
-                    ' ≠ 目标日期=' + targetDate + '/' + currentGroup + '，判定为日期切换期间的意外提交，已阻止写入');
-                return;
-            }
             _dbgLog('[AUCTION-WRITE] saveAuction targetDate=' + targetDate + ' group=' + currentGroup);
 
             // 保存前备份（用于撤回）
@@ -18222,6 +18240,7 @@
             // 预建题材缓存：避免下面循环里对每只无注释的股票单独扫描最近66天历史数据（股票多时会明显卡顿）
             buildTopicCache();
 
+            const formContainer = document.getElementById('auctionFormContainer');
             const rows = formContainer.querySelectorAll('.auction-form-row');
             const existingList = getTodayGroupList(currentGroup);
             const auctionList = [];
@@ -18341,19 +18360,16 @@
         let _lastHotRenderDate = null;
 
         function renderAuction(dataSource='auction') {
+            try {
+                var _rows = (typeof getAuctionData === 'function' && getAuctionData()[currentDate]) || (auctionStore && auctionStore.auctionData && auctionStore.auctionData[currentDate]) || [];
+                var _sample = _rows.slice(0,3).map(function(r){return r&&r.stock||'?';}).join(',');
+                var _flag = (auctionStore && currentDate !== auctionStore.currentDate) ? ' ⚠️' : '';
+                _dbgLog('[AUCTION-RENDER] currentDate=' + currentDate + ' auctionStore.currentDate=' + (auctionStore&&auctionStore.currentDate) + ' rows=' + _rows.length + ' sample=' + _sample + _flag);
+            } catch(e){}
             // [PERF-DEBUG] 记录 renderAuction 的调用来源和频率，用于确认每次交互
             // 是否都触发了 stocksDataVersion++（进而让四块看板 computed 全部失效）
             window._logRenderAuctionCall((new Error()).stack ? (new Error()).stack.split('\n')[2] || 'unknown' : 'unknown');
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
-            // [BUGFIX 2026-07-24] 日期串台修复：auctionStore.currentDate/currentGroup 的同步
-            // 之前被放在函数末尾（Vue 挂载分支 return 之前），导致函数前半部分（高光推送、
-            // renderAuctionPage2/3/StatsBoard 等）执行时 store 里还是"上一次渲染"残留的旧日期。
-            // 若这段窗口期内间接触发了 Vue 主列表 p1 computed 求值（例如 stocksDataVersion 变化），
-            // 它会用旧的 auctionStore.currentDate 算出并缓存一份"看似当前、实际是上一个日期"的
-            // 结果；即使随后 store 日期被更新，Vue 也可能判定无需重新求值，界面就此停在错误
-            // 日期的数据上（表现为"切换到历史日期后仍显示切换前那天的股票"）。
-            // 修复：把同步提到函数最开头，确保后续任何代码读到的都已经是最新日期。
-            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
             // 同步第一页排序开关到 store（Vue 路径读 store；innerHTML 路径仍读 DOM）
             _syncSortStateToStore(dataSource, 1);
             // 日期发生变化时，所有排序/展开开关重置为默认关闭状态（不记忆）；按分组各自记录上次渲染日期
@@ -18453,12 +18469,12 @@
                     }
                     if (_vueMounted) {
                         // store 响应式会自动更新主列表；子页面同步渲染
-                        // （auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复）
                         renderAuctionPage2(dataSource);
                         renderAuctionPage3(dataSource);
                         renderAuctionStatsBoard(dataSource);
                         initAuctionSwipe();
                         window.scrollTo(0, _savedScrollY);
+                        if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
                         return;
                     }
                     // 挂载失败：落到下方 innerHTML 回退路径
@@ -19790,9 +19806,6 @@
         // 渲染第二页（题材分类）
         function renderAuctionPage2(dataSource='auction') {
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
-            // [BUGFIX 2026-07-24] 同 renderAuction 主函数：把 store 日期同步提到函数开头，
-            // 避免函数体内后续代码（含 Vue 挂载检测）读到未更新的旧 auctionStore.currentDate。
-            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
             // 同步第二页排序开关到 store（Vue 路径读 store；innerHTML 路径仍读 DOM）
             _syncSortStateToStore(dataSource, 2);
 
@@ -19812,8 +19825,8 @@
                         catch (e) { _dbgLog('[AUCTION-VUE] Page2 挂载失败，回退 innerHTML：' + e.message); }
                     }
                     // store 响应式会自动更新第二页；恢复用户已展开的题材组（Vue 路径下
-                    // 展开状态已在 store.p2ExpandedTopics，render 时自动恢复，无需再调 DOM 版；
-                    // auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复）
+                    // 展开状态已在 store.p2ExpandedTopics，render 时自动恢复，无需再调 DOM 版）
+                    if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
                     return;
                 }
             }
@@ -20588,8 +20601,6 @@
         // 渲染第三页（题材五日统计）
         function renderAuctionPage3(dataSource='auction') {
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
-            // [BUGFIX 2026-07-24] 同 renderAuction 主函数：把 store 日期同步提到函数开头。
-            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
 
             // ===== Vue 化展示层（全量切换：默认走 Vue，不再依赖特性开关）=====
             // 两个 tab 各自挂载独立 Vue 实例（per-tab app），均由 store 响应式驱动。
@@ -20609,7 +20620,7 @@
                         try { window._auctionVuePage3Apps[_p] = window.mountPage3BoardSandbox(dataSource, _p + 'Content3'); }
                         catch (e) { _dbgLog('[AUCTION-VUE] Page3 挂载失败，回退 innerHTML：' + e.message); }
                     }
-                    // auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复
+                    if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
                     const __rp3Total = performance.now() - __rp3T0;
                     if (__rp3Total > 30) {
                         _dbgLog('[PERF-MOUNT] renderAuctionPage3/' + dataSource + ' 总耗时=' + __rp3Total.toFixed(1) + 'ms（含querySelector判断+可能的挂载）');
@@ -21037,9 +21048,6 @@
         let _lastStarStatsShape = null;
         function renderAuctionStatsBoard(dataSource='auction') {
             const container = document.getElementById('starStatsContent');
-            // [BUGFIX 2026-07-24] 同 renderAuction 主函数：把 store 日期同步提到函数开头，
-            // 放在 container 判空和分组守卫之前，确保即使提前 return 也已同步。
-            if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
             if (!container) return;
 
             // 分组守卫：星标签统计看板只有一份 DOM，但"早盘竞价"和"热门股票"是两个独立 tab，
@@ -21067,7 +21075,7 @@
                     }
                     catch (e) { _dbgLog('[AUCTION-VUE] Stats 挂载失败，回退 innerHTML：' + e.message); }
                 }
-                // auctionStore.currentDate/currentGroup 已在函数开头同步，此处无需重复
+                if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
                 // store 响应式会自动更新看板内容（同 tab 的 Realtime 推送）
                 return;
             }
@@ -21693,7 +21701,7 @@
             
             // 仅切换内存中的 currentDate，不调用 saveData()
             // 避免临时跳转日期被写入 lastEditedDate，导致下次打开App日期错乱
-            currentDate = dateStr;
+            setCurrentDate(dateStr);
             updateDateDisplay();
             
             // 清除所有高亮
@@ -21755,12 +21763,12 @@
             // Bug2修复：即使 jumpInfo 为 null（用户中途手动滑页），也能安全恢复
             // 恢复策略：有记录用记录，无记录用 lastEditedDate 兜底，确保日期不乱
             if (jumpInfo && jumpInfo.originalDateStr) {
-                currentDate = jumpInfo.originalDateStr;
+                setCurrentDate(jumpInfo.originalDateStr);
             } else {
                 // 兜底：从 localStorage 读取上次正常保存的日期
                 const savedDate = localStorage.getItem('lastEditedDate_' + DATA_VERSION);
                 if (savedDate && savedDate >= '2025-01-01') {
-                    currentDate = savedDate;
+                    setCurrentDate(savedDate);
                 }
             }
             updateDateDisplay();
@@ -23564,6 +23572,7 @@
                 const name = s.stock.trim();
                 if (deriveAuctionTagState(name, date).sold) {
                     _dbgLogVerbose('[OBS-ENSURE] 清除已确认卖出的观察组继承脏行: ' + name);
+                    try { _dbgLog('[OBS-ENSURE] 清除已确认卖出的观察组继承脏行: ' + name); } catch(e){}
                     autoAddedSet.delete(name);
                     hasNew = true;
                     return false;
@@ -23588,6 +23597,7 @@
             }
 
             if (hasNew) {
+                try { _dbgLog('[OBS-ENSURE] date=' + date + ' before=' + dayList.length + ' after=' + cleanedList.length + ' stocks=' + (cleanedList||[]).slice(0,3).map(function(r){return r&&r.stock||'?';}).join(',')); } catch(e){}
                 setAuctionDateData(date, cleanedList, 'ensureObservationStocks');
                 saveModule('auction');
                 markAuctionDirty(date);
@@ -23631,6 +23641,7 @@
             if (!prevDay) return;
 
             _dbgLogVerbose('[BOUGHT-ENSURE] enter date=' + date + ' prevDay=' + prevDay);
+            try { _dbgLog('[BOUGHT-ENSURE] enter date=' + date + ' prevDay=' + prevDay); } catch(e){}
 
             // 权威来源只用 getStocksData()（点击"卖/买/持有"标签直接写入的地方，
             // 只有用户真正操作过的股票才会出现），不再看 auctionData[prevDay]。
@@ -23744,6 +23755,7 @@
             });
 
             if (hasNew) {
+                try { _dbgLog('[BOUGHT-ENSURE] date=' + date + ' added=' + addedCount + ' stocks=' + (holdingNames||[]).slice(0,3).join(',')); } catch(e){}
                 auctionData[date] = dayList;
                 markAuctionDirty(date);
                 scheduleCloudPush();
@@ -29537,8 +29549,7 @@
             const saturdayStr = `${year}-${month}-${day}`;
             
             // 跳转到周六
-            currentDate = saturdayStr;
-            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = saturdayStr;
+            setCurrentDate(saturdayStr);
             allData = null;
             setFilter('all');
             renderList();
@@ -29580,8 +29591,7 @@
             const lastSaturdayStr = `${year}-${month}-${day}`;
             
             // 跳转到上周六
-            currentDate = lastSaturdayStr;
-            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = lastSaturdayStr;
+            setCurrentDate(lastSaturdayStr);
             allData = null;
             setFilter('all');
             renderList();
@@ -29606,8 +29616,7 @@
                 const saturdayStr = saturday.toISOString().split('T')[0];
                 
                 // 跳转到周六
-                currentDate = saturdayStr;
-                if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = saturdayStr;
+                setCurrentDate(saturdayStr);
                 allData = null;
                 setFilter('all');
                 renderList();
@@ -33768,8 +33777,7 @@
                 return;
             }
             
-            currentDate = newDate;
-            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = newDate;
+            setCurrentDate(newDate);
             _persistCurrentDateAsLastEdited(newDate);
             allData = null;
             setFilter('all');
@@ -33796,8 +33804,7 @@
                 return;
             }
             
-            currentDate = date;
-            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = date;
+            setCurrentDate(date);
             _persistCurrentDateAsLastEdited(date);
             allData = null;
             setFilter('all');
@@ -33824,7 +33831,7 @@
             let today = `${year}-${month}-${day}`;
             if (today < '2025-01-01') today = '2025-01-01';
             
-            currentDate = today;
+            setCurrentDate(today);
             _persistCurrentDateAsLastEdited(today);
             allData = null;
             setFilter('all');
@@ -33857,7 +33864,7 @@
             
             if (beforeDate < '2025-01-01') beforeDate = '2025-01-01';
             
-            currentDate = beforeDate;
+            setCurrentDate(beforeDate);
             _persistCurrentDateAsLastEdited(beforeDate);
             allData = null;
             setFilter('all');
@@ -33948,8 +33955,7 @@
                 showToast('日期不能早于2025-01-01');
                 return;
             }
-            currentDate = dateStr;
-            if (typeof auctionStore !== 'undefined' && auctionStore) auctionStore.currentDate = dateStr;
+            setCurrentDate(dateStr);
             _persistCurrentDateAsLastEdited(dateStr);
             allData = null;
             renderPickerCalendar();
@@ -34136,7 +34142,7 @@
                 
                 // 找到交易日
                 if (isTradingDay(prevDateStr)) {
-                    currentDate = prevDateStr;
+                    setCurrentDate(prevDateStr);
                     _persistCurrentDateAsLastEdited(prevDateStr);
                     allData = null;
                     showHint('上一交易日');
@@ -34175,7 +34181,7 @@
                 
                 // 找到交易日
                 if (isTradingDay(nextDateStr)) {
-                    currentDate = nextDateStr;
+                    setCurrentDate(nextDateStr);
                     _persistCurrentDateAsLastEdited(nextDateStr);
                     allData = null;
                     showHint('下一交易日');
@@ -35531,7 +35537,7 @@
                         if (allDates.length > 0) {
                             const latestDate = allDates[allDates.length - 1];
                             if (latestDate >= '2025-01-01') {
-                                currentDate = latestDate;
+                                setCurrentDate(latestDate);
                                 localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
                                 const datePicker = document.getElementById('datePicker');
                                 if (datePicker) datePicker.value = currentDate;
@@ -35781,7 +35787,7 @@
                     if (allDates.length > 0) {
                         const latestDate = allDates[allDates.length - 1];
                         if (latestDate >= '2025-01-01') {
-                            currentDate = latestDate;
+                            setCurrentDate(latestDate);
                             localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
                             const datePicker = document.getElementById('datePicker');
                             if (datePicker) datePicker.value = currentDate;
@@ -35947,7 +35953,7 @@
                 if (lastEditedDate !== currentDate) {
                     _dbgLog('_appInit: currentDate 从 ' + currentDate + ' 跳转为 lastEditedDate=' + lastEditedDate);
                 }
-                currentDate = lastEditedDate;
+                setCurrentDate(lastEditedDate);
             }
 
             // 延迟执行数据初始化和渲染
