@@ -14390,6 +14390,17 @@
             // 锁定"点击那一刻"的日期，全程只认这一个值，杜绝异步等待期间日期漂移
             const targetDate = auctionStore ? auctionStore.currentDate : currentDate;
             _dbgLog('[AUCTION-WRITE] fetchLadderConstituentsMain targetDate=' + targetDate);
+            // 守卫：同花顺"最近多板"接口没有查询历史日期的能力，永远只返回"当前最近一个
+            // 交易日"的实时成分股。只有当页面停留的日期恰好等于这个"最近交易日"才允许写入
+            // （例如周六查看周五、交易日当天查看当天），否则接口返回的实时数据会被张冠李戴地
+            // 覆盖写入一个不相关的历史日期，污染那天的数据（这正是之前多个历史日期出现同一批
+            // 股票的根因）。
+            const _mostRecentTD = getMostRecentTradingDay();
+            if (targetDate !== _mostRecentTD) {
+                setApiStatus('thsApiStatus', '⚠️ 已拒绝：最近多板接口只反映最近交易日（' + _mostRecentTD + '）的实时数据，不能写入 ' + targetDate + '，请切到 ' + _mostRecentTD + ' 再获取', false);
+                _dbgLog('[AUCTION-WRITE] fetchLadderConstituentsMain 拒绝：targetDate=' + targetDate + ' ≠ 最近交易日=' + _mostRecentTD);
+                return;
+            }
             setBtnLoading(btn, true);
             // 导入期间锁定该日期：期间任何 Realtime 触发的回拉都会跳过这一天，
             // 防止导入还没推送完成时被云端"旧数据"整段覆盖（见 lockAuctionDateForImport 注释）
@@ -34152,6 +34163,27 @@
             // 在假期列表中也不是交易日
             const holidays = getHolidays();
             return !holidays.includes(dateStr);
+        }
+
+        // 「最近交易日」= 自然日今天往前找（含今天），第一个满足 isTradingDay 的日期。
+        // 今天是交易日 → 就是今天；今天是周末/节假日 → 往前找最近的那个交易日
+        // （例如周六查询会返回周五）。用于"最近多板"这类只反映实时/最新一个交易日
+        // 状态的接口：接口本身没有"查询任意历史日期"的能力，只有当页面停留的日期
+        // 恰好等于这个"最近交易日"时，把接口返回值写入该日期才是正确的；写入任何
+        // 更早的历史日期都是把"今天/最近一次的实时结果"张冠李戴地贴到了别的日子头上。
+        function getMostRecentTradingDay() {
+            const todayStr = _getLocalTodayStr();
+            if (isTradingDay(todayStr)) return todayStr;
+            let d = new Date(todayStr + 'T00:00:00');
+            for (let i = 0; i < 60; i++) {
+                d.setDate(d.getDate() - 1);
+                const year = d.getFullYear();
+                const month = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                const ds = `${year}-${month}-${day}`;
+                if (isTradingDay(ds)) return ds;
+            }
+            return todayStr; // 兜底，理论不会走到
         }
 
         // 跳转到上一个交易日
