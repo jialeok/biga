@@ -36473,6 +36473,12 @@
                 const _p = dataSource === 'hot' ? 'hot' : 'auction';
                 buildTopicCache();
                 const auctionList = getTodayGroupList(dataSource);
+                // [TEMP-DEBUG-0725] 打印初始 auctionList 长度和内容
+                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
+                    _dbgLog('[TEMP-DEBUG-0725] computeAuctionViewData 入口: date=' + currentDate +
+                        ' auctionList.length=' + auctionList.length +
+                        ' 前3只=' + auctionList.slice(0,3).map(function(r){return r && r.stock;}).join(','));
+                }
                 const auctionData = getGroupData(dataSource);
                 const prevDate = getPreviousTradingDay(currentDate);
                 const prevAuctionList = prevDate ? (auctionData[prevDate] || []) : [];
@@ -36491,6 +36497,11 @@
                 const sortByParallelEnabled = _ss.byParallel;
                 const sortByJingYestEnabled = _ss.byJingYest;
                 const jingYestToggleChecked = sortByJingYestEnabled;
+                // [TEMP-DEBUG-0725] 打印排序开关状态，排查是否有开关误开导致排序分支异常
+                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
+                    _dbgLog('[TEMP-DEBUG-0725] 排序开关: byData=' + sortByDataEnabled + ' byRatio=' + sortByRatioEnabled +
+                        ' byParallel=' + sortByParallelEnabled + ' byJingYest=' + sortByJingYestEnabled);
+                }
 
                 const highRatioToday = getHighRatioStocksForDate(currentDate, dataSource);
                 const parallelStocksToday = getParallelStocksForDate(currentDate, dataSource);
@@ -36516,6 +36527,10 @@
                         if (it.obsAutoAdded === true && deriveAuctionTagState(it.stock.trim(), currentDate, __tagStateCache).sold) return false;
                         return true;
                     });
+                }
+                // [TEMP-DEBUG-0725] renderOrder过滤后长度
+                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
+                    _dbgLog('[TEMP-DEBUG-0725] renderOrder 过滤后 length=' + renderOrder.length + '（原始auctionList=' + auctionList.length + '）');
                 }
                 if (sortByDataEnabled) {
                     const cnt = renderOrder.map(idx => {
@@ -36648,6 +36663,13 @@
                 };
                 const fullOrder = obsIndices.concat(regularIndices);
                 const items = fullOrder.map((i, pos) => enrichAuctionItem(auctionList[i], i, ctx));
+                // [TEMP-DEBUG-0725] 打印最终各阶段长度，定位 items 为何变空
+                if (dataSource === 'auction' && typeof _dbgLog === 'function') {
+                    _dbgLog('[TEMP-DEBUG-0725] 末段: jingYestToggleChecked=' + jingYestToggleChecked +
+                        ' obsIndicesRaw=' + obsIndicesRaw.length + ' obsIndices=' + obsIndices.length +
+                        ' regularIndices=' + regularIndices.length + ' fullOrder=' + fullOrder.length +
+                        ' items=' + items.length);
+                }
 
                 // 聚合统计（与 renderAuction 18170-18304 同口径）
                 const __prevMapForStats = _histRowMapFor(prevAuctionList);
