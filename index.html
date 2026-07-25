@@ -7411,6 +7411,7 @@
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #f97316, #ea580c);" onclick="clearAllAuctionText()">清除文字</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #6b7280, #4b5563);" onclick="clearAllAuctionNotes()">清除注释</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #7f1d1d, #991b1b);" onclick="clearAllAuctionRows()">清空所有行</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #0d9488, #0f766e);" onclick="repairAuctionInWatchlistForDate()">🔧 恢复本日数据（不改数值，只把当天所有记录重新标记为正式列表）</button>
             </form>
         </div>
     </div>
@@ -10577,6 +10578,66 @@
                             .eq('date', date).eq('stock', item.stock.trim());
                     }));
                 }
+            }
+        }
+
+        // ============================================================
+        // 一次性数据恢复工具（2026-07-25 新增）：把某一天被整批误降级为影子记录
+        // （in_watchlist=false）的正式列表恢复回来。只翻这一个状态位，绝不碰
+        // volume/yestVolume/note/topics 等任何业务字段，也不新增/删除任何股票行，
+        // 是这类"数据还在、只是被隐藏"问题里风险最低的修复方式。
+        // 用途：配合按钮"恢复本日数据"手动触发，日期固定为 currentDate（点击那一刻
+        // 页面正在看的那一天），恢复对象为该日期云端 auction_data 表里现存的全部行
+        // （不区分之前是 true 还是 false，统一置为 true——因为触发这个按钮，前提就是
+        // 用户已经确认这一天的记录本该全部是正式列表成员）。
+        // ============================================================
+        async function repairAuctionInWatchlistForDate(dateArg) {
+            const date = dateArg || currentDate;
+            if (!date) { alert('无法确定要恢复的日期'); return; }
+            if (!confirm('即将把 ' + date + ' 这一天云端保存的全部股票记录重新标记为正式列表（不改数值），确认执行吗？')) return;
+
+            const sb = getSupabase();
+            try {
+                _dbgLog('[REPAIR] repairAuctionInWatchlistForDate 开始 date=' + date);
+                const { data: cloudRows, error: readErr } = await sb.from('auction_data')
+                    .select('stock, in_watchlist').eq('date', date);
+                if (readErr) throw readErr;
+
+                if (!cloudRows || cloudRows.length === 0) {
+                    _dbgLog('[REPAIR] date=' + date + ' 云端无任何记录，无需恢复');
+                    alert(date + ' 云端没有任何记录，无法恢复（不是"被隐藏"，而是本来就没有数据）');
+                    return;
+                }
+
+                const alreadyTrueCount = cloudRows.filter(function(r) { return r.in_watchlist === true; }).length;
+                const toFixCount = cloudRows.length - alreadyTrueCount;
+                _dbgLog('[REPAIR] date=' + date + ' 云端共' + cloudRows.length + '条，已是正式列表' +
+                    alreadyTrueCount + '条，本次恢复' + toFixCount + '条：' +
+                    cloudRows.filter(function(r) { return r.in_watchlist !== true; })
+                        .map(function(r) { return r.stock; }).join('、'));
+
+                const now = new Date().toISOString();
+                const { error: updErr } = await sb.from('auction_data')
+                    .update({ in_watchlist: true, updated_at: now, updated_by: 'main-repair' })
+                    .eq('date', date);
+                if (updErr) throw updErr;
+
+                // 同步本地内存缓存，避免还要再等一次云端拉取才能看到结果
+                const auctionData = getAuctionData();
+                const localRows = auctionData[date] || [];
+                localRows.forEach(function(r) { if (r) r.in_watchlist = true; });
+                setAuctionDateData(date, localRows, 'repairAuctionInWatchlistForDate');
+
+                _dbgLog('[REPAIR] date=' + date + ' 恢复完成，共' + cloudRows.length + '条已全部置为 in_watchlist=true');
+                alert('✅ 已恢复 ' + date + ' 共 ' + cloudRows.length + ' 条记录为正式列表');
+
+                if (date === currentDate) {
+                    renderAuction();
+                    renderList();
+                }
+            } catch (e) {
+                _dbgLog('[REPAIR-ERR] repairAuctionInWatchlistForDate date=' + date + ' ' + (e && e.message || e));
+                alert('❌ 恢复失败：' + (e && e.message || e));
             }
         }
 
