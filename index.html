@@ -23543,12 +23543,19 @@
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
 
+            // [DEBUG-VUE-FIX 2026-07-25] 默认可见的执行摘要，理由同 ensureBoughtStocksForDate：
+            // 之前"数据未就绪"分支完全静默 return，无法从日志区分"函数没跑"和"跑了但
+            // 高光集合恰好是空的"，容易被误判为继承逻辑本身失效。
+            _dbgLog('[OBS-ENSURE] === 调用开始 === date=' + date + ' prevDay=' + prevDay);
+
             // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
             const obsStocksRaw = getJingYestHighlightSetForDate(prevDay);
             if (!obsStocksRaw || obsStocksRaw.size === 0) {
                 // 数据未就绪时不设标记，等待下次渲染重试（数据加载完成后 _auctionMemCache 会有值）
+                _dbgLog('[OBS-ENSURE] === 调用结束（提前返回）=== prevDay=' + prevDay + ' 高光集合为空（数据可能未就绪），本轮不处理，等下次渲染重试');
                 return;
             }
+            _dbgLog('[OBS-ENSURE] prevDay=' + prevDay + ' 高光集合 ' + obsStocksRaw.size + ' 只：' + [...obsStocksRaw].join('、'));
 
             // 修复：手动标记"卖"的股票不应作为观察组继承进入次日列表——
             // 即使它在前一交易日"竞/昨"达标，只要 deriveAuctionTagState 判定为已卖出
@@ -23614,6 +23621,7 @@
             // 保存 autoAdded 集合（即使没有新增，也要保存空集合以区分 * 标记）
             localStorage.setItem('obsAutoAdded_' + date, JSON.stringify([...autoAddedSet]));
             localStorage.setItem('obsEnsured_' + date, signature);
+            _dbgLog('[OBS-ENSURE] === 调用结束 === 应继承' + obsStocks.size + '只，本轮' + (hasNew ? '有变动(' + dayList.length + '→' + cleanedList.length + '条)' : '无变动') + '，signature=' + (alreadyEnsured ? '一致跳过新增' : '已重算'));
         }
 
         // 买入/持有股票进次日观察组（早盘竞价 tab 专属，与 ensureObservationStocks 平行）：
@@ -23647,6 +23655,12 @@
             const prevDay = getPreviousTradingDay(date);
             if (!prevDay) return;
 
+            // [DEBUG-VUE-FIX 2026-07-25] 默认可见的执行摘要（不依赖 _DBG_VERBOSE 开关）。
+            // 之前只有 hasNew=true 时才走默认可见的 _dbgLog，导致"函数没跑"和"跑了但
+            // 没变化"在日志里完全区分不出来——诊断报告只能看 localStorage[boughtEnsured_*]
+            // 有没有设置来间接猜测，容易误判成"数据丢失/继承失败"。现在每次调用都留痕。
+            _dbgLog('[BOUGHT-ENSURE] === 调用开始 === date=' + date + ' prevDay=' + prevDay);
+
             _dbgLogVerbose('[BOUGHT-ENSURE] enter date=' + date + ' prevDay=' + prevDay);
             try { _dbgLog('[BOUGHT-ENSURE] enter date=' + date + ' prevDay=' + prevDay); } catch(e){}
 
@@ -23655,6 +23669,7 @@
             const prevStocksTags = getStocksData()[prevDay];
             // 昨天完全没有手动标签数据 → 数据未就绪，等下次渲染重试，不设标记（与观察组同一语义）
             if (!prevStocksTags || prevStocksTags.length === 0) {
+                _dbgLog('[BOUGHT-ENSURE] === 调用结束（提前返回）=== getStocksData[' + prevDay + '] 为空，本轮不处理，等下次渲染重试');
                 _dbgLogVerbose('[BOUGHT-ENSURE] getStocksData[' + prevDay + '] 为空，return。注意：若昨日在竞价看板点过"买"但未同步到股票列表页，这里读不到');
                 return;
             }
@@ -23719,6 +23734,7 @@
             // 名单变、股票被删、字段被改坏——都会让签名变化触发重跑；全部正确且名单没变才跳过。
             const signature = holdingNames.slice().sort().join('|') + '|v3|' + (_missingOrWrong.length === 0 ? 'ok' : 'miss:' + _missingOrWrong.length);
             if (_missingOrWrong.length === 0 && localStorage.getItem('boughtEnsured_' + date) === signature) {
+                _dbgLog('[BOUGHT-ENSURE] === 调用结束（签名一致，跳过）=== 持有' + holdingNames.length + '只，今日列表已完整正确，无需改动');
                 _dbgLogVerbose('[BOUGHT-ENSURE] 签名一致且今日完整跳过（boughtEnsured_' + date + '=' + signature + '）');
                 return;
             }
@@ -23772,6 +23788,7 @@
             }
             localStorage.setItem('obsAutoAdded_' + date, JSON.stringify([...autoAddedSet]));
             localStorage.setItem('boughtEnsured_' + date, signature);
+            _dbgLog('[BOUGHT-ENSURE] === 调用结束 === holdingNames=' + holdingNames.length + ' 新增/修正=' + addedCount + ' 缺失或字段错=' + _missingOrWrong.length + (_missingOrWrong.length > 0 ? '（' + _missingOrWrong.join(',') + '）' : ''));
         }
 
         function getAuctionStockHistory(stockName, endDate, count, dataSource='auction') {
