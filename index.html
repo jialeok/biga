@@ -19999,7 +19999,11 @@
             let __tgHistoryFallbackTime = 0;
             
             auctionList.forEach(item => {
-                let topics = extractTopics(item.note);
+                // [BUG-FIX 2026-07-26] 兼容既有 note 括号格式，也兼容拆分字段后
+                // 只存 changePct/topics 的新格式（热门股票等路径）。优先用 getDisplayNote
+                // 重建完整 note，避免题材分组只看到空 note 而全部落入"其它"。
+                const displayNote = getDisplayNote(item);
+                let topics = extractTopics(displayNote);
                 // 当日 note 为空时，回退到历史题材缓存（从历史日期的 note 中提取）
                 if (topics.length === 0 && item.stock) {
                     const __hfT0 = performance.now();
@@ -22459,7 +22463,14 @@
         function getDisplayNote(item) {
             if (!item) return '';
             if (item.changePct || item.topics) {
-                return buildNoteFromFields(item.changePct, item.topics);
+                var topics = item.topics || '';
+                // [BUG-FIX 2026-07-26] 兼容过渡期数据：拆分字段里有涨幅但缺少题材时，
+                // 若旧 note 仍包含题材，则回退解析 note 中的题材，避免第二页全部落入"其它"。
+                if (!topics && item.note) {
+                    var parsed = parseNoteToFields(item.note);
+                    topics = parsed.topics;
+                }
+                return buildNoteFromFields(item.changePct, topics);
             }
             return item.note || '';
         }
