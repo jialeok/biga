@@ -16121,7 +16121,7 @@
 
         // ---------- 同花顺（热门股票）：昨日涨停连板 ----------
         // 以当前选中日期 targetDate 为基准，取 "昨日"（上一个交易日）的涨停股票池，
-        // 过滤出连板股（continue_day_cnt >= 2），写入 targetDate 的热门股票列表。
+        // 过滤掉 ST 股票，保留所有非 ST 涨停股（含首板与连板），写入 targetDate 的热门股票列表。
         // 当天/历史日期统一逻辑：昨日 = getPreviousTradingDay(targetDate)。
         async function fetchHotLimitUpLadderFromThs(btn) {
             // 锁定"点击那一刻"的日期，杜绝异步等待期间日期漂移导致写入目标错乱
@@ -16154,13 +16154,18 @@
                 });
                 const items = (data && data.item) || [];
 
-                // 只保留连板股（continue_day_cnt >= 2），过滤无意义编号题材
+                _dbgLog('[LADDER] ' + fetchDate + ' 涨停池总数: ' + items.length);
+
+                // 仅排除 ST 股票；保留首板、连板、新股等其它所有涨停股
                 const constituents = items.filter(function(c) {
-                    return c && c.thscode && (c.continue_day_cnt || 0) >= 2;
+                    return c && c.thscode && c.is_st !== true;
                 });
 
+                const stCount = items.length - constituents.length;
+                _dbgLog('[LADDER] 过滤后保留 ' + constituents.length + ' 只，排除 ST ' + stCount + ' 只');
+
                 if (constituents.length === 0) {
-                    setApiStatus('thsApiStatusHot', fetchDate + ' 暂无昨日涨停连板数据', false);
+                    setApiStatus('thsApiStatusHot', fetchDate + ' 暂无非ST涨停数据', false);
                     return;
                 }
 
