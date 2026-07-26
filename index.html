@@ -15729,7 +15729,14 @@
                         return;
                     }
                     // 全部保留题材，不再截断为前3个（一只股票可能同时属于多个题材分类）
-                    const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) { return t; });
+                    // [BUG-FIX 2026-07-26] 过滤掉开盘啦返回的"题材35/题材36"等编号条目
+                    const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) {
+                        if (!t) return false;
+                        if (/^题材\d+$/.test(t)) return false;   // 题材35 / 题材36
+                        if (/^\d+$/.test(t)) return false;     // 纯数字
+                        if (t.length < 2) return false;        // 单字符
+                        return true;
+                    });
                     const allTopicsStr = topicList.join('，');
                     stock.topics = allTopicsStr;
                     topicsPatches.push({ stock: stock.stock, topics: allTopicsStr });
@@ -17438,7 +17445,14 @@
                         return;
                     }
                     // 全部保留题材，不再截断为前3个（一只股票可能同时属于多个题材分类）
-                    const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) { return t; });
+                    // [BUG-FIX 2026-07-26] 过滤掉开盘啦返回的"题材35/题材36"等编号条目
+                    const topicList = themeNames.split(/[，、,;；]/).map(function(t) { return t.trim(); }).filter(function(t) {
+                        if (!t) return false;
+                        if (/^题材\d+$/.test(t)) return false;   // 题材35 / 题材36
+                        if (/^\d+$/.test(t)) return false;     // 纯数字
+                        if (t.length < 2) return false;        // 单字符
+                        return true;
+                    });
                     const allTopicsStr = topicList.join('，');
                     stock.topics = allTopicsStr;
                     // 字段级 PATCH：只上报 topics
@@ -19784,22 +19798,133 @@
                 const splitTopics = content.split(/[，、,;；]/).map(t => t.trim()).filter(t => t);
                 topics = topics.concat(splitTopics);
             });
+            // [BUG-FIX 2026-07-26] 过滤掉开盘啦 API 返回的 "题材35/题材36/题材38" 等
+            // 无具体含义的编号条目（正则 /^题材\d+$/ 匹配"题材35""题材36"等）。
+            // 同时过滤纯数字、过短（单字符）以及明显占位符。
+            topics = topics.filter(function(t) {
+                if (!t) return false;
+                if (/^题材\d+$/.test(t)) return false;        // 题材35 / 题材36
+                if (/^\d+$/.test(t)) return false;          // 纯数字
+                if (t.length < 2) return false;             // 单字符无意义
+                if (t === '---' || t === '其它' || t === '其他') return false;
+                return true;
+            });
             return topics;
         }
 
-        // 默认核心词库
+        // 默认核心词库（与主程序数据备份_20260709_1031.json 同步，共 34 个）
+        // [BUG-FIX 2026-07-26] 之前默认核心词只有 10 个且同义词不全，导致大量题材
+        // 匹配不上核心词而全部落入"其它"。现按备份文件恢复完整核心词库。
         const defaultCoreTopics = [
-            { name: 'AI应用', synonyms: ['人工智能', 'AI', 'AI算力'] },
-            { name: '机器人', synonyms: ['人形机器人', '工业机器人'] },
-            { name: '商业航天', synonyms: ['航天', '卫星', '航天科技'] },
-            { name: '液冷算力', synonyms: ['算力', '智算中心'] },
-            { name: '半导体', synonyms: ['芯片', '光刻机'] },
-            { name: '新能源', synonyms: ['光伏', '风电', '储能'] },
-            { name: '医药', synonyms: ['创新药', '医疗器械'] },
-            { name: '军工', synonyms: ['国防', '武器'] },
+            { name: 'AI应用', synonyms: ['人工智能', 'AI', 'AI算力', '空间计算'] },
+            { name: '机器人', synonyms: ['人形机器人', '工业机器人', '电机电控', '智元机器人', '机器视觉'] },
+            { name: '商业航天', synonyms: ['航天', '卫星', '导航', '燃气轮机', '军工', '无人机', '航空发动机', '航天科技', '低空经济'] },
+            { name: '液冷算力', synonyms: ['算力', '智算中心', '液冷', '服务器', '东数西算', '算力租赁'] },
+            { name: '半导体', synonyms: ['芯片', '光刻机', '光刻胶', '洁净室', '存储', '光模块', 'RWA', 'GPU', '英伟达概念', '先进封装', '玻璃基板', '面板', '电子气体', 'OCS', 'MPO', 'CPO', '覆铜板', 'CCL', '电子树脂', '离子交换', 'OLED', '印制电路板', 'PCB', 'LED'] },
+            { name: '新能源汽车', synonyms: ['新能源汽车', '新能源车', '电动车', '汽车零部件', '智能驾驶', '车载', '宁德时代', '混动', '插电混动', '增程式', '汽车整车', '智能座舱'] },
+            { name: '医药', synonyms: ['创新药', '医疗器械', '中药', '疫苗', '生物制品', 'CXO', '医药商业', '医疗服务', '药店', '医药外包', '原料药', '血液制品', '减肥药', 'GLP-1', '细胞治疗', '基因治疗'] },
+            { name: '军工', synonyms: ['国防', '武器', '兵器', '船舶', '航空', '航天军工', '军工电子', '军民融合', '大飞机', '国产航母'] },
             { name: '黄金', synonyms: ['贵金属'] },
-            { name: '白酒', synonyms: ['酒类'] }
+            { name: '白酒', synonyms: ['酒类'] },
+            { name: '锂电池', synonyms: ['锂矿', '碳酸锂', '电池', '固态电池', '电解液', '隔膜', '正极材料', '负极材料', '铜箔', '铝箔', '磷酸铁锂', '三元材料', '动力电池', '储能电池'] },
+            { name: 'CPO', synonyms: ['光模块', '光连接', '硅光'] },
+            { name: '零售', synonyms: ['商业百货'] },
+            { name: '电力', synonyms: ['火电', '水电', '核电', '风电', '光伏', '储能', '特高压', '智能电网', '虚拟电厂', '充电桩', '电力设备', '电网', '输配电', '光伏设备', '风电设备', '核电设备', '火力发电', '水力发电', '核能', '太阳能', '新能源'] },
+            { name: '并购重组', synonyms: ['重组', '借壳', '并购', '资产注入', '股权转让', '国资入股', '要约收购', '吸收合并', '分拆', '重组预案'] },
+            { name: '化工', synonyms: ['化学', '化工原料', '塑料', '橡胶', '纤维', '涂料', '粘胶', '氟化工', '磷化工', '钛白粉', '维生素', '农药', '化纤'] },
+            { name: '房地产', synonyms: ['地产'] },
+            // [BUG-FIX 2026-07-26] 原备份里"新能源汽车"重复 2 次（第二条同义词偏向无人驾驶），
+            // 之前被改名为"新能源汽车2"语义混乱。现独立成"智能驾驶"分类，并补全同义词。
+            { name: '智能驾驶', synonyms: ['无人驾驶', '自动驾驶', '无人车', '车联网', '激光雷达', '毫米波雷达', 'HUD', '线控底盘', '车路协同'] },
+            { name: '影视院线', synonyms: ['影视', '电影', '院线', '传媒', '游戏', '动漫', '短视频', '直播'] },
+            { name: '小金属', synonyms: ['稀土', '钨', '钼', '锡', '锑', '锗', '镓', '铟', '钛', '锂', '钴', '镍'] },
+            { name: '通信', synonyms: ['5G', '6G', '通信设备', '光通信', '物联网'] },
+            { name: '一带一路', synonyms: ['基建', '建筑', '海外工程', '国际工程', '交通基建', '水利', '港口', '铁路', '公路', '桥梁', '隧道', '钢结构', '装饰', '园林', '建材', '工程机械', '工程咨询'] },
+            { name: '电子元件', synonyms: ['电阻', '电容', '电感', '连接器', '继电器', '传感器'] },
+            { name: '稳定币', synonyms: ['数字货币', '加密货币', '区块链', 'Web3', '跨境支付', '数字人民币', '央行数字货币', '比特币', '以太坊'] },
+            { name: '脑机接口', synonyms: ['脑机', '神经接口'] },
+            { name: '环保', synonyms: ['节能', '环保', '水处理', '固废处理', '大气治理', '土壤修复', '环境监测'] },
+            { name: '华为概念', synonyms: ['华为', '鸿蒙', '欧拉'] },
+            { name: '海峡两岸', synonyms: ['福建', '两岸', '台海'] },
+            { name: '消费电子', synonyms: ['手机', '可穿戴', 'AR', 'VR'] },
+            { name: '煤炭', synonyms: ['煤化工', '焦煤'] },
+            { name: '农业', synonyms: ['种业', '化肥', '养殖', '饲料', '猪肉'] },
+            { name: '足球概念', synonyms: ['足球'] },
+            { name: '工业4.0', synonyms: ['工业互联网', '智能制造', '工业软件', '数控机床', '机器人'] },
+            { name: '大消费', synonyms: ['食品', '饮料', '服装', '家电', '家居', '旅游', '酒店', '餐饮', '免税', '跨境电商', '零售'] }
         ];
+
+        // ===== 核心词库云端同步（core_topics 表）=====
+        // [BUG-FIX 2026-07-26] 核心词库之前只存 localStorage，换设备/清缓存就丢失，
+        // 导致第二页题材分类全部落入"其它"。现新增 core_topics 表做云端持久化。
+        let _coreTopicsCloudLoaded = false; // 云端核心词是否已加载完成
+        let _coreTopicsPushingToCloud = false; // 正在推送核心词到云端（避免循环）
+
+        // 从 core_topics 表全量读取核心词库
+        async function pullCoreTopicsFromCloud() {
+            const sb = getSupabase();
+            const { data, error } = await sb.from('core_topics')
+                .select('name,synonyms,updated_at')
+                .order('name', { ascending: true });
+            if (error) throw error;
+            if (!data || data.length === 0) return null; // 表为空
+            return data.map(function(row) {
+                let syns = row.synonyms;
+                if (typeof syns === 'string') {
+                    try { syns = JSON.parse(syns); } catch (e) { syns = syns.split(','); }
+                }
+                return { name: row.name, synonyms: Array.isArray(syns) ? syns : [] };
+            });
+        }
+
+        // 把核心词库全量推送到 core_topics 表（先清空再插入，保持一致性）
+        async function pushCoreTopicsToCloud(topics) {
+            const sb = getSupabase();
+            // 先删除所有旧数据，再插入新数据（core_topics 表数据量小，全量替换最简单）
+            const { error: delErr } = await sb.from('core_topics').delete().neq('name', '___never___');
+            if (delErr) throw delErr;
+            if (!topics || topics.length === 0) return;
+            const rows = topics.map(function(t) {
+                return {
+                    name: t.name,
+                    synonyms: JSON.stringify(t.synonyms || []),
+                    updated_at: new Date().toISOString()
+                };
+            });
+            const { error: insErr } = await sb.from('core_topics').insert(rows);
+            if (insErr) throw insErr;
+        }
+
+        // 从云端加载核心词到 localStorage（仅当云端有数据且本地为空/不一致时）
+        async function loadCoreTopicsFromCloud() {
+            try {
+                const cloudTopics = await pullCoreTopicsFromCloud();
+                _coreTopicsCloudLoaded = true;
+                if (!cloudTopics || cloudTopics.length === 0) {
+                    // 云端为空，把本地/默认核心词推到云端
+                    const localTopics = getCoreTopics();
+                    if (localTopics && localTopics.length > 0) {
+                        _dbgLog('[CORE-TOPICS] 云端 core_topics 表为空，推送本地 ' + localTopics.length + ' 个核心词到云端');
+                        _coreTopicsPushingToCloud = true;
+                        pushCoreTopicsToCloud(localTopics).catch(function(e) {
+                            _dbgLog('[AUCTION-ERR] core_topics 初始化推送失败: ' + (e && e.message || e));
+                        }).finally(function() { _coreTopicsPushingToCloud = false; });
+                    }
+                    return;
+                }
+                // 云端有数据，覆盖本地（云端是唯一真相源，避免多设备不一致）
+                const localStr = localStorage.getItem('coreTopics') || '';
+                const cloudStr = JSON.stringify(cloudTopics);
+                const localParsed = localStr ? JSON.parse(localStr) : [];
+                // 简单比较：名称数量不同就覆盖
+                if (localParsed.length !== cloudTopics.length || JSON.stringify(localParsed.map(c=>c.name).sort()) !== JSON.stringify(cloudTopics.map(c=>c.name).sort())) {
+                    localStorage.setItem('coreTopics', cloudStr);
+                    _dbgLog('[CORE-TOPICS] 从云端恢复 ' + cloudTopics.length + ' 个核心词到本地');
+                }
+            } catch (e) {
+                _dbgLog('[AUCTION-ERR] loadCoreTopicsFromCloud 失败（core_topics 表可能未创建）: ' + (e && e.message || e));
+            }
+        }
 
         // 获取核心词库
         function getCoreTopics() {
@@ -19814,9 +19939,16 @@
             return defaultCoreTopics;
         }
 
-        // 保存核心词库
+        // 保存核心词库（同步到 localStorage + 云端 core_topics 表）
         function saveCoreTopics(topics) {
             localStorage.setItem('coreTopics', JSON.stringify(topics));
+            // 异步推送到云端（不阻塞 UI）
+            if (!_coreTopicsPushingToCloud) {
+                _coreTopicsPushingToCloud = true;
+                pushCoreTopicsToCloud(topics).catch(function(e) {
+                    _dbgLog('[AUCTION-ERR] core_topics 推送失败: ' + (e && e.message || e));
+                }).finally(function() { _coreTopicsPushingToCloud = false; });
+            }
         }
 
         // 获取最近5个交易日列表（从当前日期往前推，排除周末和假期）
@@ -22422,11 +22554,38 @@
             if (!note) return '-';
             const matches = note.match(/[+-]?\d+\.?\d*%/g);
             if (matches && matches.length > 0) {
-                return matches[0];
+                // [BUG-FIX 2026-07-26] 之前直接返回第一个百分比，导致 62%/87%/59%/55%
+                // 等"竞价量/昨竞价量"比例被误显示为涨幅。A 股主板涨停 10%、创业板/科创板
+                // 20%、新股首日 44%，超过 20% 的几乎都是误把占比当成涨幅，统一返回 '-'。
+                for (var i = 0; i < matches.length; i++) {
+                    var num = parseFloat(matches[i]);
+                    if (!isNaN(num) && Math.abs(num) <= 20) {
+                        return matches[i];
+                    }
+                }
+                return '-';
             }
             if (note.includes('涨停')) return '涨停';
             if (note.includes('跌停')) return '跌停';
             return '-';
+        }
+
+        // [BUG-FIX 2026-07-26] getChangePctDisplay 同步增加涨幅上限校验，
+        // 防止 changePct 字段被错误写入 62%/87% 等占比数据后直接展示。
+        function getChangePctDisplay(item) {
+            if (item && item.changePct) {
+                // 涨停/跌停/停牌等非数字值直接返回
+                if (/^[+-]?\d+\.?\d*%$/.test(item.changePct)) {
+                    var num = parseFloat(item.changePct);
+                    if (!isNaN(num) && Math.abs(num) <= 20) {
+                        return item.changePct;
+                    }
+                    _dbgLog('[CHANGE-WARN] changePct 超出 20% 上限，疑似占比数据：' + item.stock + ' = ' + item.changePct);
+                    return '-';
+                }
+                return item.changePct;
+            }
+            return extractChangeFromNote(item ? item.note : '');
         }
 
         // 从 note 解析出 { changePct, topics }
@@ -22496,11 +22655,8 @@
             return todayNote || '';
         }
 
-        // 提取涨幅显示值（优先用 changePct 字段，回退到 note 解析）
-        function getChangePctDisplay(item) {
-            if (item && item.changePct) return item.changePct;
-            return extractChangeFromNote(item ? item.note : '');
-        }
+        // 提取涨幅显示值：已在 extractChangeFromNote 后定义（含 20% 上限校验），
+        // 这里保留 migrateNoteToFields 等下游函数的衔接位置。
 
         // 迁移本地 auctionData 中旧 note 到 changePct + topics 字段
         function migrateNoteToFields() {
@@ -22517,6 +22673,127 @@
                 });
             });
             if (migrated) saveModule('auction');
+        }
+
+        // [BUG-FIX 2026-07-26] 一次性清理：移除本地 auctionData / hotAuctionData 里
+        // 已存在的 "题材35/题材36" 等编号条目，以及把 changePct 字段里被误写入的
+        // 超过 20% 的占比数据清空。只在首次加载时执行一次（用 localStorage 标记）。
+        function cleanupInvalidTopicsAndChangePct() {
+            if (localStorage.getItem('_cleanupTopicNumDone') === '1') return;
+            var cleanedTopics = 0;
+            var cleanedChangePct = 0;
+            // 处理 auction 数据
+            try {
+                var auctionData = getAuctionData();
+                Object.keys(auctionData).forEach(function(date) {
+                    (auctionData[date] || []).forEach(function(item) {
+                        if (!item) return;
+                        // 清理 topics 字段里的 "题材N"
+                        if (item.topics) {
+                            var arr = item.topics.split(/[，、,;；]/).map(function(t) { return t.trim(); });
+                            var filtered = arr.filter(function(t) {
+                                if (!t) return false;
+                                if (/^题材\d+$/.test(t)) { cleanedTopics++; return false; }
+                                if (/^\d+$/.test(t)) { cleanedTopics++; return false; }
+                                if (t.length < 2) { cleanedTopics++; return false; }
+                                return true;
+                            });
+                            if (filtered.length !== arr.length) {
+                                item.topics = filtered.join('，');
+                            }
+                        }
+                        // 清理 note 字段里的 "(题材35)" 等括号内容
+                        if (item.note && /[(（]([^)）]*题\d+[^)）]*)[)）]/.test(item.note)) {
+                            item.note = item.note.replace(/[(（]([^)）]+)[)）]/g, function(m, p1) {
+                                var arr = p1.split(/[，、,;；]/).map(function(t) { return t.trim(); });
+                                var filtered = arr.filter(function(t) {
+                                    if (/^题材\d+$/.test(t)) { cleanedTopics++; return false; }
+                                    if (/^\d+$/.test(t)) { cleanedTopics++; return false; }
+                                    if (t.length < 2) { cleanedTopics++; return false; }
+                                    return true;
+                                });
+                                return filtered.length > 0 ? '(' + filtered.join('，') + ')' : '';
+                            });
+                        }
+                        // 清理 changePct 字段里超过 20% 的占比数据
+                        if (item.changePct && /^[+-]?\d+\.?\d*%$/.test(item.changePct)) {
+                            var num = parseFloat(item.changePct);
+                            if (!isNaN(num) && Math.abs(num) > 20) {
+                                _dbgLog('[CLEANUP] 清空异常 changePct: ' + item.stock + ' = ' + item.changePct);
+                                item.changePct = '';
+                                cleanedChangePct++;
+                            }
+                        }
+                    });
+                });
+                saveModule('auction');
+            } catch (e) {
+                _dbgLog('[CLEANUP-ERR] auction 清理失败: ' + e);
+            }
+            // 处理 hot 数据
+            try {
+                var hotData = getHotAuctionData();
+                Object.keys(hotData).forEach(function(date) {
+                    (hotData[date] || []).forEach(function(item) {
+                        if (!item) return;
+                        if (item.topics) {
+                            var arr2 = item.topics.split(/[，、,;；]/).map(function(t) { return t.trim(); });
+                            var filtered2 = arr2.filter(function(t) {
+                                if (!t) return false;
+                                if (/^题材\d+$/.test(t)) { cleanedTopics++; return false; }
+                                if (/^\d+$/.test(t)) { cleanedTopics++; return false; }
+                                if (t.length < 2) { cleanedTopics++; return false; }
+                                return true;
+                            });
+                            if (filtered2.length !== arr2.length) {
+                                item.topics = filtered2.join('，');
+                            }
+                        }
+                        if (item.note && /[(（]([^)）]*题\d+[^)）]*)[)）]/.test(item.note)) {
+                            item.note = item.note.replace(/[(（]([^)）]+)[)）]/g, function(m, p1) {
+                                var arr = p1.split(/[，、,;；]/).map(function(t) { return t.trim(); });
+                                var filtered = arr.filter(function(t) {
+                                    if (/^题材\d+$/.test(t)) { cleanedTopics++; return false; }
+                                    if (/^\d+$/.test(t)) { cleanedTopics++; return false; }
+                                    if (t.length < 2) { cleanedTopics++; return false; }
+                                    return true;
+                                });
+                                return filtered.length > 0 ? '(' + filtered.join('，') + ')' : '';
+                            });
+                        }
+                        if (item.changePct && /^[+-]?\d+\.?\d*%$/.test(item.changePct)) {
+                            var num2 = parseFloat(item.changePct);
+                            if (!isNaN(num2) && Math.abs(num2) > 20) {
+                                _dbgLog('[CLEANUP] 清空异常 hot changePct: ' + item.stock + ' = ' + item.changePct);
+                                item.changePct = '';
+                                cleanedChangePct++;
+                            }
+                        }
+                    });
+                });
+                saveModule('hot');
+            } catch (e) {
+                _dbgLog('[CLEANUP-ERR] hot 清理失败: ' + e);
+            }
+            // 清理旧的核心词库里的 "新能源汽车2"（已改名为"智能驾驶"）
+            try {
+                var coreStr = localStorage.getItem('coreTopics');
+                if (coreStr) {
+                    var coreArr = JSON.parse(coreStr);
+                    if (Array.isArray(coreArr)) {
+                        var hadOld = coreArr.some(function(c) { return c && c.name === '新能源汽车2'; });
+                        if (hadOld) {
+                            // 重置为默认核心词库（已包含正确的"智能驾驶"分类）
+                            localStorage.removeItem('coreTopics');
+                            _dbgLog('[CLEANUP] 检测到旧"新能源汽车2"核心词，已重置为默认核心词库（34 个分类）');
+                        }
+                    }
+                }
+            } catch (e) {
+                _dbgLog('[CLEANUP-ERR] coreTopics 重置失败: ' + e);
+            }
+            localStorage.setItem('_cleanupTopicNumDone', '1');
+            _dbgLog('[CLEANUP] 一次性清理完成：清理题材条目 ' + cleanedTopics + ' 个，清空异常涨幅 ' + cleanedChangePct + ' 个');
         }
 
         // 打开核心词管理弹窗
@@ -36470,6 +36747,8 @@
             migrateJiwangToTable();
             // 迁移旧 note 到 changePct + topics 字段（note 拆字段后新增，首次运行时自动执行）
             migrateNoteToFields();
+            // [BUG-FIX 2026-07-26] 一次性清理本地数据中的"题材N"编号条目和超 20% 异常涨幅
+            try { cleanupInvalidTopicsAndChangePct(); } catch (e) { _dbgLog('[CLEANUP-ERR] ' + e); }
 
             // 加载第四页数据
             loadCopiedStocks();
@@ -36657,6 +36936,14 @@
                 loadHotStocksFromCloud().then(function() {
                     if (typeof renderHotStocks === 'function') renderHotStocks();
                 }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
+                // [BUG-FIX 2026-07-26] 从 core_topics 表加载/同步核心词库（之前从未调用，
+                // 导致核心词管理数据只存 localStorage，换设备/清缓存后全部丢失）
+                if (typeof loadCoreTopicsFromCloud === 'function') {
+                    loadCoreTopicsFromCloud().then(function() {
+                        if (typeof renderCoreTopicList === 'function') renderCoreTopicList();
+                        if (typeof renderAuction === 'function') renderAuction();
+                    }).catch(function(e) { console.warn('core_topics 加载失败:', e && e.message || e); });
+                }
                 // 后台拉取全量数据（慢），完成后刷新所有页面
                 pullFromCloud().then(function() {
                     allData = null; loadAllData();
