@@ -7231,6 +7231,7 @@
                     <span style="font-size: 10px; color: #b45309; font-family: monospace;">飙升榜+热股榜 · fuyao-proxy</span>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <button type="button" onclick="fetchHotLimitUpLadderFromThs(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #dc2626, #b91c1c); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">昨日涨停连板</button>
                     <button type="button" onclick="fetchSkyrocketHotStocksMain(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取飙升+热股</button>
                     <button type="button" onclick="fillHotYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">两全昨日成交量</button>
                     <button type="button" onclick="fillHotTodayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">当天昨日成交量</button>
@@ -16118,6 +16119,139 @@
             }
         }
 
+        // ---------- 同花顺（热门股票）：昨日涨停连板 ----------
+        // 以当前选中日期 targetDate 为基准，取 "昨日"（上一个交易日）的涨停股票池，
+        // 过滤出连板股（continue_day_cnt >= 2），写入 targetDate 的热门股票列表。
+        // 当天/历史日期统一逻辑：昨日 = getPreviousTradingDay(targetDate)。
+        async function fetchHotLimitUpLadderFromThs(btn) {
+            // 锁定"点击那一刻"的日期，杜绝异步等待期间日期漂移导致写入目标错乱
+            const targetDate = currentDate;
+            const sysToday = _getLocalTodayStr();
+            setBtnLoading(btn, true);
+            try {
+                const fetchDate = getPreviousTradingDay(targetDate);
+                if (!fetchDate) {
+                    setApiStatus('thsApiStatusHot', '❌ 无法确定 ' + targetDate + ' 的上一交易日', false);
+                    return;
+                }
+
+                const isFutureDate = targetDate > sysToday;
+                setApiStatus('thsApiStatusHot',
+                    (isFutureDate
+                        ? '正在请求 ' + fetchDate + ' 的昨日涨停连板数据（预置到 ' + targetDate + '）...'
+                        : '正在请求 ' + fetchDate + ' 的昨日涨停连板数据...'),
+                    true);
+
+                // date_ms 用 Asia/Shanghai 00:00:00 的毫秒戳
+                const dateMs = new Date(fetchDate + 'T00:00:00+08:00').getTime();
+
+                const data = await fuyaoApiGet('/api/a-share/special-data/limit-up-pool', {
+                    date_ms: dateMs,
+                    page: 1,
+                    size: 200,
+                    sort_field: 'limit_up_time',
+                    sort_dir: 'desc'
+                });
+                const items = (data && data.item) || [];
+
+                // 只保留连板股（continue_day_cnt >= 2），过滤无意义编号题材
+                const constituents = items.filter(function(c) {
+                    return c && c.thscode && (c.continue_day_cnt || 0) >= 2;
+                });
+
+                if (constituents.length === 0) {
+                    setApiStatus('thsApiStatusHot', fetchDate + ' 暂无昨日涨停连板数据', false);
+                    return;
+                }
+
+                // 备份当日数据（按 targetDate）
+                backupHotStocksData('import', targetDate);
+
+                const hotAuctionData = getHotAuctionData();
+                const existingList = hotAuctionData[targetDate] || [];
+                const existingMap = {};
+                existingList.forEach(function(s) {
+                    if (s && s.stock) existingMap[s.stock.trim()] = s;
+                });
+
+                const newList = constituents.map(function(c) {
+                    const name = (c.name || '').trim();
+                    const existing = existingMap[name];
+
+                    // 涨幅：已乘 100，格式化为 +/-X.YY%
+                    let changePct = '';
+                    const pctVal = c.price_change_ratio_pct;
+                    if (pctVal !== null && pctVal !== undefined && pctVal !== '') {
+                        const n = Number(pctVal);
+                        if (!isNaN(n)) {
+                            changePct = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+                        }
+                    }
+
+                    // 题材：用涨停原因，并过滤无意义编号（API 可能返回 null/undefined/空字符串）
+                    const rawTopics = (c.limit_up_reason && c.limit_up_reason !== 'null') ? String(c.limit_up_reason).trim() : '';
+                    const topics = cleanTopicsForDisplay(rawTopics);
+                    const note = buildNoteFromFields(changePct, topics);
+
+                    return {
+                        stock: name,
+                        code: c.ticker || (existing ? (existing.code || '') : ''),
+                        volume: existing ? (existing.volume || '') : '',
+                        yestVolume: existing ? (existing.yestVolume || '') : '',
+                        note: note,
+                        changePct: changePct,
+                        topics: topics,
+                        selected: existing ? existing.selected : false,
+                        bought: existing ? existing.bought : false,
+                        sold: existing ? existing.sold : false,
+                        fixed: existing ? existing.fixed : false
+                    };
+                });
+
+                // 更新共享代码映射
+                const scMap = loadAllData().stockCodeMap || {};
+                let mapUpdated = false;
+                constituents.forEach(function(c) {
+                    const name = (c.name || '').trim();
+                    const ticker = c.ticker || '';
+                    if (name && ticker && scMap[name] !== ticker) {
+                        scMap[name] = ticker;
+                        mapUpdated = true;
+                    }
+                });
+                if (mapUpdated) {
+                    allData.stockCodeMap = scMap;
+                    saveModule('stockCodeMap');
+                }
+
+                hotAuctionData[targetDate] = newList;
+                invalidateTopicCache();
+
+                // 同步云端 hot_stocks 表（先同步列表结构，再推送涨幅/题材字段，确保已有股票也能更新）
+                syncHotStocksListForDate(targetDate).then(function() {
+                    return pushHotStocksDataToCloud(targetDate, newList);
+                }).catch(function(e) {
+                    console.warn('昨日涨停连板云端同步失败:', e);
+                });
+
+                const statusMsg = '✅ 已获取 ' + fetchDate + ' 的 ' + constituents.length + ' 只昨日涨停连板股票';
+                if (currentDate === targetDate) {
+                    renderHotForm();
+                    renderHotStocks();
+                    setApiStatus('thsApiStatusHot', statusMsg + (isFutureDate ? '（已预置到 ' + targetDate + '）' : ''), true);
+                } else {
+                    setApiStatus('thsApiStatusHot', statusMsg + '（写入 ' + targetDate + '，当前页面在 ' + currentDate + '，切回该日期即可看到）', true);
+                }
+            } catch (err) {
+                console.error('fetchHotLimitUpLadderFromThs 失败:', err);
+                let msg = err && err.message ? err.message : '拉取失败';
+                if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
+                setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
+            } finally {
+                setBtnLoading(btn, false);
+            }
+        }
+
         // ---------- 同花顺（热门股票）：两全昨日成交量 ----------
         async function fillHotYesterdayVolumeFromThs(btn) {
             setBtnLoading(btn, true);
@@ -23750,6 +23884,7 @@
 
         // 第二页"平行"开关变化时的处理：今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排到分组最前面
         function onAuctionSortByParallelToggle2Change() {
+            resetAuctionExpansionOnToggle('auction', true);
             const parallelChecked = document.getElementById('auctionSortByParallelToggle2').checked;
             if (parallelChecked) {
                 // 与"环比"互斥，打开这个就关闭另一个
@@ -23765,7 +23900,27 @@
 
         // 第二页"竞/昨"开关变化时的处理：在"平行"达标的基础上，进一步要求 今/昨比 > 昨/前比
         // 单向联动："竞/昨"打开会联动打开"平行"；关闭会联动关闭"平行"。
+        // 排序/筛选 toggle（数据/环比/平行/竞昨）被点击时，重置展开状态：
+        // 清空手动展开集合、取消"全部展开"开关、立即收起所有趋势面板，再回到默认状态。
+        // 注意：不影响"全部展开"toggle 本身的正常工作——用户仍可重新打开全部展开。
+        function resetAuctionExpansionOnToggle(dataSource, isPage2) {
+            try {
+                const expandAllId = (dataSource === 'hot' ? 'hot' : 'auction') + (isPage2 ? 'ExpandAllToggle2' : 'ExpandAllToggle');
+                const expandAllEl = document.getElementById(expandAllId);
+                if (expandAllEl) expandAllEl.checked = false;
+                if (isPage2) {
+                    collapseAllAuctionTrendPanelsP2(dataSource);
+                } else {
+                    collapseAllAuctionTrendPanels(dataSource);
+                }
+                _dbgLog('[TOGGLE-RESET] ' + dataSource + (isPage2 ? '/p2' : '/p1') + ' 展开状态已重置');
+            } catch (e) {
+                _dbgLog('[TOGGLE-RESET] 重置失败: ' + (e && e.message));
+            }
+        }
+
         function onAuctionSortByJingYestToggle2Change() {
+            resetAuctionExpansionOnToggle('auction', true);
             const jingYestChecked = document.getElementById('auctionSortByJingYestToggle2').checked;
             const parallelToggle2 = document.getElementById('auctionSortByParallelToggle2');
             if (jingYestChecked) {
@@ -23793,6 +23948,7 @@
 
         // "按数据排序"开关变化时的处理
         function onAuctionSortByDataToggleChange() {
+            resetAuctionExpansionOnToggle('auction', false);
             const sortChecked = document.getElementById('auctionSortByDataToggle').checked;
             if (sortChecked) {
                 // 与"环比"、"平行"互斥，打开这个就关闭另外两个
@@ -23803,9 +23959,6 @@
                 // "竞/昨"是"平行"的加强条件，平行关闭时竞/昨必须一并关闭
                 const jingYestToggle = document.getElementById('auctionSortByJingYestToggle');
                 if (jingYestToggle) jingYestToggle.checked = false;
-                // 联动打开"全部展开"，方便核对排序结果
-                const expandToggle = document.getElementById('auctionExpandAllToggle');
-                if (expandToggle) expandToggle.checked = true;
             }
             // 重新渲染以应用新的排序顺序（renderAuction 内部会读取开关的最新状态）
             renderAuction();
@@ -23813,6 +23966,7 @@
 
         // "环比"开关变化时的处理（今日竞价量 / 昨日竞价量，从高到低）
         function onAuctionSortByRatioToggleChange() {
+            resetAuctionExpansionOnToggle('auction', false);
             const ratioChecked = document.getElementById('auctionSortByRatioToggle').checked;
             if (ratioChecked) {
                 // 与"数据"、"平行"、"竞/昨"互斥，打开这个就关闭其余三个（"竞/昨"是"平行"的加强条件，必须一并关闭）
@@ -23829,6 +23983,7 @@
 
         // "平行"开关变化时的处理：今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量 的股票排最前面
         function onAuctionSortByParallelToggleChange() {
+            resetAuctionExpansionOnToggle('auction', false);
             const parallelChecked = document.getElementById('auctionSortByParallelToggle').checked;
             if (parallelChecked) {
                 // 与"数据"、"环比"互斥，打开这个就关闭另外两个
@@ -23849,6 +24004,7 @@
         // 单向联动："竞/昨"打开会联动打开"平行"；关闭会联动关闭"平行"。
         // 反之，单独操作"平行"不会影响"竞/昨"的勾选状态（由 onAuctionSortByParallelToggleChange 里的关闭分支保证依赖关系）
         function onAuctionSortByJingYestToggleChange() {
+            resetAuctionExpansionOnToggle('auction', false);
             const jingYestChecked = document.getElementById('auctionSortByJingYestToggle').checked;
             const parallelToggle = document.getElementById('auctionSortByParallelToggle');
             if (jingYestChecked) {
@@ -23878,6 +24034,7 @@
 
         // "按数据排序"开关变化时的处理（热门股票）
         function onHotSortByDataToggleChange() {
+            resetAuctionExpansionOnToggle('hot', false);
             const sortChecked = document.getElementById('hotSortByDataToggle').checked;
             if (sortChecked) {
                 const ratioToggle = document.getElementById('hotSortByRatioToggle');
@@ -23887,14 +24044,13 @@
                 // "竞/昨"是"平行"的加强条件，平行关闭时竞/昨必须一并关闭
                 const jingYestToggle = document.getElementById('hotSortByJingYestToggle');
                 if (jingYestToggle) jingYestToggle.checked = false;
-                const expandToggle = document.getElementById('hotExpandAllToggle');
-                if (expandToggle) expandToggle.checked = true;
             }
             renderAuction('hot');
         }
 
         // "环比"开关变化时的处理（热门股票）
         function onHotSortByRatioToggleChange() {
+            resetAuctionExpansionOnToggle('hot', false);
             const ratioChecked = document.getElementById('hotSortByRatioToggle').checked;
             if (ratioChecked) {
                 const sortToggle = document.getElementById('hotSortByDataToggle');
@@ -23909,6 +24065,7 @@
 
         // "平行"开关变化时的处理（热门股票）
         function onHotSortByParallelToggleChange() {
+            resetAuctionExpansionOnToggle('hot', false);
             const parallelChecked = document.getElementById('hotSortByParallelToggle').checked;
             if (parallelChecked) {
                 const sortToggle = document.getElementById('hotSortByDataToggle');
@@ -23924,6 +24081,7 @@
 
         // "竞/昨"开关变化时的处理（热门股票）
         function onHotSortByJingYestToggleChange() {
+            resetAuctionExpansionOnToggle('hot', false);
             const jingYestChecked = document.getElementById('hotSortByJingYestToggle').checked;
             const parallelToggle = document.getElementById('hotSortByParallelToggle');
             if (jingYestChecked) {
@@ -23950,6 +24108,7 @@
 
         // 第二页"环比"开关变化时的处理（热门股票）
         function onHotSortByRatioToggle2Change() {
+            resetAuctionExpansionOnToggle('hot', true);
             const ratioChecked = document.getElementById('hotSortByRatioToggle2').checked;
             if (ratioChecked) {
                 const parallelToggle2 = document.getElementById('hotSortByParallelToggle2');
@@ -23962,6 +24121,7 @@
 
         // 第二页"平行"开关变化时的处理（热门股票）
         function onHotSortByParallelToggle2Change() {
+            resetAuctionExpansionOnToggle('hot', true);
             const parallelChecked = document.getElementById('hotSortByParallelToggle2').checked;
             if (parallelChecked) {
                 const ratioToggle2 = document.getElementById('hotSortByRatioToggle2');
@@ -23975,6 +24135,7 @@
 
         // 第二页"竞/昨"开关变化时的处理（热门股票）
         function onHotSortByJingYestToggle2Change() {
+            resetAuctionExpansionOnToggle('hot', true);
             const jingYestChecked = document.getElementById('hotSortByJingYestToggle2').checked;
             const parallelToggle2 = document.getElementById('hotSortByParallelToggle2');
             if (jingYestChecked) {
