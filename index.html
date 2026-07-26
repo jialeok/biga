@@ -19896,6 +19896,8 @@
         }
 
         // 从云端加载核心词到 localStorage（仅当云端有数据且本地为空/不一致时）
+        // [BUG-FIX 2026-07-26] 之前云端返回空数组或异常时也会覆盖本地，导致核心词全丢。
+        // 现在严格校验：云端必须返回非空且每个元素都有 name 字段才覆盖本地。
         async function loadCoreTopicsFromCloud() {
             try {
                 const cloudTopics = await pullCoreTopicsFromCloud();
@@ -19912,14 +19914,22 @@
                     }
                     return;
                 }
-                // 云端有数据，覆盖本地（云端是唯一真相源，避免多设备不一致）
+                // [BUG-FIX] 校验云端数据有效性：每个元素必须有 name 字段，否则视为脏数据
+                const validCloud = cloudTopics.filter(function(t) {
+                    return t && typeof t.name === 'string' && t.name.trim();
+                });
+                if (validCloud.length === 0) {
+                    _dbgLog('[CORE-TOPICS] 云端 core_topics 数据无效（无 name 字段），不覆盖本地');
+                    return;
+                }
+                // 云端有有效数据，覆盖本地（云端是唯一真相源，避免多设备不一致）
                 const localStr = localStorage.getItem('coreTopics') || '';
-                const cloudStr = JSON.stringify(cloudTopics);
+                const cloudStr = JSON.stringify(validCloud);
                 const localParsed = localStr ? JSON.parse(localStr) : [];
                 // 简单比较：名称数量不同就覆盖
-                if (localParsed.length !== cloudTopics.length || JSON.stringify(localParsed.map(c=>c.name).sort()) !== JSON.stringify(cloudTopics.map(c=>c.name).sort())) {
+                if (localParsed.length !== validCloud.length || JSON.stringify(localParsed.map(c=>c.name).sort()) !== JSON.stringify(validCloud.map(c=>c.name).sort())) {
                     localStorage.setItem('coreTopics', cloudStr);
-                    _dbgLog('[CORE-TOPICS] 从云端恢复 ' + cloudTopics.length + ' 个核心词到本地');
+                    _dbgLog('[CORE-TOPICS] 从云端恢复 ' + validCloud.length + ' 个核心词到本地');
                 }
             } catch (e) {
                 _dbgLog('[AUCTION-ERR] loadCoreTopicsFromCloud 失败（core_topics 表可能未创建）: ' + (e && e.message || e));
@@ -19927,11 +19937,21 @@
         }
 
         // 获取核心词库
+        // [BUG-FIX 2026-07-26] 之前 localStorage 存 '[]'（空数组字符串）时直接返回 []，
+        // 导致核心词管理弹窗空白 + 第二页题材分组全部落入"其它"。
+        // 现在改为：空数组/非数组/长度为 0 都回退到 defaultCoreTopics。
         function getCoreTopics() {
             const stored = localStorage.getItem('coreTopics');
             if (stored) {
                 try {
-                    return JSON.parse(stored);
+                    const parsed = JSON.parse(stored);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                        return parsed;
+                    }
+                    // 空数组：回退默认，并清理掉这个无效值
+                    localStorage.removeItem('coreTopics');
+                    _dbgLog('[CORE-TOPICS] 检测到空 coreTopics，回退默认 34 个核心词');
+                    return defaultCoreTopics;
                 } catch (e) {
                     return defaultCoreTopics;
                 }
