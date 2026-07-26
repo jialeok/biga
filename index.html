@@ -8256,6 +8256,20 @@
             return _expandedAuctionStocksByGroup[key];
         }
 
+        // 将 _expandedAuctionStocksByGroup 同步到 Vue store，保持响应式路径与 DOM 路径一致。
+        // 用内容级 diff 同步（而非整体换引用），相同内容不触发响应式，避免递归循环。
+        function _syncExpandedStocksToStore(dataSource) {
+            if (typeof auctionStore === 'undefined' || !auctionStore) return;
+            try {
+                const key = dataSource === 'hot' ? 'hot' : 'auction';
+                const sourceSet = _expandedAuctionStocksByGroup[key];
+                const storeSet = auctionStore.expandedStocks;
+                if (!(storeSet instanceof Set)) { auctionStore.expandedStocks = new Set(sourceSet); return; }
+                storeSet.forEach(function(item) { if (!sourceSet.has(item)) storeSet.delete(item); });
+                sourceSet.forEach(function(item) { if (!storeSet.has(item)) storeSet.add(item); });
+            } catch (e) {}
+        }
+
         // ============================================================
         // Supabase 云同步配置
         // ============================================================
@@ -22725,11 +22739,24 @@
             return { changePct: changePct, topics: topics };
         }
 
+        // 清理题材字符串中的无意义编号条目（如"题材32/题材33"），仅用于展示
+        function cleanTopicsForDisplay(topics) {
+            if (!topics) return '';
+            return topics.split(/[,，、;；]/).map(function(t) { return t.trim(); }).filter(function(t) {
+                if (!t) return false;
+                if (/^题材\d+$/.test(t)) return false;   // 题材35 / 题材36
+                if (/^\d+$/.test(t)) return false;     // 纯数字
+                if (t.length < 2) return false;        // 单字符
+                return true;
+            }).join('，');
+        }
+
         // 从 changePct + topics 反向构建 note（向后兼容）
         function buildNoteFromFields(changePct, topics) {
             var note = changePct || '';
-            if (topics) {
-                note += '(' + topics + ')';
+            var cleanTopics = cleanTopicsForDisplay(topics);
+            if (cleanTopics) {
+                note += '(' + cleanTopics + ')';
             }
             return note;
         }
@@ -22747,7 +22774,12 @@
                 }
                 return buildNoteFromFields(item.changePct, topics);
             }
-            return item.note || '';
+            // [BUG-FIX 2026-07-27] 旧 note 直接作为展示时，同样过滤"题材32/题材33"等无意义编号条目
+            if (item.note) {
+                var parsed = parseNoteToFields(item.note);
+                return buildNoteFromFields(parsed.changePct, parsed.topics);
+            }
+            return '';
         }
 
         // 仅用于第一页展示：当天字段为空时，回退到历史/云端题材缓存
@@ -23398,6 +23430,7 @@
             // restoreExpandedAuctionTrendPanels 因集合为空而无法恢复该面板。
             const _expSet = _getExpandedStocksSet(_tp);
             _expSet.add(item.stock.trim());
+            _syncExpandedStocksToStore(_tp);
 
             const history = getAuctionStockHistory(item.stock.trim(), currentDate, 5, _tp);
             panel.innerHTML = renderAuctionTrendHtml(history);
@@ -23411,10 +23444,13 @@
             const _tp = dataSource === 'hot' ? 'hot' : (dataSource === 'auction' ? 'auction' : (currentGroup === 'hot' ? 'hot' : 'auction'));
             const auctionList = getTodayGroupList(_tp);
             const _set = _getExpandedStocksSet(_tp);
+            _dbgLog('[EXPAND-ALL] 全部展开 dataSource=' + _tp + ' 列表=' + auctionList.length + '只 展开前setSize=' + _set.size);
             auctionList.forEach((item, idx) => {
                 if (item && item.stock) _set.add(item.stock.trim());
                 expandAuctionTrendPanel(idx, _tp, true);
             });
+            _syncExpandedStocksToStore(_tp);
+            _dbgLog('[EXPAND-ALL] 全部展开完成 dataSource=' + _tp + ' setSize=' + _set.size);
         }
 
         // 收起当前列表所有行的趋势面板
@@ -23422,11 +23458,15 @@
             const _tp = dataSource === 'hot' ? 'hot' : (dataSource === 'auction' ? 'auction' : (currentGroup === 'hot' ? 'hot' : 'auction'));
             const _contentEl = document.getElementById(_tp + 'Content');
             const _scope = _contentEl || document;
+            const _set = _getExpandedStocksSet(_tp);
+            const _beforeSize = _set.size;
             _scope.querySelectorAll('.auction-trend-panel').forEach(panel => {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
             });
-            _getExpandedStocksSet(_tp).clear();
+            _set.clear();
+            _syncExpandedStocksToStore(_tp);
+            _dbgLog('[COLLAPSE-ALL] 全部收起 dataSource=' + _tp + ' 收起前setSize=' + _beforeSize);
         }
 
         // 根据指定分组的 expandedStocks 记录的展开状态，在 renderAuction 重新渲染后恢复各行的趋势面板展开
@@ -23470,7 +23510,8 @@
         }
 
         // [DATE-SWITCH] 切换日期时统一重置所有展开状态，避免跨日期持久化。
-        // 由 setCurrentDate 调用，权威源（_expandedAuctionStocksByGroup / _p2ExpandedTopics / store）全部清空。
+        // 由 setCurrentDate 调用，权威源（_expandedAuctionStocksByGroup / _p2ExpandedTopics / store）全部清空，
+        // 并立即隐藏当前可见的趋势面板，防止旧日期面板在新日期短暂残留。
         function resetExpansionStateOnDateSwitch() {
             try {
                 if (typeof _expandedAuctionStocksByGroup !== 'undefined') {
@@ -23488,7 +23529,12 @@
                     const el = document.getElementById(id);
                     if (el) el.checked = false;
                 });
-                _dbgLog('[DATE-SWITCH] 已重置展开状态');
+                // 立即隐藏所有趋势面板，避免日期切换后旧面板仍可见（直到下次渲染才重建 DOM）
+                document.querySelectorAll('.auction-trend-panel').forEach(function(panel) {
+                    panel.style.display = 'none';
+                    panel.innerHTML = '';
+                });
+                _dbgLog('[DATE-SWITCH] 已重置展开状态并隐藏所有趋势面板');
             } catch (e) {
                 _dbgLog('[DATE-SWITCH] 重置展开状态失败: ' + (e && e.message));
             }
@@ -24034,6 +24080,8 @@
                 panel.style.display = 'none';
                 panel.innerHTML = '';
                 if (stockKey) _expSet.delete(stockKey);
+                _syncExpandedStocksToStore(_tp);
+                _dbgLogVerbose('[TOGGLE] 收起 股票=' + stockKey + ' setSize=' + _expSet.size);
                 return;
             }
 
@@ -24058,6 +24106,7 @@
                 _expSet.add(stockKey);
             }
             expandAuctionTrendPanel(resolvedIndex, _tp);
+            _syncExpandedStocksToStore(_tp);
         }
 
         // 获取某只股票最近N个交易日（含当天）的竞价量/昨日成交量历史
@@ -24367,10 +24416,13 @@
 
         function ensureObservationStocks(date) {
             if (!date) return;
-            // 历史锁定：只对"今天"生效。打开/查看历史日期时绝不自动继承或清理任何股票，
+            const today = _getLocalTodayStr();
+            // 历史锁定：只对"今天及以后"生效（允许预览下一交易日）。打开/查看历史日期时绝不自动继承或清理任何股票，
             // 只如实显示保存时的样子——避免用户之后的操作（买/卖标记变化等）反过来回溯
             // 改写已经保存好的历史日期列表，造成"历史记录全乱了"的问题。
-            if (date !== _getLocalTodayStr()) return;
+            if (date < today) return;
+            // [BUG-FIX 2026-07-27] 若 date > today，说明用户在预览下一交易日，显式标记日志便于排查。
+            const isPreview = date > today;
             // [BUG-FIX 2026-07-26] 非交易日（周末/节假日）不自动继承上一交易日股票，
             // 避免周日显示周五数据、用户误以为历史日期数据残留/时间错位。
             if (!isTradingDay(date)) {
@@ -24384,7 +24436,7 @@
             // [DEBUG-VUE-FIX 2026-07-25] 默认可见的执行摘要，理由同 ensureBoughtStocksForDate：
             // 之前"数据未就绪"分支完全静默 return，无法从日志区分"函数没跑"和"跑了但
             // 高光集合恰好是空的"，容易被误判为继承逻辑本身失效。
-            _dbgLog('[OBS-ENSURE] === 调用开始 === date=' + date + ' prevDay=' + prevDay);
+            _dbgLog('[OBS-ENSURE] === 调用开始 === date=' + date + ' prevDay=' + prevDay + (isPreview ? ' [预览下一交易日]' : ' [当天]'));
 
             // 上一交易日"竞/昨"实际高光（蓝色高光）达标股票，口径与界面显示、"竞/昨数"统计保持一致
             const obsStocksRaw = getJingYestHighlightSetForDate(prevDay);
@@ -24480,8 +24532,10 @@
         // 名单变化就重新跑一次补入逻辑。权威来源只认 getStocksData()，无记录即清除。
         function ensureBoughtStocksForDate(date) {
             if (!date) return;
-            // 历史锁定：与 ensureObservationStocks 一致，只对"今天"生效，历史日期只读不改。
-            if (date !== _getLocalTodayStr()) return;
+            const today = _getLocalTodayStr();
+            // 历史锁定：与 ensureObservationStocks 一致，只对"今天及以后"生效（允许预览下一交易日），历史日期只读不改。
+            if (date < today) return;
+            const isPreview = date > today;
             // [BUG-FIX 2026-07-26] 非交易日（周末/节假日）不自动继承买入/持有股票，
             // 与 ensureObservationStocks 保持一致，避免非交易日被填充上一交易日数据。
             if (!isTradingDay(date)) {
