@@ -14462,6 +14462,9 @@
         const LADDER_THSCODE = '883410.TI';
 
         // 调用同花顺 fuyao-proxy（GET），返回 data 字段
+        // [BUG-FIX 2026-07-26] 之前没有 resp.ok 检查，Edge Function 未部署/返回非 JSON
+        // 时会抛出笼统的 "Failed to fetch"，无法定位根因。现增加 HTTP 状态码检查、
+        // 响应体预览、以及具体的部署提示。
         async function fuyaoApiGet(path, params) {
             const url = new URL(FUYAO_PROXY_BASE);
             url.searchParams.set('path', path);
@@ -14470,10 +14473,38 @@
                     url.searchParams.set(k, params[k]);
                 }
             }
-            const resp = await fetch(url.toString(), {
-                headers: { 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }
-            });
-            const data = await resp.json();
+            let resp;
+            try {
+                resp = await fetch(url.toString(), {
+                    headers: { 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }
+                });
+            } catch (netErr) {
+                // 网络层失败（DNS/CORS/未部署 Edge Function）
+                _dbgLog('[FUYAO-NET-ERR] ' + path + ': ' + (netErr && netErr.message || netErr));
+                throw new Error('代理请求失败（网络层）：' + (netErr && netErr.message || '未知错误') + '。请确认 fuyao-proxy Edge Function 已部署到 Supabase');
+            }
+            if (!resp.ok) {
+                // HTTP 错误（404/500/401 等）
+                let errBody = '';
+                try { errBody = await resp.text(); } catch (e) {}
+                _dbgLog('[FUYAO-HTTP-ERR] ' + path + ': HTTP ' + resp.status + ' ' + resp.statusText + ' body=' + errBody.slice(0, 200));
+                if (resp.status === 404) {
+                    throw new Error('fuyao-proxy Edge Function 未部署（HTTP 404）。请在 Supabase Dashboard 部署 fuyao-proxy');
+                }
+                if (resp.status === 401 || resp.status === 403) {
+                    throw new Error('fuyao-proxy 鉴权失败（HTTP ' + resp.status + '）。请检查 SUPABASE_ANON_KEY 配置');
+                }
+                throw new Error('fuyao-proxy HTTP ' + resp.status + '：' + errBody.slice(0, 100));
+            }
+            let data;
+            try {
+                data = await resp.json();
+            } catch (jsonErr) {
+                let rawBody = '';
+                try { rawBody = await resp.text(); } catch (e) {}
+                _dbgLog('[FUYAO-JSON-ERR] ' + path + ': 响应非 JSON，body=' + rawBody.slice(0, 200));
+                throw new Error('fuyao-proxy 返回非 JSON 响应（可能是 Edge Function 错误页）：' + rawBody.slice(0, 100));
+            }
             if (data.code !== 0) {
                 throw new Error(data.message || ('fuyao 接口错误 code=' + data.code));
             }
@@ -14481,18 +14512,48 @@
         }
 
         // 调用猫抓 numcat-proxy（POST），返回 data 字段
+        // [BUG-FIX 2026-07-26] 同样增加 HTTP 状态码检查和详细错误信息
         async function numcatApiPost(apiname, fields, params, pathOverride) {
             const body = { apiname: apiname, fields: fields, params: params || {} };
             if (pathOverride) body.path = pathOverride;
-            const resp = await fetch(NUMCAT_PROXY_URL, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
-                },
-                body: JSON.stringify(body)
-            });
-            const data = await resp.json();
+            let resp;
+            try {
+                resp = await fetch(NUMCAT_PROXY_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
+                    },
+                    body: JSON.stringify(body)
+                });
+            } catch (netErr) {
+                _dbgLog('[NUMCAT-NET-ERR] ' + apiname + ': ' + (netErr && netErr.message || netErr));
+                throw new Error('代理请求失败（网络层）：' + (netErr && netErr.message || '未知错误') + '。请确认 numcat-proxy Edge Function 已部署且 NUMCAT_API_KEY 已设置');
+            }
+            if (!resp.ok) {
+                let errBody = '';
+                try { errBody = await resp.text(); } catch (e) {}
+                _dbgLog('[NUMCAT-HTTP-ERR] ' + apiname + ': HTTP ' + resp.status + ' ' + resp.statusText + ' body=' + errBody.slice(0, 200));
+                if (resp.status === 404) {
+                    throw new Error('numcat-proxy Edge Function 未部署（HTTP 404）。请在 Supabase Dashboard 部署 numcat-proxy 并设置 NUMCAT_API_KEY');
+                }
+                if (resp.status === 401 || resp.status === 403) {
+                    throw new Error('numcat-proxy 鉴权失败（HTTP ' + resp.status + '）。请检查 SUPABASE_ANON_KEY 配置');
+                }
+                if (resp.status === 500) {
+                    throw new Error('numcat-proxy 内部错误（HTTP 500）：' + errBody.slice(0, 150) + '。请检查 NUMCAT_API_KEY 是否设置');
+                }
+                throw new Error('numcat-proxy HTTP ' + resp.status + '：' + errBody.slice(0, 100));
+            }
+            let data;
+            try {
+                data = await resp.json();
+            } catch (jsonErr) {
+                let rawBody = '';
+                try { rawBody = await resp.text(); } catch (e) {}
+                _dbgLog('[NUMCAT-JSON-ERR] ' + apiname + ': 响应非 JSON，body=' + rawBody.slice(0, 200));
+                throw new Error('numcat-proxy 返回非 JSON 响应：' + rawBody.slice(0, 100));
+            }
             if (data.code !== 200) {
                 throw new Error(data.message || ('numcat 接口错误 code=' + data.code));
             }
@@ -18239,6 +18300,52 @@
                     push('　　　内存 yestVolume=' + (sample.yestVolume || '(空)') + ' / 快照 yest_volume=' + (cacheRow ? (cacheRow.yest_volume || '(空)') : '（快照中无此股票）'));
                     if (cacheRow && ((cacheRow.volume || '') !== (sample.volume || '') || (cacheRow.yest_volume || '') !== (sample.yestVolume || ''))) {
                         push('　　　⚠️ 内存与趋势图快照不一致，趋势图可能显示旧值，建议重新进入该 tab 或等待下次云端同步');
+                    }
+                }
+                push('');
+
+                // [BUG-FIX 2026-07-26] 新增：对比日 vs 当天 竞价量对比，
+                // 帮助诊断"对比日和当天竞价量数值相同"的问题
+                push('【对比日 vs 当天 竞价量对比（诊断数值相同问题）】');
+                if (!yesterday) {
+                    push('　　无法计算对比日（getPreviousTradingDay 返回空）');
+                } else if (todayList.length === 0) {
+                    push('　　当日列表为空，无法对比');
+                } else {
+                    let sameVolCount = 0;
+                    let bothHaveVol = 0;
+                    let todayOnlyVol = 0;
+                    let yestOnlyVol = 0;
+                    let neitherVol = 0;
+                    const sameVolStocks = [];
+                    todayList.forEach(function(s) {
+                        const tVol = getStockHistoryValue(today, s.stock, 'volume', 'auction');
+                        const yVol = getStockHistoryValue(yesterday, s.stock, 'volume', 'auction');
+                        if (tVol !== null && yVol !== null) {
+                            bothHaveVol++;
+                            if (tVol === yVol) {
+                                sameVolCount++;
+                                if (sameVolStocks.length < 5) sameVolStocks.push(s.stock + '(都=' + tVol + ')');
+                            }
+                        } else if (tVol !== null && yVol === null) {
+                            todayOnlyVol++;
+                        } else if (tVol === null && yVol !== null) {
+                            yestOnlyVol++;
+                        } else {
+                            neitherVol++;
+                        }
+                    });
+                    push('　　当天有竞价量、对比日也有：' + bothHaveVol + ' 只');
+                    push('　　当天有、对比日无：' + todayOnlyVol + ' 只');
+                    push('　　当天无、对比日有：' + yestOnlyVol + ' 只');
+                    push('　　两天都无：' + neitherVol + ' 只');
+                    push('　　★ 两天竞价量相同的股票：' + sameVolCount + ' 只' + (sameVolStocks.length > 0 ? '（抽样：' + sameVolStocks.join('、') + '）' : ''));
+                    if (sameVolCount > 0) {
+                        push('　　　⚠️ 数值相同可能原因：');
+                        push('　　　　1. API 确实返回了相同值（小盘股竞价量可能稳定）');
+                        push('　　　　2. 之前的"覆盖"操作写入了相同值');
+                        push('　　　　3. 云端 auction_data 表两个日期存的 volume 相同');
+                        push('　　　建议：点击猫抓"全竞价量"重新抓取覆盖（需代理正常工作）');
                     }
                 }
                 push('');
