@@ -10280,48 +10280,71 @@
         // 批量 upsert 趋势数据到 hot_stock_trends 表（每批 500 行）
         // items 是热门股票数组，字段结构与 _hotAuctionData 一致：{stock, code, volume, yestVolume, changePct, ...}
         async function pushHotTrendsToCloud(date, items) {
-            if (!_hotTrendsTableAvailable) return;
+            // [BUG-FIX] 即使 trends 表不可用，也要更新本地 _hotTrendsCache，
+            // 对齐 patchHotFieldBatch 的模式：本地缓存无条件更新，云端同步可选。
             _justPushedHotTrends = true;
             try {
-                const sb = getSupabase();
                 const scMap = loadAllData().stockCodeMap || {};
                 const now = new Date().toISOString();
+                // [BUG-FIX] 原实现用整行替换 upsert + 整行替换缓存，导致"当天昨日成交量"等
+                // 单字段补数据按钮把已有 volume/change_pct 覆盖成空串。改为字段级合并：
+                // 新值非空才覆盖，空串保留旧值（云端 + 缓存双重保护）。
+                if (!_hotTrendsCache[date]) _hotTrendsCache[date] = [];
+                var existingMap = {};
+                _hotTrendsCache[date].forEach(function(r) {
+                    if (r && r.stock) existingMap[r.stock] = r;
+                });
                 const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
+                    var name = item.stock.trim();
+                    var existing = existingMap[name] || {};
+                    var newVolume = item.volume || '';
+                    var newYestVol = item.yestVolume || '';
+                    var newChangePct = item.changePct || '';
+                    var newCode = scMap[name] || item.code || existing.code || '';
+                    // 字段级合并：新值非空用新值，否则保留旧值
                     return {
                         date: date,
-                        stock: item.stock.trim(),
-                        code: scMap[item.stock.trim()] || item.code || '',
-                        volume: item.volume || '',
-                        yest_volume: item.yestVolume || '',
-                        change_pct: item.changePct || '',
+                        stock: name,
+                        code: newCode || existing.code || '',
+                        volume: newVolume || existing.volume || '',
+                        yest_volume: newYestVol || existing.yest_volume || '',
+                        change_pct: newChangePct || existing.change_pct || '',
                         updated_at: now,
                         updated_by: 'main'
                     };
                 });
                 if (rows.length === 0) return;
+
+                // [BUG-FIX] 先更新本地缓存（无条件），再尝试云端同步
+                rows.forEach(function(row) {
+                    var idx = _hotTrendsCache[date].findIndex(function(r) { return r.stock === row.stock; });
+                    if (idx >= 0) {
+                        // 只更新非空字段
+                        var target = _hotTrendsCache[date][idx];
+                        if (row.volume) target.volume = row.volume;
+                        if (row.yest_volume) target.yest_volume = row.yest_volume;
+                        if (row.change_pct) target.change_pct = row.change_pct;
+                        if (row.code) target.code = row.code;
+                    } else {
+                        _hotTrendsCache[date].push({
+                            stock: row.stock,
+                            code: row.code,
+                            volume: row.volume,
+                            yest_volume: row.yest_volume,
+                            change_pct: row.change_pct
+                        });
+                    }
+                });
+
+                // 云端同步：表不可用时跳过
+                if (!_hotTrendsTableAvailable) return;
+                const sb = getSupabase();
                 const batchSize = 500;
                 for (let i = 0; i < rows.length; i += batchSize) {
                     const { error } = await sb.from('hot_stock_trends')
                         .upsert(rows.slice(i, i + batchSize), { onConflict: 'date,stock' });
                     if (error) throw error;
                 }
-                // 合并到本地缓存，避免趋势图读到旧数据
-                if (!_hotTrendsCache[date]) _hotTrendsCache[date] = [];
-                rows.forEach(function(row) {
-                    var idx = _hotTrendsCache[date].findIndex(function(r) { return r.stock === row.stock; });
-                    var mergedRow = {
-                        stock: row.stock,
-                        code: row.code,
-                        volume: row.volume,
-                        yest_volume: row.yest_volume,
-                        change_pct: row.change_pct
-                    };
-                    if (idx >= 0) {
-                        _hotTrendsCache[date][idx] = mergedRow;
-                    } else {
-                        _hotTrendsCache[date].push(mergedRow);
-                    }
-                });
             } finally {
                 setTimeout(function() { _justPushedHotTrends = false; }, 2000);
             }
@@ -11029,17 +11052,6 @@
             if (!date || !Array.isArray(items) || items.length === 0) return { ok: true, rows: 0 };
             _openHotAuctionShield();
             try {
-                if (!_hotAuctionTableAvailable) {
-                    const waitStart = Date.now();
-                    while (!_hotAuctionTableAvailable && Date.now() - waitStart < 5000) {
-                        await new Promise(function(r) { setTimeout(r, 100); });
-                    }
-                    if (!_hotAuctionTableAvailable) {
-                        console.warn('patchHotFieldBatch 放弃：hot_stocks 表 5 秒内仍未就绪，数据未写入云端。日期:', date);
-                        return { ok: false, error: new Error('hot_stocks 表未就绪') };
-                    }
-                }
-
                 const now = new Date().toISOString();
                 const rows = [];
                 const localOps = [];
@@ -11057,18 +11069,35 @@
                 });
                 if (rows.length === 0) return { ok: true, rows: 0 };
 
+                // [BUG-FIX] 本地缓存更新必须无条件执行，不依赖云端表是否就绪。
+                // 原实现在表未就绪时 return early，导致 _mergeHotPatchLocal 永远不被调用，
+                // 趋势图读不到刚补的 yest_volume（趋势图从 _hotFullRowCache 读数据，
+                // 不从云端读）。改为：先写本地缓存（趋势图立即可读），再尝试云端同步。
+                // 对齐 patchAuctionFieldBatch 的模式：local merge 是无条件的。
+                localOps.forEach(function(op) {
+                    _mergeHotPatchLocal(date, op.stock, op.cleanPatch);
+                });
+
+                // 云端同步：表未就绪时等待最多 5 秒，超时则跳过云端只保留本地
+                if (!_hotAuctionTableAvailable) {
+                    const waitStart = Date.now();
+                    while (!_hotAuctionTableAvailable && Date.now() - waitStart < 5000) {
+                        await new Promise(function(r) { setTimeout(r, 100); });
+                    }
+                    if (!_hotAuctionTableAvailable) {
+                        console.warn('patchHotFieldBatch：hot_stocks 表未就绪，本地缓存已更新但云端未同步。日期:', date);
+                        return { ok: true, rows: rows.length, cloudSkipped: true };
+                    }
+                }
+
                 const sb = getSupabase();
                 const { error } = await sb.from('hot_stocks')
                     .upsert(rows, { onConflict: 'date,stock' });
                 if (error) throw error;
 
-                localOps.forEach(function(op) {
-                    _mergeHotPatchLocal(date, op.stock, op.cleanPatch);
-                });
-
                 return { ok: true, rows: rows.length };
             } catch (e) {
-                console.warn('patchHotFieldBatch 失败:', date, e && e.message);
+                console.warn('patchHotFieldBatch 失败(本地缓存已更新，仅云端未同步):', date, e && e.message);
                 return { ok: false, error: e };
             } finally {
                 _closeHotAuctionShield(2000);
@@ -14867,10 +14896,24 @@
         // 批量请求 fuyao historical 拿单天成交量
         // 返回 { ticker: volume(股) }，仅匹配 dayStr 当天的 K 线
         async function fetchDayVolumes(codes, dayStr) {
-            const startMs = new Date(dayStr + 'T00:00:00').getTime();
-            const endMs = new Date(dayStr + 'T23:59:59').getTime();
+            // [BUG-FIX] API 以北京时间(UTC+8)存储交易日，date_ms 是北京时间午夜。
+            // 当浏览器不在 UTC+8 时区时，new Date(dayStr+'T00:00:00').getTime() 产生的
+            // 查询区间可能与 API 的 date_ms 错开最多 ±12 小时，导致单日查询返回 0 条。
+            // 修复：查询区间向前后各扩 1 天（±86400000ms），再用多策略日期匹配筛选正确交易日。
+            const startMs = new Date(dayStr + 'T00:00:00').getTime() - 86400000; // 前1天
+            const endMs = new Date(dayStr + 'T23:59:59').getTime() + 86400000;   // 后1天
             const result = {};
             const batchSize = 5;
+            // [BUG-FIX] 时区安全日期匹配：date_ms 可能是 UTC 时间戳，不同服务器时区下
+            // new Date(date_ms).getDate() 可能偏移一天。改用多策略匹配：
+            // 1) 优先用 API 返回的 date 字符串（如有）
+            // 2) 回退用本地时区解析
+            // 3) 再回退用 UTC 解析
+            // 4) 最后尝试 dayStr ± 1 天（容忍跨时区偏移）
+            const dayStrPrev = _shiftDateStr(dayStr, -1);
+            const dayStrNext = _shiftDateStr(dayStr, 1);
+            const _acceptableDates = new Set([dayStr, dayStrPrev, dayStrNext]);
+            let _debugLog = [];
             for (let i = 0; i < codes.length; i += batchSize) {
                 const batch = codes.slice(i, i + batchSize);
                 await Promise.all(batch.map(async function(code) {
@@ -14884,22 +14927,82 @@
                             adjust: 'none'
                         });
                         const items = (data && data.item) || [];
+                        let matched = false;
+                        let _firstItemKeys = null;
+                        // [BUG-FIX] 日期匹配策略重写：API 的 date_ms 是北京时间(UTC+8)午夜。
+                        // 不同浏览器时区下 new Date(date_ms).getDate() 会偏移。
+                        // 优先级：Beijing(UTC+8) 精确匹配 > 本地时区精确匹配 > UTC精确匹配 > ±1天容忍
+                        // 不再用"先到先得"的 forEach 匹配，改为先收集所有候选再择优。
+                        var _candidates = [];
                         items.forEach(function(item) {
-                            const d = new Date(item.date_ms);
-                            const y = d.getFullYear();
-                            const m = String(d.getMonth() + 1).padStart(2, '0');
-                            const dd = String(d.getDate()).padStart(2, '0');
-                            const dateStr = y + '-' + m + '-' + dd;
-                            if (dateStr === dayStr) {
-                                result[code] = item.volume;
+                            if (!_firstItemKeys) _firstItemKeys = Object.keys(item).join(',');
+                            // 策略1：API 返回了 date 字符串字段
+                            var rawDate = item.date || item.time || item.datetime || '';
+                            var dateStrApi = '';
+                            if (rawDate && typeof rawDate === 'string') {
+                                dateStrApi = rawDate.slice(0, 10);
+                            }
+                            // 策略2：Beijing time (UTC+8) — 加 8 小时后取 UTC 日期
+                            var dateStrBeijing = '';
+                            if (item.date_ms != null) {
+                                var dBJ = new Date(item.date_ms + 8 * 3600 * 1000);
+                                dateStrBeijing = dBJ.getUTCFullYear() + '-' + String(dBJ.getUTCMonth() + 1).padStart(2, '0') + '-' + String(dBJ.getUTCDate()).padStart(2, '0');
+                            }
+                            // 策略3：本地时区
+                            var dateStrLocal = '';
+                            if (item.date_ms != null) {
+                                var dLocal = new Date(item.date_ms);
+                                dateStrLocal = dLocal.getFullYear() + '-' + String(dLocal.getMonth() + 1).padStart(2, '0') + '-' + String(dLocal.getDate()).padStart(2, '0');
+                            }
+                            // 策略4：UTC
+                            var dateStrUtc = '';
+                            if (item.date_ms != null) {
+                                var dUtc = new Date(item.date_ms);
+                                dateStrUtc = dUtc.getUTCFullYear() + '-' + String(dUtc.getUTCMonth() + 1).padStart(2, '0') + '-' + String(dUtc.getUTCDate()).padStart(2, '0');
+                            }
+                            // 计算优先级分值：Beijing精确=4, API精确=3, 本地精确=2, UTC精确=1, ±1天容忍=0
+                            var score = -1;
+                            if (dateStrBeijing === dayStr) score = 4;
+                            else if (dateStrApi === dayStr) score = 3;
+                            else if (dateStrLocal === dayStr) score = 2;
+                            else if (dateStrUtc === dayStr) score = 1;
+                            else if (_acceptableDates.has(dateStrBeijing) || _acceptableDates.has(dateStrApi) || _acceptableDates.has(dateStrLocal) || _acceptableDates.has(dateStrUtc)) {
+                                // ±1天容忍：优先用 Beijing 解析的日期判断接近度
+                                var tolDate = dateStrBeijing || dateStrApi || dateStrLocal || dateStrUtc;
+                                score = 0;
+                                if (tolDate === dayStrPrev) score = 0; // 前一天容忍
+                                else if (tolDate === dayStrNext) score = 0; // 后一天容忍
+                            }
+                            if (score >= 0 && item.volume != null) {
+                                _candidates.push({ score: score, volume: item.volume, dateStrBeijing: dateStrBeijing });
                             }
                         });
+                        // 择优：取分值最高的候选
+                        if (_candidates.length > 0) {
+                            _candidates.sort(function(a, b) { return b.score - a.score; });
+                            result[code] = _candidates[0].volume;
+                            matched = true;
+                        }
+                        if (!matched) {
+                            _debugLog.push('[fetchDayVolumes] ' + code + '(' + thscode + ') dayStr=' + dayStr + ' items=' + items.length + ' candidates=' + _candidates.length + ' 未匹配到目标日期' + (_firstItemKeys ? ' itemKeys=' + _firstItemKeys : '') + (items.length > 0 ? ' firstItemDateMs=' + items[0].date_ms : ''));
+                        }
                     } catch (e) {
+                        _debugLog.push('[fetchDayVolumes] ' + code + ' dayStr=' + dayStr + ' 异常: ' + (e && e.message));
                         console.warn('获取 ' + code + ' 在 ' + dayStr + ' 的成交量失败:', e && e.message);
                     }
                 }));
             }
+            if (_debugLog.length > 0) {
+                console.log('[fetchDayVolumes] dayStr=' + dayStr + ' 共' + codes.length + '只 成功' + Object.keys(result).length + '只 失败/未匹配' + _debugLog.length + '只:\n' + _debugLog.join('\n'));
+            }
             return result;
+        }
+
+        // 日期字符串偏移辅助：dayStr 加/减 n 天，返回 YYYY-MM-DD
+        function _shiftDateStr(dayStr, n) {
+            var d = new Date(dayStr + 'T00:00:00');
+            d.setDate(d.getDate() + n);
+            return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
         }
 
         // 基于 todayList（当前显示的表格）构建 yesterdayList
@@ -16428,7 +16531,9 @@
                 if (todayYestVolPatches.length > 0) {
                     patchHotFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch today yest_volume 失败:', e); });
                 }
-                pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
+                // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
+                var _trendsToday = todayList.filter(function(s) { return s && s.stock && s.yestVolume; });
+                pushHotTrendsToCloud(today, _trendsToday).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
 
                 // ===== 第二批：调取对比日的昨日成交量（yesterday.yestVolume ← dayBefore 的 volume）=====
                 setApiStatus('thsApiStatusHot', '【2/2】正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
@@ -16475,9 +16580,12 @@
                 if (yesterdayYestVolPatches.length > 0) {
                     patchHotFieldBatch(yesterday, yesterdayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday yest_volume 失败:', e); });
                 }
-                pushHotTrendsToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
-                if (shadowOnlyYesterdayStocks.length > 0) {
-                    pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
+                // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
+                var _trendsYest = existingYesterdayList.filter(function(s) { return s && s.stock && s.yestVolume; });
+                pushHotTrendsToCloud(yesterday, _trendsYest).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                var _trendsShadow = shadowOnlyYesterdayStocks.filter(function(s) { return s && s.stock && s.yestVolume; });
+                if (_trendsShadow.length > 0) {
+                    pushHotTrendsToCloud(yesterday, _trendsShadow).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
                 }
 
                 // 刷新表单和看板
@@ -16527,40 +16635,68 @@
                 }
                 const scMap = loadAllData().stockCodeMap || {};
                 const codeToName = {};
+                const _noCodeStocks = []; // 调试：记录缺代码映射的股票
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code) codeToName[code] = s.stock.trim();
+                    else _noCodeStocks.push(s.stock.trim());
                 });
                 const allCodes = Object.keys(codeToName);
                 if (allCodes.length === 0) {
                     setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺代码映射，请先获取飙升+热股）', false);
                     return;
                 }
+                console.log('[HotTodayYestVol] 开始 today=' + today + ' yesterday=' + yesterday + ' mode=' + (overwrite ? '覆盖' : '补全') + ' todayList=' + todayList.length + ' 有代码=' + allCodes.length + ' 无代码=' + _noCodeStocks.length + (_noCodeStocks.length > 0 ? ' 无代码股票=' + _noCodeStocks.join(',') : ''));
 
                 setApiStatus('thsApiStatusHot', '正在获取 ' + allCodes.length + ' 只股票在 ' + yesterday + ' 的成交量...', true);
                 const volYesterday = await fetchDayVolumes(allCodes, yesterday); // ticker -> volume(股)
+                console.log('[HotTodayYestVol] fetchDayVolumes 返回 ' + Object.keys(volYesterday).length + '/' + allCodes.length + ' 只有值，yesterday=' + yesterday);
 
                 let filled = 0, skipped = 0;
+                const _skipReasons = { noCode: 0, noVol: 0, alreadyHas: 0 };
                 const todayYestVolPatches = [];
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式跳过已有值
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) { _skipReasons.alreadyHas++; return; } // 补全模式跳过已有值
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
-                    if (code && volYesterday[code] != null) {
+                    if (!code) { _skipReasons.noCode++; skipped++; return; }
+                    if (volYesterday[code] != null) {
                         s.yestVolume = String(Math.round(volYesterday[code] / 10000));
                         todayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         filled++;
                     } else {
+                        _skipReasons.noVol++;
                         skipped++;
                     }
                 });
+                console.log('[HotTodayYestVol] 填充结果: filled=' + filled + ' skipped=' + skipped + ' (无代码=' + _skipReasons.noCode + ' 无量=' + _skipReasons.noVol + ' 已有值=' + _skipReasons.alreadyHas + ') patches=' + todayYestVolPatches.length);
+                if (todayYestVolPatches.length > 0) {
+                    console.log('[HotTodayYestVol] patches详情: ' + todayYestVolPatches.map(function(p) { return p.stock + '=' + p.yest_volume; }).join(', '));
+                }
                 hotAuctionData[today] = todayList;
                 invalidateTopicCache();
                 if (todayYestVolPatches.length > 0) {
                     patchHotFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch today yest_volume 失败:', e); });
                 }
-                pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
+                // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
+                var _trendsItems = todayList.filter(function(s) { return s && s.stock && s.yestVolume; });
+                pushHotTrendsToCloud(today, _trendsItems).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
+
+                // 调试：验证 _hotFullRowCache 是否已更新
+                if (todayYestVolPatches.length > 0) {
+                    var _cacheList = _hotFullRowCache[today] || [];
+                    var _cacheMap = {};
+                    _cacheList.forEach(function(r) { if (r && r.stock) _cacheMap[r.stock.trim()] = r; });
+                    var _verifyLog = [];
+                    todayYestVolPatches.forEach(function(p) {
+                        var name = (p.stock || '').trim();
+                        var cached = _cacheMap[name];
+                        var trendVal = getStockHistoryValue(today, name, 'yestVolume', 'hot');
+                        _verifyLog.push(name + ': cache.yest_volume=' + (cached ? (cached.yest_volume || cached.yestVolume || '(空)') : '(无行)') + ' trendVal=' + (trendVal !== null ? trendVal : 'null'));
+                    });
+                    console.log('[HotTodayYestVol] 缓存验证(' + _verifyLog.length + '只):\n' + _verifyLog.join('\n'));
+                }
 
                 renderHotForm();
                 renderHotStocks();
@@ -16606,35 +16742,42 @@
                 const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
                 const codeToName = {};
+                const _noCodeStocks = [];
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
                     if (code) codeToName[code] = s.stock.trim();
+                    else _noCodeStocks.push(s.stock.trim());
                 });
                 const allCodes = Object.keys(codeToName);
                 if (allCodes.length === 0) {
                     setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺代码映射，请先获取飙升+热股）', false);
                     return;
                 }
+                console.log('[HotYestYestVol] 开始 today=' + today + ' yesterday=' + yesterday + ' dayBefore=' + dayBefore + ' mode=' + (overwrite ? '覆盖' : '补全') + ' yesterdayList=' + yesterdayList.length + ' 有代码=' + allCodes.length + ' 无代码=' + _noCodeStocks.length + (_noCodeStocks.length > 0 ? ' 无代码=' + _noCodeStocks.join(',') : ''));
 
                 setApiStatus('thsApiStatusHot', '正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
                 const volDayBefore = await fetchDayVolumes(allCodes, dayBefore);
+                console.log('[HotYestYestVol] fetchDayVolumes 返回 ' + Object.keys(volDayBefore).length + '/' + allCodes.length + ' 只有值，dayBefore=' + dayBefore);
 
                 let filled = 0, skipped = 0;
+                const _skipReasons = { noCode: 0, noVol: 0, alreadyHas: 0 };
                 const yesterdayYestVolPatches = [];
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
-                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) return; // 补全模式跳过已有值
+                    if (!overwrite && getNumericVolume(s.yestVolume) !== null) { _skipReasons.alreadyHas++; return; }
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
-                    if (code && volDayBefore[code] != null) {
+                    if (!code) { _skipReasons.noCode++; skipped++; return; }
+                    if (volDayBefore[code] != null) {
                         s.yestVolume = String(Math.round(volDayBefore[code] / 10000));
-                        // 正式列表成员 + 影子记录统一进 patch
                         yesterdayYestVolPatches.push({ stock: s.stock, yest_volume: s.yestVolume });
                         filled++;
                     } else {
+                        _skipReasons.noVol++;
                         skipped++;
                     }
                 });
+                console.log('[HotYestYestVol] 填充结果: filled=' + filled + ' skipped=' + skipped + ' (无代码=' + _skipReasons.noCode + ' 无量=' + _skipReasons.noVol + ' 已有值=' + _skipReasons.alreadyHas + ') patches=' + yesterdayYestVolPatches.length);
                 // 同「两全昨日成交量」的修复：不能用 buildYesterdayListFromToday 造出的 yesterdayList
                 // 直接覆盖 hotAuctionData[yesterday]，否则会把对比日原有、这次名单没覆盖到的股票冲掉，
                 // 后续 syncHotStocksListForDate 同步时会把这些股票误标记 in_watchlist=false 而从
@@ -16660,9 +16803,27 @@
                 if (yesterdayYestVolPatches.length > 0) {
                     patchHotFieldBatch(yesterday, yesterdayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday yest_volume 失败:', e); });
                 }
-                pushHotTrendsToCloud(yesterday, existingYesterdayList).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
-                if (shadowOnlyYesterdayStocks.length > 0) {
-                    pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
+                // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
+                var _trendsExist = existingYesterdayList.filter(function(s) { return s && s.stock && s.yestVolume; });
+                pushHotTrendsToCloud(yesterday, _trendsExist).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                var _trendsShadow = shadowOnlyYesterdayStocks.filter(function(s) { return s && s.stock && s.yestVolume; });
+                if (_trendsShadow.length > 0) {
+                    pushHotTrendsToCloud(yesterday, _trendsShadow).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
+                }
+
+                // 调试：验证 _hotFullRowCache 是否已更新
+                if (yesterdayYestVolPatches.length > 0) {
+                    var _cacheList = _hotFullRowCache[yesterday] || [];
+                    var _cacheMap = {};
+                    _cacheList.forEach(function(r) { if (r && r.stock) _cacheMap[r.stock.trim()] = r; });
+                    var _verifyLog = [];
+                    yesterdayYestVolPatches.forEach(function(p) {
+                        var name = (p.stock || '').trim();
+                        var cached = _cacheMap[name];
+                        var trendVal = getStockHistoryValue(yesterday, name, 'yestVolume', 'hot');
+                        _verifyLog.push(name + ': cache.yest_volume=' + (cached ? (cached.yest_volume || cached.yestVolume || '(空)') : '(无行)') + ' trendVal=' + (trendVal !== null ? trendVal : 'null'));
+                    });
+                    console.log('[HotYestYestVol] 缓存验证(' + _verifyLog.length + '只):\n' + _verifyLog.join('\n'));
                 }
 
                 renderHotForm();
