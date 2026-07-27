@@ -7237,7 +7237,7 @@
                     <button type="button" onclick="fillHotTodayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">当天昨日成交量</button>
                     <button type="button" onclick="fillHotYesterdayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">对比日昨成交量</button>
                     <button type="button" onclick="fetchHotChangePctFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取涨幅</button>
-                    <button type="button" onclick="fillHotHistoryGapPctFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">历史断点涨幅</button>
+                    <button type="button" onclick="openHistoryGapPctModeModal(this,'hot')" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">历史断点涨幅</button>
                     <button type="button" onclick="fillHotHistoryGapYestVolumeFromThs(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">历史断点昨日成交量</button>
                 </div>
                 <span id="thsApiStatusHot" style="display: block; margin-top: 6px; font-size: 12px; color: #92400e; min-height: 16px;"></span>
@@ -7286,6 +7286,58 @@
             </form>
         </div>
     </div>
+
+    <!-- 历史断点涨幅 - 模式选择弹窗（补全 / 覆盖），早盘竞价与热门股票共用 -->
+    <div class="modal" id="historyGapPctModeModal" onclick="if(event.target===this)closeHistoryGapPctModeModal()">
+        <div class="modal-content" style="max-width:360px;padding-bottom:24px">
+            <div class="modal-header">
+                <div style="font-weight:600;color:#1f2937">📈 历史断点涨幅 — 选择模式</div>
+                <button class="close-btn" onclick="closeHistoryGapPctModeModal()">×</button>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin:10px 0 14px;line-height:1.6">
+                请选择执行模式。两种模式都以窗口内"竞价量最早有值的那天"为起点，拉取历史K线重新计算涨幅。
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+                <button type="button" id="historyGapPctFillBtn" onclick="confirmHistoryGapPctMode('fill')" style="padding:14px 8px;font-size:13px;background:linear-gradient(135deg,#059669,#047857);color:#fff;border:none;border-radius:8px;cursor:pointer;min-height:60px;font-weight:600;line-height:1.4">
+                    🩹 补全<br><span style="font-size:10px;font-weight:400;opacity:0.9">只补缺失涨幅的断点日</span>
+                </button>
+                <button type="button" id="historyGapPctOverwriteBtn" onclick="confirmHistoryGapPctMode('overwrite')" style="padding:14px 8px;font-size:13px;background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;border:none;border-radius:8px;cursor:pointer;min-height:60px;font-weight:600;line-height:1.4">
+                    🔄 覆盖<br><span style="font-size:10px;font-weight:400;opacity:0.9">重抓所有涨幅（含已有值）</span>
+                </button>
+            </div>
+            <div id="historyGapPctModeDesc" style="font-size:11px;color:#94a3b8;line-height:1.5;padding:8px 10px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0">
+                鼠标悬停按钮查看详细说明
+            </div>
+        </div>
+    </div>
+    <script>
+    // 弹窗上下文：记录哪个 tab、哪个按钮触发了模式选择
+    let _historyGapPctCtx = { btn: null, tab: 'auction' };
+    function openHistoryGapPctModeModal(btn, tab) {
+        _historyGapPctCtx = { btn: btn, tab: tab || 'auction' };
+        const modal = document.getElementById('historyGapPctModeModal');
+        if (modal) modal.classList.add('active');
+        // 悬停提示
+        const fillBtn = document.getElementById('historyGapPctFillBtn');
+        const owBtn = document.getElementById('historyGapPctOverwriteBtn');
+        const desc = document.getElementById('historyGapPctModeDesc');
+        if (fillBtn) fillBtn.onmouseenter = function(){ if(desc) desc.textContent = '补全模式：从起点日起，只对涨幅为空（断点）的交易日拉取K线并写入。已有涨幅的日期保持不变。'; };
+        if (owBtn) owBtn.onmouseenter = function(){ if(desc) desc.textContent = '覆盖模式：从起点日起，对所有交易日（含已有涨幅的日期）重新拉取K线、重算涨幅并覆盖写入。用于修正之前不正确或不完整的涨幅数据。'; };
+    }
+    function closeHistoryGapPctModeModal() {
+        const modal = document.getElementById('historyGapPctModeModal');
+        if (modal) modal.classList.remove('active');
+    }
+    function confirmHistoryGapPctMode(mode) {
+        const ctx = _historyGapPctCtx;
+        closeHistoryGapPctModeModal();
+        if (ctx.tab === 'hot') {
+            fillHotHistoryGapPctFromThs(ctx.btn, mode);
+        } else {
+            fillAuctionHistoryGapPctFromThs(ctx.btn, mode);
+        }
+    }
+    </script>
 
     <div class="modal" id="auctionModal" onclick="if(event.target===this)closeAuctionModal()">
         <div class="modal-content modal-content-rank">
@@ -7367,7 +7419,7 @@
                     <button type="button" onclick="fillTodayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">当天昨日成交量</button>
                     <button type="button" onclick="fillYesterdayYesterdayVolumeFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">对比日昨成交量</button>
                     <button type="button" onclick="fetchChangePctFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">获取涨幅</button>
-                    <button type="button" onclick="fillAuctionHistoryGapPctFromThs(this)" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">历史断点涨幅</button>
+                    <button type="button" onclick="openHistoryGapPctModeModal(this,'auction')" style="padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px;">历史断点涨幅</button>
                     <button type="button" onclick="fillAuctionHistoryGapYestVolumeFromThs(this)" style="grid-column: span 2; padding: 10px 8px; font-size: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; border-radius: 4px; cursor: pointer; min-height: 40px; font-weight: 600;">历史断点昨日成交量</button>
                 </div>
                 <span id="thsApiStatus" style="display: block; margin-top: 6px; font-size: 12px; color: #92400e; min-height: 16px;"></span>
@@ -15353,7 +15405,10 @@
         // 三条红线相同：不读不写第一页正式列表语义、不调 syncAuctionListForDate、patch 只放 change_pct。
         // 早盘竞价的第一页列表由 getTodayAuction() 过滤 in_watchlist===true 得到，
         // 影子记录（in_watchlist=false）不会出现在第一页，但趋势图能读到——正是本功能依赖的机制。
-        async function fillAuctionHistoryGapPctFromThs(btn) {
+        // mode: 'fill'（补全，仅写 null 断点）| 'overwrite'（覆盖，重抓起点后所有交易日涨幅）
+        async function fillAuctionHistoryGapPctFromThs(btn, mode) {
+            mode = (mode === 'overwrite') ? 'overwrite' : 'fill';
+            const modeLabel = mode === 'overwrite' ? '覆盖' : '补全';
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -15384,7 +15439,7 @@
                     }
                     if (!hasVol) missingVolumeInWindow++;
                 });
-                _dbgLog('[AUCTION-BTN] 历史断点涨幅 点击 | currentDate=' + today + ' | 正式列表=' + todayList.length +
+                _dbgLog('[AUCTION-BTN] 历史断点涨幅(' + modeLabel + ') 点击 | currentDate=' + today + ' | 正式列表=' + todayList.length +
                     ' | 窗口交易日=' + windowDates.join(',') +
                     ' | 缺代码=' + missingCode + ' | 窗口内无竞价量=' + missingVolumeInWindow);
 
@@ -15403,19 +15458,26 @@
                     }
                     if (!startDate) { noStartDateNames.push(name); return; }
                     const rawGapDates = [];
+                    const hadValueDates = []; // 覆盖模式：记录已有涨幅的日期（用于区分"补"和"覆盖"）
                     let started = false;
                     for (let i = 0; i < windowDates.length; i++) {
                         const dt = windowDates[i];
                         if (dt === startDate) started = true;
                         if (!started) continue;
                         const pct = getStockHistoryValue(dt, name, 'changePct', 'auction');
-                        if (pct === null) rawGapDates.push(dt);
+                        if (pct === null) {
+                            rawGapDates.push(dt);
+                        } else if (mode === 'overwrite') {
+                            // 覆盖模式：已有涨幅的日期也要重抓，加入待处理列表
+                            rawGapDates.push(dt);
+                            hadValueDates.push(dt);
+                        }
                     }
                     // 过滤非交易日：若 currentDate 是周末，窗口可能包含非交易日，
                     // API 不会返回这些日期的 K 线，避免把周末当断点日去抓空数据。
                     const gapDates = rawGapDates.filter(isTradingDay);
                     if (gapDates.length > 0) {
-                        gapMap[name] = { code: code, gapDates: gapDates, nonTradingSkip: rawGapDates.length - gapDates.length };
+                        gapMap[name] = { code: code, gapDates: gapDates, hadValueDates: hadValueDates, nonTradingSkip: rawGapDates.length - gapDates.length };
                         totalGapDays += gapDates.length;
                     } else {
                         noGapNames.push(name);
@@ -15423,24 +15485,24 @@
                 });
 
                 const stockNames = Object.keys(gapMap);
-                _dbgLog('[AUCTION-BTN] 历史断点涨幅 断点汇总 | 有断点=' + stockNames.length + '（共' + totalGapDays + '天）' +
-                    ' | 窗口内有竞价量但无断点=' + noGapNames.length +
+                _dbgLog('[AUCTION-BTN] 历史断点涨幅(' + modeLabel + ') 目标汇总 | 有目标=' + stockNames.length + '（共' + totalGapDays + '天）' +
+                    ' | 窗口内有竞价量但无目标=' + noGapNames.length +
                     ' | 窗口内无竞价量=' + noStartDateNames.length);
                 if (stockNames.length === 0) {
                     if (noStartDateNames.length > 0) {
-                        setApiStatus('thsApiStatus', '✅ 近5日涨幅无断点：' + noStartDateNames.length + ' 只股票窗口内无竞价量，无法定位起点；' + noGapNames.length + ' 只已有完整涨幅', true);
+                        setApiStatus('thsApiStatus', '✅ 近5日涨幅无需' + modeLabel + '：' + noStartDateNames.length + ' 只股票窗口内无竞价量，无法定位起点；' + noGapNames.length + ' 只已有完整涨幅', true);
                     } else {
-                        setApiStatus('thsApiStatus', '✅ 近5日涨幅无断点（所有股票已有完整涨幅）', true);
+                        setApiStatus('thsApiStatus', '✅ 近5日涨幅无需' + modeLabel + '（所有股票已有完整涨幅）', true);
                     }
                     return;
                 }
 
                 setApiStatus('thsApiStatus',
-                    '发现 ' + stockNames.length + ' 只股票共 ' + totalGapDays + ' 个涨幅断点，正在逐只拉取历史K线...', true);
+                    modeLabel + '模式：发现 ' + stockNames.length + ' 只股票共 ' + totalGapDays + ' 个目标日，正在逐只拉取历史K线...', true);
 
                 const patchesByDate = {};
                 let filledStocks = 0, failedStocks = 0, noDataStocks = 0;
-                let filledGapDays = 0, noDataGapDays = 0, nonTradingSkipTotal = 0;
+                let filledGapDays = 0, overwrittenDays = 0, noDataGapDays = 0, nonTradingSkipTotal = 0;
 
                 for (let si = 0; si < stockNames.length; si++) {
                     const name = stockNames[si];
@@ -15448,7 +15510,11 @@
                     nonTradingSkipTotal += (info.nonTradingSkip || 0);
                     const earliestGap = info.gapDates[0];
                     const baseDate = getPreviousTradingDay(earliestGap);
-                    if (!baseDate) { failedStocks++; continue; }
+                    if (!baseDate) {
+                        failedStocks++;
+                        _dbgLog('[AUCTION-BTN] 历史断点涨幅(' + modeLabel + ') ' + name + ' 跳过：无法找到最早目标日 ' + earliestGap + ' 的前一交易日');
+                        continue;
+                    }
                     const startMs = new Date(baseDate + 'T00:00:00').getTime();
                     const endMs = new Date(today + 'T23:59:59').getTime();
                     try {
@@ -15471,10 +15537,11 @@
                             const prev = getPreviousTradingDay(gd);
                             return !closeByDate[gd] || (prev && !closeByDate[prev]);
                         });
-                        _dbgLog('[AUCTION-BTN] 历史断点涨幅 ' + name + '(' + info.code + ') 返回K线日期=' + returnedDates.join(',') +
-                            ' | 断点日=' + info.gapDates.join(',') +
+                        _dbgLog('[AUCTION-BTN] 历史断点涨幅(' + modeLabel + ') ' + name + '(' + info.code + ') 返回K线日期=' + returnedDates.join(',') +
+                            ' | 目标日=' + info.gapDates.join(',') +
                             (missingDates.length > 0 ? ' | 缺失前收/当日收=' + missingDates.join(',') : ''));
                         let stockFilled = 0;
+                        let stockOverwritten = 0;
                         let stockNoData = 0;
                         info.gapDates.forEach(function(gapDate) {
                             const prevDate = getPreviousTradingDay(gapDate);
@@ -15488,13 +15555,22 @@
                             const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
                             if (!patchesByDate[gapDate]) patchesByDate[gapDate] = [];
                             patchesByDate[gapDate].push({ stock: name, change_pct: pctStr });
-                            stockFilled++;
+                            // 区分：该日期之前是否有值（覆盖 vs 补全）
+                            if (info.hadValueDates && info.hadValueDates.indexOf(gapDate) >= 0) {
+                                stockOverwritten++;
+                            } else {
+                                stockFilled++;
+                            }
                         });
-                        if (stockFilled > 0) { filledStocks++; filledGapDays += stockFilled; }
+                        if (stockFilled > 0 || stockOverwritten > 0) {
+                            filledStocks++;
+                            filledGapDays += stockFilled;
+                            overwrittenDays += stockOverwritten;
+                        }
                         if (stockNoData > 0) { noDataStocks++; noDataGapDays += stockNoData; }
                         if (si % 5 === 4 || si === stockNames.length - 1) {
                             setApiStatus('thsApiStatus',
-                                '拉取进度 ' + (si + 1) + '/' + stockNames.length + '，已补 ' + filledGapDays + ' 个断点...', true);
+                                modeLabel + '进度 ' + (si + 1) + '/' + stockNames.length + '，已处理 ' + (filledGapDays + overwrittenDays) + ' 个目标日...', true);
                         }
                     } catch (e) {
                         failedStocks++;
@@ -15506,27 +15582,33 @@
                 for (let di = 0; di < gapDateKeys.length; di++) {
                     const dt = gapDateKeys[di];
                     patchAuctionFieldBatch(dt, patchesByDate[dt]).catch(function(e) {
-                        _dbgLog('[AUCTION-ERR] patchAuctionFieldBatch 历史断点涨幅 ' + dt + ' ' + (e && e.message || e));
+                        _dbgLog('[AUCTION-ERR] patchAuctionFieldBatch 历史断点涨幅(' + modeLabel + ') ' + dt + ' ' + (e && e.message || e));
                     });
                 }
 
                 renderAuctionForm();
                 renderAuction();
 
-                _dbgLog('[AUCTION-BTN] 历史断点涨幅 写入汇总 | 已写入股票=' + filledStocks +
-                    ' | 已写入断点=' + filledGapDays +
-                    ' | 无K线数据股票=' + noDataStocks + '（断点日=' + noDataGapDays + '）' +
+                _dbgLog('[AUCTION-BTN] 历史断点涨幅(' + modeLabel + ') 写入汇总 | 已写入股票=' + filledStocks +
+                    ' | 补全断点=' + filledGapDays + ' | 覆盖已有=' + overwrittenDays +
+                    ' | 无K线数据股票=' + noDataStocks + '（目标日=' + noDataGapDays + '）' +
                     ' | 拉取失败=' + failedStocks +
                     ' | 非交易日跳过=' + nonTradingSkipTotal);
 
-                const statusParts = ['✅ 补全完成：' + filledStocks + ' 只股票、' + filledGapDays + ' 个断点日涨幅已写入'];
-                if (noDataStocks > 0) statusParts.push(noDataStocks + ' 只断点日无K线数据');
+                const statusParts = ['✅ ' + modeLabel + '完成：' + filledStocks + ' 只股票'];
+                if (mode === 'overwrite') {
+                    statusParts.push('覆盖 ' + overwrittenDays + ' 个已有涨幅');
+                    if (filledGapDays > 0) statusParts.push('补全 ' + filledGapDays + ' 个断点');
+                } else {
+                    statusParts.push(filledGapDays + ' 个断点日涨幅已写入');
+                }
+                if (noDataStocks > 0) statusParts.push(noDataStocks + ' 只目标日无K线数据');
                 if (failedStocks > 0) statusParts.push(failedStocks + ' 只拉取失败');
-                if (nonTradingSkipTotal > 0) statusParts.push('跳过 ' + nonTradingSkipTotal + ' 个非交易日断点');
+                if (nonTradingSkipTotal > 0) statusParts.push('跳过 ' + nonTradingSkipTotal + ' 个非交易日');
                 setApiStatus('thsApiStatus', statusParts.join('，') + '（影子记录，不影响任何日期的最近多板池）', true);
             } catch (err) {
-                console.error('fillAuctionHistoryGapPctFromThs 失败:', err);
-                let msg = err && err.message ? err.message : '补全失败';
+                console.error('fillAuctionHistoryGapPctFromThs(' + modeLabel + ') 失败:', err);
+                let msg = err && err.message ? err.message : (modeLabel + '失败');
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatus', '❌ ' + msg, false);
             } finally {
@@ -16729,7 +16811,7 @@
             }
         }
 
-        // ---------- 同花顺（热门股票）：历史断点涨幅补全 ----------
+        // ---------- 同花顺（热门股票）：历史断点涨幅补全/覆盖 ----------
         // 与"获取涨幅"的区别：那个只补今天一天的涨幅；这个针对每只股票近5日涨幅图里的断点日，
         // 把断点日的历史涨幅补进 _hotFullRowCache（影子记录方式），让五日涨幅图连起来。
         // 三条红线（对应历史踩坑）：
@@ -16739,7 +16821,10 @@
         //   3. 只用 patchHotFieldBatch 且 patch 里只放 change_pct —— 不碰其它任何字段。
         // 补哪天：5日窗口内"竞价量最早有值的那天"起到今天，缺涨幅的日期才补；
         //   竞价量还没有值更早的日期（股票还没入池）不补，符合"数据从竞价量最早那个点开始"的规则。
-        async function fillHotHistoryGapPctFromThs(btn) {
+        // mode: 'fill'（补全，仅写 null 断点）| 'overwrite'（覆盖，重抓起点后所有交易日涨幅，含已有值）
+        async function fillHotHistoryGapPctFromThs(btn, mode) {
+            mode = (mode === 'overwrite') ? 'overwrite' : 'fill';
+            const modeLabel = mode === 'overwrite' ? '覆盖' : '补全';
             setBtnLoading(btn, true);
             try {
                 const today = currentDate;
@@ -16760,10 +16845,15 @@
                     return;
                 }
 
+                _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') 点击 | currentDate=' + today + ' | 今日列表=' + todayList.length +
+                    ' | 窗口交易日=' + windowDates.join(','));
+
                 // 对每只股票：确定有效起始日（窗口内竞价量最早有值的那天），收集该日之后的涨幅断点日
-                // gapMap: { stockName: { code, gapDates: [date,...] } }
+                // gapMap: { stockName: { code, gapDates: [date,...], hadValueDates: [date,...] } }
                 const gapMap = {};
                 let totalGapDays = 0;
+                const noStartDateNames = [];
+                const noGapNames = [];
                 todayList.forEach(function(s) {
                     const name = s.stock.trim();
                     const code = (s.code || scMap[name] || '').trim();
@@ -16774,46 +16864,69 @@
                         const vol = getStockHistoryValue(windowDates[i], name, 'volume', 'hot');
                         if (vol !== null) { startDate = windowDates[i]; break; }
                     }
-                    if (!startDate) return;
-                    // 起始日及之后、到今天为止，缺涨幅(changePct)的日期就是断点
-                    const gapDates = [];
+                    if (!startDate) { noStartDateNames.push(name); return; }
+                    // 起始日及之后、到今天为止
+                    const rawGapDates = [];
+                    const hadValueDates = []; // 覆盖模式：记录已有涨幅的日期
                     let started = false;
                     for (let i = 0; i < windowDates.length; i++) {
                         const dt = windowDates[i];
                         if (dt === startDate) started = true;
                         if (!started) continue;
                         const pct = getStockHistoryValue(dt, name, 'changePct', 'hot');
-                        if (pct === null) gapDates.push(dt);
+                        if (pct === null) {
+                            rawGapDates.push(dt);
+                        } else if (mode === 'overwrite') {
+                            rawGapDates.push(dt);
+                            hadValueDates.push(dt);
+                        }
                     }
+                    // 【Bug修复】过滤非交易日：与早盘竞价版对齐，窗口可能包含周末/节假日，
+                    // API 不返回这些日期的 K 线，不过滤会导致无意义的"无K线数据"计数。
+                    const gapDates = rawGapDates.filter(isTradingDay);
                     if (gapDates.length > 0) {
-                        gapMap[name] = { code: code, gapDates: gapDates };
+                        gapMap[name] = { code: code, gapDates: gapDates, hadValueDates: hadValueDates, nonTradingSkip: rawGapDates.length - gapDates.length };
                         totalGapDays += gapDates.length;
+                    } else {
+                        noGapNames.push(name);
                     }
                 });
 
                 const stockNames = Object.keys(gapMap);
+                _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') 目标汇总 | 有目标=' + stockNames.length + '（共' + totalGapDays + '天）' +
+                    ' | 窗口内有竞价量但无目标=' + noGapNames.length +
+                    ' | 窗口内无竞价量=' + noStartDateNames.length);
                 if (stockNames.length === 0) {
-                    setApiStatus('thsApiStatusHot', '✅ 近5日涨幅无断点（或竞价量数据不足，无需补全）', true);
+                    if (noStartDateNames.length > 0) {
+                        setApiStatus('thsApiStatusHot', '✅ 近5日涨幅无需' + modeLabel + '：' + noStartDateNames.length + ' 只股票窗口内无竞价量，无法定位起点；' + noGapNames.length + ' 只已有完整涨幅', true);
+                    } else {
+                        setApiStatus('thsApiStatusHot', '✅ 近5日涨幅无需' + modeLabel + '（所有股票已有完整涨幅）', true);
+                    }
                     return;
                 }
 
                 setApiStatus('thsApiStatusHot',
-                    '发现 ' + stockNames.length + ' 只股票共 ' + totalGapDays + ' 个涨幅断点，正在逐只拉取历史K线...', true);
+                    modeLabel + '模式：发现 ' + stockNames.length + ' 只股票共 ' + totalGapDays + ' 个目标日，正在逐只拉取历史K线...', true);
 
                 // 逐只股票：用一次 historical 请求拿"最早断点日前一天 ~ 今天"的日K，
                 // 用相邻两日 close_price 自己算涨幅（接口不直接返回涨跌幅字段）。
                 // 按日期分组收集 patch，逐日 patchHotFieldBatch 上报（影子记录语义，in_watchlist 默认 false）。
                 const patchesByDate = {}; // { date: [ {stock, change_pct}, ... ] }
-                let filledStocks = 0, failedStocks = 0;
-                let filledGapDays = 0;
+                let filledStocks = 0, failedStocks = 0, noDataStocks = 0;
+                let filledGapDays = 0, overwrittenDays = 0, noDataGapDays = 0, nonTradingSkipTotal = 0;
 
                 for (let si = 0; si < stockNames.length; si++) {
                     const name = stockNames[si];
                     const info = gapMap[name];
+                    nonTradingSkipTotal += (info.nonTradingSkip || 0);
                     const earliestGap = info.gapDates[0];
                     // 基准日：最早断点日的前一交易日（算最早断点日涨幅需要它的收盘价）
                     const baseDate = getPreviousTradingDay(earliestGap);
-                    if (!baseDate) { failedStocks++; continue; }
+                    if (!baseDate) {
+                        failedStocks++;
+                        _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') ' + name + ' 跳过：无法找到最早目标日 ' + earliestGap + ' 的前一交易日');
+                        continue;
+                    }
                     const startMs = new Date(baseDate + 'T00:00:00').getTime();
                     const endMs = new Date(today + 'T23:59:59').getTime();
                     try {
@@ -16832,22 +16945,45 @@
                             const ds = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
                             if (typeof it.close_price === 'number') closeByDate[ds] = it.close_price;
                         });
+                        const returnedDates = Object.keys(closeByDate).sort();
+                        const missingDates = info.gapDates.filter(function(gd) {
+                            const prev = getPreviousTradingDay(gd);
+                            return !closeByDate[gd] || (prev && !closeByDate[prev]);
+                        });
+                        _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') ' + name + '(' + info.code + ') 返回K线日期=' + returnedDates.join(',') +
+                            ' | 目标日=' + info.gapDates.join(',') +
+                            (missingDates.length > 0 ? ' | 缺失前收/当日收=' + missingDates.join(',') : ''));
                         let stockFilled = 0;
+                        let stockOverwritten = 0;
+                        let stockNoData = 0;
                         info.gapDates.forEach(function(gapDate) {
                             const prevDate = getPreviousTradingDay(gapDate);
                             const c0 = prevDate ? closeByDate[prevDate] : undefined;
                             const c1 = closeByDate[gapDate];
-                            if (typeof c0 !== 'number' || typeof c1 !== 'number' || c0 === 0) return;
+                            if (typeof c0 !== 'number' || typeof c1 !== 'number' || c0 === 0) {
+                                stockNoData++;
+                                return;
+                            }
                             const pct = ((c1 - c0) / c0) * 100;
                             const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
                             if (!patchesByDate[gapDate]) patchesByDate[gapDate] = [];
                             patchesByDate[gapDate].push({ stock: name, change_pct: pctStr });
-                            stockFilled++;
+                            // 区分：该日期之前是否有值（覆盖 vs 补全）
+                            if (info.hadValueDates && info.hadValueDates.indexOf(gapDate) >= 0) {
+                                stockOverwritten++;
+                            } else {
+                                stockFilled++;
+                            }
                         });
-                        if (stockFilled > 0) { filledStocks++; filledGapDays += stockFilled; }
+                        if (stockFilled > 0 || stockOverwritten > 0) {
+                            filledStocks++;
+                            filledGapDays += stockFilled;
+                            overwrittenDays += stockOverwritten;
+                        }
+                        if (stockNoData > 0) { noDataStocks++; noDataGapDays += stockNoData; }
                         if (si % 5 === 4 || si === stockNames.length - 1) {
                             setApiStatus('thsApiStatusHot',
-                                '拉取进度 ' + (si + 1) + '/' + stockNames.length + '，已补 ' + filledGapDays + ' 个断点...', true);
+                                modeLabel + '进度 ' + (si + 1) + '/' + stockNames.length + '，已处理 ' + (filledGapDays + overwrittenDays) + ' 个目标日...', true);
                         }
                     } catch (e) {
                         failedStocks++;
@@ -16860,7 +16996,7 @@
                 for (let di = 0; di < gapDateKeys.length; di++) {
                     const dt = gapDateKeys[di];
                     patchHotFieldBatch(dt, patchesByDate[dt]).catch(function(e) {
-                        console.warn('patchHotFieldBatch 历史断点涨幅 ' + dt + ' 失败:', e);
+                        _dbgLog('[HOT-ERR] patchHotFieldBatch 历史断点涨幅(' + modeLabel + ') ' + dt + ' ' + (e && e.message || e));
                     });
                 }
 
@@ -16868,12 +17004,26 @@
                 renderHotForm();
                 renderHotStocks();
 
-                setApiStatus('thsApiStatusHot',
-                    '✅ 补全完成：' + filledStocks + ' 只股票、' + filledGapDays + ' 个断点日涨幅已写入（影子记录，不影响任何日期的最近多板池）' +
-                    (failedStocks > 0 ? '，' + failedStocks + ' 只拉取失败' : ''), true);
+                _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') 写入汇总 | 已写入股票=' + filledStocks +
+                    ' | 补全断点=' + filledGapDays + ' | 覆盖已有=' + overwrittenDays +
+                    ' | 无K线数据股票=' + noDataStocks + '（目标日=' + noDataGapDays + '）' +
+                    ' | 拉取失败=' + failedStocks +
+                    ' | 非交易日跳过=' + nonTradingSkipTotal);
+
+                const statusParts = ['✅ ' + modeLabel + '完成：' + filledStocks + ' 只股票'];
+                if (mode === 'overwrite') {
+                    statusParts.push('覆盖 ' + overwrittenDays + ' 个已有涨幅');
+                    if (filledGapDays > 0) statusParts.push('补全 ' + filledGapDays + ' 个断点');
+                } else {
+                    statusParts.push(filledGapDays + ' 个断点日涨幅已写入');
+                }
+                if (noDataStocks > 0) statusParts.push(noDataStocks + ' 只目标日无K线数据');
+                if (failedStocks > 0) statusParts.push(failedStocks + ' 只拉取失败');
+                if (nonTradingSkipTotal > 0) statusParts.push('跳过 ' + nonTradingSkipTotal + ' 个非交易日');
+                setApiStatus('thsApiStatusHot', statusParts.join('，') + '（影子记录，不影响任何日期的最近多板池）', true);
             } catch (err) {
-                console.error('fillHotHistoryGapPctFromThs 失败:', err);
-                let msg = err && err.message ? err.message : '补全失败';
+                console.error('fillHotHistoryGapPctFromThs(' + modeLabel + ') 失败:', err);
+                let msg = err && err.message ? err.message : (modeLabel + '失败');
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
             } finally {
