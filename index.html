@@ -24651,6 +24651,24 @@
             }
         }
 
+        // 兜底清理：竞/昨 关闭时立即移除左侧蓝色/绿色行情标记，
+        // 防止 Vue memo 路径重渲染延迟导致旧标记残留。
+        function _clearAuctionRowHighlights(dataSource) {
+            const p = dataSource === 'hot' ? 'hot' : 'auction';
+            const content = document.getElementById(p + 'Content');
+            if (content) {
+                content.querySelectorAll('.jing-yest-match, .parallel-match').forEach(function(el) {
+                    el.classList.remove('jing-yest-match', 'parallel-match');
+                });
+            }
+            const content2 = document.getElementById(p + 'Content2');
+            if (content2) {
+                content2.querySelectorAll('.jing-yest-match, .parallel-match').forEach(function(el) {
+                    el.classList.remove('jing-yest-match', 'parallel-match');
+                });
+            }
+        }
+
         function onAuctionSortByJingYestToggle2Change() {
             resetAuctionExpansionOnToggle('auction', true);
             const jingYestChecked = document.getElementById('auctionSortByJingYestToggle2').checked;
@@ -24663,6 +24681,7 @@
             } else {
                 // 关闭"竞/昨" → 联动关闭"平行"
                 if (parallelToggle2) parallelToggle2.checked = false;
+                _clearAuctionRowHighlights('auction');
             }
             renderAuctionPage2();
         }
@@ -24749,6 +24768,7 @@
             } else {
                 // 关闭"竞/昨" → 联动关闭"平行"
                 if (parallelToggle) parallelToggle.checked = false;
+                _clearAuctionRowHighlights('auction');
             }
             renderAuction();
         }
@@ -24824,6 +24844,7 @@
                 if (parallelToggle) parallelToggle.checked = true;
             } else {
                 if (parallelToggle) parallelToggle.checked = false;
+                _clearAuctionRowHighlights('hot');
             }
             renderAuction('hot');
         }
@@ -24876,6 +24897,7 @@
                 if (parallelToggle2) parallelToggle2.checked = true;
             } else {
                 if (parallelToggle2) parallelToggle2.checked = false;
+                _clearAuctionRowHighlights('hot');
             }
             renderAuctionPage2('hot');
         }
