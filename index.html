@@ -2402,21 +2402,25 @@
             background: rgba(245, 158, 11, 0.12);
         }
 
-        /* 平行达标行（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：左侧绿色边框，仅在"平行"开关打开时显示，优先于竞放量高光 */
-        .auction-item.parallel-match {
+        /* 平行达标行（今日竞价量>T-1竞价量 且 T-1成交量>T-2成交量）：左侧绿色边框，仅在"平行"开关打开时显示，优先于竞放量高光。
+           显示受容器 .parallel-enabled 控制，避免开关关闭后行级 class 残留导致标记不消失。 */
+        .auction-content.parallel-enabled .auction-item.parallel-match,
+        .auction-content.parallel-enabled .auction-topic-row.parallel-match {
             box-shadow: inset 4px 0 0 #10b981;
         }
 
-        .auction-item.parallel-match:hover {
+        .auction-content.parallel-enabled .auction-item.parallel-match:hover {
             background: rgba(16, 185, 129, 0.12);
         }
 
-        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：左侧蓝色边框，仅在"竞/昨"开关打开时显示，优先于平行高光 */
-        .auction-item.jing-yest-match {
+        /* 竞/昨达标行（平行条件基础上，今/昨比 > 昨/前比）：左侧蓝色边框，仅在"竞/昨"开关打开时显示，优先于平行高光。
+           显示受容器 .jing-yest-enabled 控制，避免开关关闭后行级 class 残留导致标记不消失。 */
+        .auction-content.jing-yest-enabled .auction-item.jing-yest-match,
+        .auction-content.jing-yest-enabled .auction-topic-row.jing-yest-match {
             box-shadow: inset 4px 0 0 #3b82f6;
         }
 
-        .auction-item.jing-yest-match:hover {
+        .auction-content.jing-yest-enabled .auction-item.jing-yest-match:hover {
             background: rgba(59, 130, 246, 0.12);
         }
 
@@ -19761,6 +19765,8 @@
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
             // 同步第一页排序开关到 store（Vue 路径读 store；innerHTML 路径仍读 DOM）
             _syncSortStateToStore(dataSource, 1);
+            // 同步开关状态到内容容器，控制左侧标记 CSS 显示/隐藏
+            _updateAuctionHighlightContainerState(dataSource);
             // 日期发生变化时，所有排序/展开开关重置为默认关闭状态（不记忆）；按分组各自记录上次渲染日期
             // 此处提前到路由之前执行，确保 Vue 路径也能在切换日期时重置开关并同步到 store
             const _lastRenderDate = dataSource === 'hot' ? _lastHotRenderDate : _lastAuctionRenderDate;
@@ -19788,6 +19794,8 @@
                 _syncSortStateToStore(dataSource, 2);
             }
             if (dataSource === 'hot') _lastHotRenderDate = currentDate; else _lastAuctionRenderDate = currentDate;
+            // 日期重置后再次同步容器状态，确保切日期后旧标记容器类也被清掉
+            _updateAuctionHighlightContainerState(dataSource);
             // 保存滚动位置，防止 Realtime 等回调触发重新渲染时跳回顶部
             var _savedScrollY = window.scrollY;
             // 确保题材历史缓存可用（内部有幂等保护，重复调用不会重复扫描）
@@ -21320,6 +21328,8 @@
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
             // 同步第二页排序开关到 store（Vue 路径读 store；innerHTML 路径仍读 DOM）
             _syncSortStateToStore(dataSource, 2);
+            // 同步开关状态到内容容器，控制左侧标记 CSS 显示/隐藏
+            _updateAuctionHighlightContainerState(dataSource);
 
             // ===== Vue 化展示层（全量切换：默认走 Vue，不再依赖特性开关）=====
             // 两个 tab 各自挂载独立 Vue 实例（per-tab app），均由 store 响应式驱动。
@@ -24666,6 +24676,24 @@
                 content2.querySelectorAll('.jing-yest-match, .parallel-match').forEach(function(el) {
                     el.classList.remove('jing-yest-match', 'parallel-match');
                 });
+            }
+        }
+
+        // 根据当前开关状态，给内容容器加上/移除 jing-yest-enabled / parallel-enabled 类。
+        // 左侧标记的显示完全受容器类控制，这样即使行级 class 因缓存/重绘未清掉，
+        // 关闭开关后标记也会立即消失，不受 Vue memo 重渲染时机影响。
+        function _updateAuctionHighlightContainerState(dataSource) {
+            const p = dataSource === 'hot' ? 'hot' : 'auction';
+            const content = document.getElementById(p + 'Content');
+            const content2 = document.getElementById(p + 'Content2');
+            const enabled = function(el) { return !!(el && el.checked); };
+            if (content) {
+                content.classList.toggle('jing-yest-enabled', enabled(document.getElementById(p + 'SortByJingYestToggle')));
+                content.classList.toggle('parallel-enabled', enabled(document.getElementById(p + 'SortByParallelToggle')));
+            }
+            if (content2) {
+                content2.classList.toggle('jing-yest-enabled', enabled(document.getElementById(p + 'SortByJingYestToggle2')));
+                content2.classList.toggle('parallel-enabled', enabled(document.getElementById(p + 'SortByParallelToggle2')));
             }
         }
 
