@@ -7288,7 +7288,8 @@
     </div>
 
     <!-- 历史断点涨幅 - 模式选择弹窗（补全 / 覆盖），早盘竞价与热门股票共用 -->
-    <div class="modal" id="historyGapPctModeModal" onclick="if(event.target===this)closeHistoryGapPctModeModal()">
+    <!-- z-index 设为 3000：高于编辑后台 modal 的 2000，确保弹窗显示在编辑后台之上而非前台主页之上 -->
+    <div class="modal" id="historyGapPctModeModal" style="z-index: 3000" onclick="if(event.target===this)closeHistoryGapPctModeModal()">
         <div class="modal-content" style="max-width:360px;padding-bottom:24px">
             <div class="modal-header">
                 <div style="font-weight:600;color:#1f2937">📈 历史断点涨幅 — 选择模式</div>
