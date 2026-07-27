@@ -16348,6 +16348,8 @@
                     statusMsg = '✅ 已获取 ' + constituents.length + ' 只股票（历史热股榜，不支持飙升榜）';
                 }
 
+                _dbgLog('[HOT-SKYROCKET] targetDate=' + targetDate + ' 原始股票数=' + constituents.length);
+
                 // 备份当日数据（用于撤回）—— 按锁存的 targetDate 备份，而非可能已变化的当前日期
                 backupHotStocksData('import', targetDate);
 
@@ -16378,6 +16380,8 @@
                     };
                 });
 
+                const withCodeCount = newList.filter(function(s) { return s && s.code; }).length;
+
                 // 更新 stockCodeMap（name → code，全局共享）
                 const scMap = loadAllData().stockCodeMap || {};
                 let mapUpdated = false;
@@ -16389,12 +16393,14 @@
                         mapUpdated = true;
                     }
                 });
+                _dbgLog('[HOT-SKYROCKET] 合并后 newList=' + newList.length + ' 有代码=' + withCodeCount + ' stockCodeMap更新=' + mapUpdated);
                 if (mapUpdated) {
                     allData.stockCodeMap = scMap;
                     saveModule('stockCodeMap');
                     scheduleCloudPush();
                 }
 
+                _dbgLog('[HOT-SKYROCKET] 写入 hotAuctionData[' + targetDate + '] 行数=' + newList.length + ' 有代码=' + withCodeCount);
                 hotAuctionData[targetDate] = newList;
                 invalidateTopicCache();
 
@@ -16437,6 +16443,8 @@
                     setApiStatus('thsApiStatusHot', '❌ 无法确定 ' + targetDate + ' 的上一交易日', false);
                     return;
                 }
+
+                _dbgLog('[LADDER] targetDate=' + targetDate + ' fetchDate=' + fetchDate);
 
                 const isFutureDate = targetDate > sysToday;
                 setApiStatus('thsApiStatusHot',
@@ -16534,12 +16542,15 @@
                         mapUpdated = true;
                     }
                 });
+                const withCodeCount2 = newList.filter(function(s) { return s && s.code; }).length;
+                _dbgLog('[LADDER] 合并后 newList=' + newList.length + ' 有代码=' + withCodeCount2 + ' stockCodeMap更新=' + mapUpdated);
                 if (mapUpdated) {
                     allData.stockCodeMap = scMap;
                     saveModule('stockCodeMap');
                     scheduleCloudPush();
                 }
 
+                _dbgLog('[LADDER] 写入 hotAuctionData[' + targetDate + '] 行数=' + newList.length + ' 有代码=' + withCodeCount2);
                 hotAuctionData[targetDate] = newList;
                 invalidateTopicCache();
 
@@ -16628,7 +16639,7 @@
                 const allCodes = Object.keys(codeToName);
                 if (allCodes.length === 0) {
                     console.log('[HotBothYestVol] 无可用代码：todayList=' + todayList.length + ' yesterdayList=' + yesterdayList.length + ' stockCodeMap=' + Object.keys(scMap).length);
-                    setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺少代码映射，请先获取飙升+热股或导入代码映射）', false);
+                    setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺少代码映射，请先通过「昨日涨停连板」「获取飙升+热股」导入股票，或导入代码映射）', false);
                     return;
                 }
 
@@ -16784,7 +16795,7 @@
                 const hotAuctionData = getHotAuctionData();
                 const todayList = (hotAuctionData[today] || []).slice();
                 if (todayList.length === 0) {
-                    setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先获取飙升+热股', false);
+                    setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先通过「昨日涨停连板」或「获取飙升+热股」导入股票', false);
                     return;
                 }
                 const scMap = loadAllData().stockCodeMap || {};
@@ -16982,7 +16993,7 @@
                 const allCodes = Object.keys(codeToName);
                 if (allCodes.length === 0) {
                     console.log('[HotYestYestVol] 无可用代码：yesterdayList=' + yesterdayList.length + ' stockCodeMap=' + Object.keys(scMap).length);
-                    setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺代码映射，请先获取飙升+热股或导入代码映射）', false);
+                    setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺代码映射，请先通过「昨日涨停连板」「获取飙升+热股」导入股票，或导入代码映射）', false);
                     return;
                 }
                 console.log('[HotYestYestVol] 开始 today=' + today + ' yesterday=' + yesterday + ' dayBefore=' + dayBefore + ' mode=' + (overwrite ? '覆盖' : '补全') + ' yesterdayList=' + yesterdayList.length + ' 有代码=' + allCodes.length + ' 缓存恢复=' + recoveredCodePatches.length + ' 无代码=' + _noCodeStocks.length + (_noCodeStocks.length > 0 ? ' 无代码=' + _noCodeStocks.join(',') : ''));
@@ -17130,7 +17141,7 @@
                 });
 
                 if (thscodes.length === 0) {
-                    setApiStatus('thsApiStatusHot', '❌ 没有可查询的股票（缺少代码映射，请先获取飙升+热股）', false);
+                    setApiStatus('thsApiStatusHot', '❌ 没有可查询的股票（缺少代码映射，请先通过「昨日涨停连板」或「获取飙升+热股」导入股票，或导入代码映射）', false);
                     return;
                 }
 
@@ -17714,7 +17725,7 @@
 
                 if (allCodesSet.size === 0) {
                     console.log('[NUMCAT-DEBUG-HOT] 无可用代码：todayList=' + todayList.length + ' stockCodeMap=' + Object.keys(scMap).length);
-                    setApiStatus('numcatApiStatusHot', '❌ 没有可补全的股票（缺少代码映射，请先获取飙升+热股或导入代码映射）', false);
+                    setApiStatus('numcatApiStatusHot', '❌ 没有可补全的股票（缺少代码映射，请先通过「昨日涨停连板」「获取飙升+热股」导入股票，或导入代码映射）', false);
                     return;
                 }
 
@@ -18136,7 +18147,7 @@
                 if (todayCodeMissing > 0) {
                     push('　　💡 修复建议：');
                     if (todayCodeInMap > 0) push('　　　1) 点「保存」可把 stockCodeMap 中的代码写回云端；');
-                    push('　　　' + (todayCodeInMap > 0 ? '2' : '1') + ') 点「获取飙升+热股」或「导入代码映射」获取代码；');
+                    push('　　　' + (todayCodeInMap > 0 ? '2' : '1') + ') 点「昨日涨停连板」「获取飙升+热股」或「导入代码映射」获取代码；');
                     push('　　　' + (todayCodeInMap > 0 ? '3' : '2') + ') 若仍缺代码，可先用猫抓「连抓三天补全」从接口返回中自动映射。');
                 }
                 push('');
