@@ -14591,6 +14591,17 @@
             return t + '.SH';
         }
 
+        // 从同花顺接口返回项中提取 6 位股票代码：优先 ticker，缺失时从 thscode 截取
+        function extractCodeFromFuyaoItem(item) {
+            if (!item) return '';
+            if (item.ticker) return String(item.ticker).trim();
+            if (item.thscode) {
+                const code = String(item.thscode).trim().replace(/\..*$/, '');
+                if (/^\d{6}$/.test(code)) return code;
+            }
+            return '';
+        }
+
         // 统一渲染接口状态文本
         function setApiStatus(elId, msg, isOk) {
             const el = document.getElementById(elId);
@@ -14678,9 +14689,10 @@
                 const newList = constituents.map(function(c) {
                     const name = (c.name || '').trim();
                     const existing = existingMap[name];
+                    const code = extractCodeFromFuyaoItem(c) || (existing ? (existing.code || '') : '');
                     const row = {
                         stock: name,
-                        code: c.ticker || (existing ? (existing.code || '') : ''),
+                        code: code,
                         volume: existing ? (existing.volume || '') : '',
                         yestVolume: existing ? (existing.yestVolume || '') : '',
                         note: existing ? (existing.note || '') : '',
@@ -14736,14 +14748,14 @@
                 });
                 _dbgLogVerbose('[LADDER] 覆盖后 newList 共 ' + newList.length + ' 只，其中 obsAutoAdded=' + newList.filter(function(r){return r.obsAutoAdded===true;}).length + ' 只');
 
-                // 更新 stockCodeMap（name → ticker）
+                // 更新 stockCodeMap（name → code）
                 const scMap = loadAllData().stockCodeMap || {};
                 let mapUpdated = false;
                 constituents.forEach(function(c) {
                     const name = (c.name || '').trim();
-                    const ticker = c.ticker || '';
-                    if (name && ticker && scMap[name] !== ticker) {
-                        scMap[name] = ticker;
+                    const code = extractCodeFromFuyaoItem(c);
+                    if (name && code && scMap[name] !== code) {
+                        scMap[name] = code;
                         mapUpdated = true;
                     }
                 });
@@ -16061,9 +16073,10 @@
                 const newList = constituents.map(function(c) {
                     const name = (c.name || '').trim();
                     const existing = existingMap[name];
+                    const code = extractCodeFromFuyaoItem(c) || (existing ? (existing.code || '') : '');
                     return {
                         stock: name,
-                        code: c.ticker || (existing ? (existing.code || '') : ''),
+                        code: code,
                         volume: existing ? (existing.volume || '') : '',
                         yestVolume: existing ? (existing.yestVolume || '') : '',
                         note: existing ? (existing.note || '') : '',
@@ -16076,14 +16089,14 @@
                     };
                 });
 
-                // 更新 stockCodeMap（name → ticker，全局共享）
+                // 更新 stockCodeMap（name → code，全局共享）
                 const scMap = loadAllData().stockCodeMap || {};
                 let mapUpdated = false;
                 constituents.forEach(function(c) {
                     const name = (c.name || '').trim();
-                    const ticker = c.ticker || '';
-                    if (name && ticker && scMap[name] !== ticker) {
-                        scMap[name] = ticker;
+                    const code = extractCodeFromFuyaoItem(c);
+                    if (name && code && scMap[name] !== code) {
+                        scMap[name] = code;
                         mapUpdated = true;
                     }
                 });
@@ -16179,9 +16192,12 @@
                     if (s && s.stock) existingMap[s.stock.trim()] = s;
                 });
 
+                const missingCodeNames = [];
                 const newList = constituents.map(function(c) {
                     const name = (c.name || '').trim();
                     const existing = existingMap[name];
+                    const code = extractCodeFromFuyaoItem(c) || (existing ? (existing.code || '') : '');
+                    if (!code && name) missingCodeNames.push(name);
 
                     // 涨幅：已乘 100，格式化为 +/-X.YY%
                     let changePct = '';
@@ -16200,7 +16216,7 @@
 
                     return {
                         stock: name,
-                        code: c.ticker || (existing ? (existing.code || '') : ''),
+                        code: code,
                         volume: existing ? (existing.volume || '') : '',
                         yestVolume: existing ? (existing.yestVolume || '') : '',
                         note: note,
@@ -16213,14 +16229,18 @@
                     };
                 });
 
+                if (missingCodeNames.length > 0) {
+                    _dbgLog('[LADDER] 以下股票无法提取代码: ' + missingCodeNames.join(','));
+                }
+
                 // 更新共享代码映射
                 const scMap = loadAllData().stockCodeMap || {};
                 let mapUpdated = false;
                 constituents.forEach(function(c) {
                     const name = (c.name || '').trim();
-                    const ticker = c.ticker || '';
-                    if (name && ticker && scMap[name] !== ticker) {
-                        scMap[name] = ticker;
+                    const code = extractCodeFromFuyaoItem(c);
+                    if (name && code && scMap[name] !== code) {
+                        scMap[name] = code;
                         mapUpdated = true;
                     }
                 });
@@ -25938,6 +25958,46 @@
             }));
         }
 
+        // 确保某日期包含所有默认模板行（如 账号溢价），避免手动/抓取后特殊行丢失
+        function ensureBiddingTemplateRows(date) {
+            if (!date) return;
+            const bidding = getBiddingData();
+            const existing = bidding[date];
+            const originalHadData = existing && Array.isArray(existing) && existing.length > 0;
+            if (!existing || !Array.isArray(existing)) {
+                bidding[date] = getDefaultBiddingData();
+                _dbgLog('[BIDDING-TEMPLATE] ' + date + ' 无数据，已初始化默认模板行');
+                return;
+            }
+            const template = getDefaultBiddingTemplate();
+            const existingNames = new Set(existing.map(r => ((r && r.name) || '').trim()));
+            let added = 0;
+            template.forEach(function(t) {
+                const name = ((t && t.name) || '').trim();
+                if (name && !existingNames.has(name)) {
+                    existing.push({
+                        name: name,
+                        time915: '',
+                        time920: '',
+                        time930: '',
+                        change: '',
+                        close: ''
+                    });
+                    added++;
+                }
+            });
+            if (added > 0) {
+                _dbgLog('[BIDDING-TEMPLATE] ' + date + ' 补回 ' + added + ' 个缺失模板行');
+                // 该日期已有云端数据但缺失模板行时，把补回的行同步到云端，
+                // 防止下次云端拉取又把它们“覆盖掉”。
+                if (originalHadData) {
+                    pushBiddingToCloud(date).catch(function(e) {
+                        _dbgLog('[BIDDING-TEMPLATE] 推送补回模板行失败: ' + (e && e.message || e));
+                    });
+                }
+            }
+        }
+
         // 获取统计数据
         // 注意：这里不再无条件 markJiwangDirty(currentDate)！
         // 原因（真实事故复盘）：renderMarketStage()/renderCircleStats() 等纯展示函数
@@ -26363,6 +26423,9 @@
 
         // 渲染竞价变化看板
         function renderBidding() {
+            // 先补全模板行，再渲染，确保 账号溢价 等特殊行不会因历史数据缺失而消失
+            ensureBiddingTemplateRows(currentDate);
+
             let biddingData = getTodayBidding();
             const contentEl = document.getElementById('biddingContent');
             const placeholderEl = document.getElementById('biddingPlaceholder');
@@ -26816,6 +26879,7 @@
                 const formContainer = document.getElementById('biddingFormContainer');
                 const nameInputs = formContainer.querySelectorAll('[name^="name-"]');
                 let filledRows = 0;
+                let sectorEtfFilledValue = null;
                 nameInputs.forEach(function (nameInput) {
                     const idx = nameInput.name.split('-')[1];
                     const rowName = (nameInput.value || '').trim();
@@ -26824,9 +26888,22 @@
                     else if (rowName.indexOf('板块ETF') === 0 && values['板块ETF'] !== undefined) value = values['板块ETF'];
                     if (value === undefined) return;
                     const target = formContainer.querySelector('[name="' + point.col + '-' + idx + '"]');
-                    if (target) { target.value = value; filledRows++; }
+                    if (target) {
+                        target.value = value;
+                        filledRows++;
+                        if (rowName.indexOf('板块ETF') === 0) {
+                            sectorEtfFilledValue = value;
+                        }
+                    }
                 });
                 updateAllChangeValues(); // 9:25 填完后自动算增减列
+
+                // 如果本次填了板块ETF(48)，立即同步到早盘板块ETF表现看板（无需等点保存）
+                if (sectorEtfFilledValue !== null) {
+                    syncSectorEtfZhangNum(sectorEtfFilledValue);
+                    _dbgLog('[BIDDING-SNAP] 抓取后即时同步板块ETF涨数: ' + sectorEtfFilledValue);
+                }
+
                 say('✅ 已填入 ' + point.label + ' 列共 ' + filledRows + ' 行，请检查后点"保存竞价变化"', true);
             } catch (err) {
                 console.error('fetchBiddingSnapshotToForm 失败:', err);
@@ -26847,6 +26924,9 @@
             if (boardEl.classList.contains('minimized')) {
                 return;
             }
+
+            // 先补全模板行，再打开编辑，确保 账号溢价 等特殊行始终可编辑
+            ensureBiddingTemplateRows(currentDate);
             
             let biddingData = getTodayBidding();
             if (!biddingData || biddingData.length === 0) {
@@ -26992,14 +27072,14 @@
         }
 
         // 同步竞价变化收盘值到早盘板块ETF涨值
-        function syncBiddingCloseToEtf(input) {
-            const value = input.value.trim();
-            const zhangNum = parseInt(value) || 0;
+        // 根据板块ETF上涨数量同步到早盘板块ETF表现看板
+        function syncSectorEtfZhangNum(zhangNum) {
+            zhangNum = parseInt(zhangNum) || 0;
 
             // 同时更新已保存的ETF数据（先更新数据）
             const etfData = getEtfData();
             let todayEtf = etfData[currentDate];
-            
+
             // 如果没有数据，创建新数据
             if (!todayEtf || todayEtf.length === 0) {
                 todayEtf = [{
@@ -27009,26 +27089,34 @@
                     tushi: ''
                 }];
             }
-            
+
             const firstEtf = todayEtf[0];
             if (!firstEtf.shuliang) {
                 firstEtf.shuliang = '48';
             }
             const total = parseInt(firstEtf.shuliang) || 48;
             const dieValue = total - zhangNum;
-            firstEtf.dieZhangbi = dieValue + ':' + value;
+            firstEtf.dieZhangbi = dieValue + ':' + zhangNum;
             etfData[currentDate] = todayEtf;
             localStorage.setItem('stockEtfData', JSON.stringify(etfData));
-            
+
+            _dbgLog('[SECTOR-ETF] 同步到ETF看板: 总 ' + total + ', 涨 ' + zhangNum + ', 跌:涨 = ' + firstEtf.dieZhangbi);
+
             // 重新渲染ETF看板（这会更新显示）
             renderEtf();
-            
+
             // 如果早盘板块ETF编辑模态框打开，更新输入框
             const etfModal = document.getElementById('etfModal');
             if (etfModal && etfModal.classList.contains('active')) {
                 // 重新打开编辑框以显示最新数据
                 openEtfEdit();
             }
+        }
+
+        function syncBiddingCloseToEtf(input) {
+            const value = input.value.trim();
+            const zhangNum = parseInt(value) || 0;
+            syncSectorEtfZhangNum(zhangNum);
         }
 
 
@@ -27357,22 +27445,19 @@
             });
             
             // Fix Bug5: iOS上点"保存"时oninput可能来不及触发syncBiddingCloseToEtf
-            // 在saveBidding中主动同步板块ETF收盘值到早盘ETF看板
+            // 在saveBidding中主动同步板块ETF数据到早盘ETF看板。
+            // 兼容抓取时段：早盘填在 time930，收盘后填在 close，优先取 close，其次 time930。
             const sectorEtfRow = biddingData.find(row => row.name && row.name.startsWith('板块ETF'));
-            if (sectorEtfRow && sectorEtfRow.close && sectorEtfRow.close.trim() !== '') {
-                const zhangNum = parseInt(sectorEtfRow.close.trim()) || 0;
-                const etfData = getEtfData();
-                let todayEtf = etfData[currentDate];
-                if (!todayEtf || todayEtf.length === 0) {
-                    todayEtf = [{ shuliang: '48', dieZhangbi: '', jingtu: '', tushi: '' }];
+            if (sectorEtfRow) {
+                const rawValue = (sectorEtfRow.close && sectorEtfRow.close.trim() !== '')
+                    ? sectorEtfRow.close.trim()
+                    : (sectorEtfRow.time930 && sectorEtfRow.time930.trim() !== '')
+                        ? sectorEtfRow.time930.trim()
+                        : '';
+                if (rawValue !== '') {
+                    syncSectorEtfZhangNum(rawValue);
+                    _dbgLog('[BIDDING-SAVE] 保存时同步板块ETF涨数: ' + rawValue);
                 }
-                const firstEtf = todayEtf[0];
-                if (!firstEtf.shuliang) firstEtf.shuliang = '48';
-                const total = parseInt(firstEtf.shuliang) || 48;
-                firstEtf.dieZhangbi = (total - zhangNum) + ':' + zhangNum;
-                etfData[currentDate] = todayEtf;
-                localStorage.setItem('stockEtfData', JSON.stringify(etfData));
-                renderEtf();
             }
             
             // 同步账号溢价的收盘值到今日盈亏
