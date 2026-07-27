@@ -8295,6 +8295,10 @@
         // 场景下短暂闪烁清空。这个变量始终持有同一份引用，只由云端
         // pullBiddingFromTable/pullBiddingForDate 或本地编辑保存来更新。
         let _biddingMemCache = null;
+        // 记录当前正在推送到 bidding_data 表的日期，防止推送过程中被 Realtime/启动拉取覆盖。
+        window._biddingPushInFlight = new Set();
+        // 记录有本地待推送编辑的 bidding 日期（保存开始时加入，推送结束时移除）。
+        window._biddingDirtyDates = new Set();
         let _topicCache = null;
         let _topicCacheBuilt = false;
         // 记录用户手动展开的股票（按股票名），用于 renderAuction 重新渲染后恢复展开状态。
@@ -9096,6 +9100,11 @@
         // 拉取单日 bidding 数据并合并到本地
         async function pullBiddingForDate(date) {
             if (!date) return;
+            // [BUG-FIX] 如果该日期正在推送到云端，跳过本次拉取，避免把云端的旧/空值覆盖本地新编辑。
+            if (window._biddingPushInFlight && window._biddingPushInFlight.has(date)) {
+                _dbgLog('[BIDDING-PULL] 跳过 ' + date + '，该日期正在推送中');
+                return;
+            }
             const sb = getSupabase();
             const { data, error } = await sb.from('bidding_data')
                 .select('name,time915,time920,time930,"change",close,time930_initial,time930_initial_modifiedAt,time930_modifiedAt')
@@ -9162,37 +9171,62 @@
             // （表确实不存在）交给下面的 try/error 处理即可。
             _justPushedBidding = true; // 标记自己推送，5秒内忽略 Realtime 通知
             setTimeout(function() { _justPushedBidding = false; }, 5000);
-            const sb = getSupabase();
-            const biddingData = getBiddingData()[date] || [];
-            if (biddingData.length === 0) return;
-            const now = new Date().toISOString();
-            const rows = biddingData.filter(function(r) { return r && r.name; }).map(function(item) {
-                var row = {
-                    date: date,
-                    name: item.name,
-                    time915: item.time915 || '',
-                    time920: item.time920 || '',
-                    time930: item.time930 || '',
-                    change: item.change || '',
-                    close: item.close || '',
-                    updated_at: now
-                };
-                if (item.time930_initial !== undefined && item.time930_initial !== null) {
-                    row.time930_initial = item.time930_initial;
+            if (date) {
+                window._biddingPushInFlight.add(date);
+                window._biddingDirtyDates.add(date);
+            }
+            try {
+                const sb = getSupabase();
+                const biddingData = getBiddingData()[date] || [];
+                if (biddingData.length === 0) return;
+                const now = new Date().toISOString();
+                const rows = biddingData.filter(function(r) { return r && r.name; }).map(function(item) {
+                    var row = {
+                        date: date,
+                        name: item.name,
+                        time915: item.time915 || '',
+                        time920: item.time920 || '',
+                        time930: item.time930 || '',
+                        change: item.change || '',
+                        close: item.close || '',
+                        updated_at: now
+                    };
+                    if (item.time930_initial !== undefined && item.time930_initial !== null) {
+                        row.time930_initial = item.time930_initial;
+                    }
+                    if (item.time930_initial_modifiedAt !== undefined && item.time930_initial_modifiedAt !== null) {
+                        row.time930_initial_modifiedAt = toIsoTimestamp(item.time930_initial_modifiedAt);
+                    }
+                    if (item.time930_modifiedAt !== undefined && item.time930_modifiedAt !== null) {
+                        row.time930_modifiedAt = toIsoTimestamp(item.time930_modifiedAt);
+                    }
+                    return row;
+                });
+                if (rows.length === 0) return;
+                // [安全网] 避免空表单/空模板覆盖云端已有数据。如果所有行的业务字段均为空，
+                // 大概率是"本地数据未加载就保存"或"误点保存"，此时跳过 upsert 并告警。
+                const hasAnyValue = rows.some(function(r) {
+                    return (r.time915 && r.time915.trim() !== '') ||
+                           (r.time920 && r.time920.trim() !== '') ||
+                           (r.time930 && r.time930.trim() !== '') ||
+                           (r.change && r.change.trim() !== '') ||
+                           (r.close && r.close.trim() !== '');
+                });
+                if (!hasAnyValue) {
+                    _dbgLog('[BIDDING-PUSH] 跳过 ' + date + ' 的空数据推送，避免覆盖云端已有数据');
+                    console.warn('[BIDDING-PUSH] 跳过空数据推送:', date);
+                    return;
                 }
-                if (item.time930_initial_modifiedAt !== undefined && item.time930_initial_modifiedAt !== null) {
-                    row.time930_initial_modifiedAt = toIsoTimestamp(item.time930_initial_modifiedAt);
-                }
-                if (item.time930_modifiedAt !== undefined && item.time930_modifiedAt !== null) {
-                    row.time930_modifiedAt = toIsoTimestamp(item.time930_modifiedAt);
-                }
-                return row;
-            });
-            if (rows.length === 0) return;
-            const { error } = await sb.from('bidding_data')
-                .upsert(rows, { onConflict: 'date,name' });
-            if (error) throw error;
-            _biddingTableAvailable = true; // 推送成功即证明表可用
+                const { error } = await sb.from('bidding_data')
+                    .upsert(rows, { onConflict: 'date,name' });
+                if (error) throw error;
+                _biddingTableAvailable = true; // 推送成功即证明表可用
+                // 推送成功：该日期的本地编辑已同步，可从脏标记中移除
+                if (date) window._biddingDirtyDates.delete(date);
+                _dbgLog('[BIDDING-PUSH] 成功推送 ' + date + ' 共 ' + rows.length + ' 行');
+            } finally {
+                if (date) window._biddingPushInFlight.delete(date);
+            }
         }
 
         // 删除"云端有但本地表单里没有"的行（用户在编辑表单里点"删"掉的行）。
@@ -9201,22 +9235,28 @@
         // 安全前提：表单行来自 getTodayBidding()（云端全量），Worker 自动写入的行也在表单里，
         // 只有用户手动点"删"的行才会进入删除名单。
         async function syncBiddingDeletionsToCloud(date) {
-            const sb = getSupabase();
-            const localNames = new Set((getBiddingData()[date] || [])
-                .map(function(r) { return ((r && r.name) || '').trim(); })
-                .filter(function(n) { return n; }));
-            const { data: cloudRows, error } = await sb.from('bidding_data')
-                .select('name').eq('date', date);
-            if (error) throw error;
-            const toDelete = (cloudRows || [])
-                .map(function(r) { return ((r && r.name) || '').trim(); })
-                .filter(function(n) { return n && !localNames.has(n); });
-            if (toDelete.length === 0) return;
-            _justPushedBidding = true; // 删除也会触发 Realtime，同样屏蔽
-            setTimeout(function() { _justPushedBidding = false; }, 5000);
-            const { error: delErr } = await sb.from('bidding_data')
-                .delete().eq('date', date).in('name', toDelete);
-            if (delErr) throw delErr;
+            if (date) window._biddingPushInFlight.add(date);
+            try {
+                const sb = getSupabase();
+                const localNames = new Set((getBiddingData()[date] || [])
+                    .map(function(r) { return ((r && r.name) || '').trim(); })
+                    .filter(function(n) { return n; }));
+                const { data: cloudRows, error } = await sb.from('bidding_data')
+                    .select('name').eq('date', date);
+                if (error) throw error;
+                const toDelete = (cloudRows || [])
+                    .map(function(r) { return ((r && r.name) || '').trim(); })
+                    .filter(function(n) { return n && !localNames.has(n); });
+                if (toDelete.length === 0) return;
+                _justPushedBidding = true; // 删除也会触发 Realtime，同样屏蔽
+                setTimeout(function() { _justPushedBidding = false; }, 5000);
+                const { error: delErr } = await sb.from('bidding_data')
+                    .delete().eq('date', date).in('name', toDelete);
+                if (delErr) throw delErr;
+                _dbgLog('[BIDDING-DELETE] 成功删除 ' + date + ' 的 ' + toDelete.length + ' 个幽灵行: ' + toDelete.join(','));
+            } finally {
+                if (date) window._biddingPushInFlight.delete(date);
+            }
         }
 
         // 删除 bidding_data 表中某天的全部数据（用于"清除当天数据"功能）。
@@ -11553,16 +11593,28 @@
                     _dbgLog('[AUCTION-ERR] cleanseAuctionTagsOnce ' + (e && e.message || e));
                 }
 
-                // 从 bidding_data 独立表拉取 bidding 数据（云端表是唯一权威来源）
+                // 从 bidding_data 独立表拉取 bidding 数据（云端表是权威来源之一，
+                // 但不能因为某次拉取没返回某个日期就把本地已保存的数据删掉）。
                 try {
                     const tableBidding = await pullBiddingFromTable();
-                    if (Object.keys(tableBidding).length > 0) {
-                        // 原地更新持久内存缓存（不写 localStorage，也不重置 allData）
-                        if (!_biddingMemCache) _biddingMemCache = {};
-                        Object.keys(_biddingMemCache).forEach(function(d) { delete _biddingMemCache[d]; });
-                        Object.assign(_biddingMemCache, tableBidding);
-                        if (allData) allData.bidding = _biddingMemCache;
-                    }
+                    // 收集"正在推送到云端"或"有本地待推送编辑"的日期，这些日期不能被云端旧值覆盖。
+                    const pendingDates = new Set();
+                    if (window._biddingPushInFlight) window._biddingPushInFlight.forEach(function(d) { pendingDates.add(d); });
+                    if (window._biddingDirtyDates) window._biddingDirtyDates.forEach(function(d) { pendingDates.add(d); });
+                    if (_justPushedBidding) pendingDates.add(currentDate);
+                    const _beforeKeys = Object.keys(_biddingMemCache || {}).join(',');
+                    if (!_biddingMemCache) _biddingMemCache = {};
+                    // [BUG-FIX] 改为只覆盖云端实际返回的日期；云端没返回的日期保留本地原值。
+                    // 否则一次分页/网络抖动导致某天没返回，就会把本地该天数据清空——
+                    // 这正是"保存后刷新数据消失"的根因之一。
+                    Object.keys(tableBidding).forEach(function(d) {
+                        if (!pendingDates.has(d)) _biddingMemCache[d] = tableBidding[d];
+                    });
+                    if (allData) allData.bidding = _biddingMemCache;
+                    _dbgLog('[BIDDING-STARTUP] 云端表共 ' + Object.keys(tableBidding).length +
+                        ' 天，合并前本地=' + _beforeKeys +
+                        '，合并后=' + Object.keys(_biddingMemCache).join(',') +
+                        '，跳过推送中=' + Array.from(pendingDates).join(','));
                 } catch(tableErr) {
                     console.warn('bidding_data 表拉取失败，回退到内存缓存:', tableErr.message);
                 }
@@ -27076,6 +27128,7 @@
             const toggleBtn = document.getElementById('biddingToggleBtn');
 
             if (!biddingData || biddingData.length === 0) {
+                _dbgLog('[BIDDING-RENDER] ' + currentDate + ' 无有效数据，回退到默认模板');
                 biddingData = getDefaultBiddingData();
             }
 
@@ -27211,6 +27264,40 @@
 
             // 每次重新渲染（包括切换日期）时，关闭可能残留的历史提示框
             closeDuibanHistoryPopup();
+        }
+
+        // 竞价变化看板诊断：可在控制台执行 runBiddingDiagnostics() 查看当前状态
+        async function runBiddingDiagnostics() {
+            const lines = [];
+            const push = function(s) { lines.push(s); console.log(s); };
+            push('===== 竞价变化看板诊断 =====');
+            push('当前日期: ' + currentDate);
+            const localRows = (getBiddingData()[currentDate] || []);
+            push('本地内存行数: ' + localRows.length);
+            localRows.forEach(function(r) {
+                push('  ' + (r.name || '(无名)') + ' | 915=' + (r.time915 || '-') +
+                     ' 920=' + (r.time920 || '-') + ' 930=' + (r.time930 || '-') +
+                     ' change=' + (r.change || '-') + ' close=' + (r.close || '-'));
+            });
+            push('默认模板: ' + getDefaultBiddingTemplate().map(function(t) { return t.name; }).join('、'));
+            push('推送中日期: ' + (window._biddingPushInFlight ? Array.from(window._biddingPushInFlight).join(',') : '无'));
+            push('脏日期（未同步）: ' + (window._biddingDirtyDates ? Array.from(window._biddingDirtyDates).join(',') : '无'));
+            try {
+                const sb = getSupabase();
+                const { data, error } = await sb.from('bidding_data')
+                    .select('name,time915,time920,time930,"change",close')
+                    .eq('date', currentDate);
+                if (error) throw error;
+                push('云端当前日期行数: ' + ((data || []).length));
+                (data || []).forEach(function(r) {
+                    const hasValue = (r.time915 || r.time920 || r.time930 || r.change || r.close);
+                    push('  ' + (r.name || '(无名)') + (hasValue ? ' [有值]' : ' [空]'));
+                });
+            } catch (e) {
+                push('读取云端失败: ' + (e && e.message || e));
+            }
+            push('===== 诊断结束 =====');
+            return lines.join('\n');
         }
 
         // "最近多板%"历史提示弹窗：记录当前绑定的关闭监听器引用，避免重复绑定导致无法移除（手机端堆叠bug的根因）
@@ -27978,18 +28065,23 @@
             });
 
             getBiddingData()[currentDate] = biddingData;
+            // [BUG-FIX] 表单临时保存（增删行/清除前）也标记为脏，避免启动合并时把云端旧值覆盖回来。
+            window._biddingDirtyDates.add(currentDate);
             saveData();
         }
 
         // 保存竞价变化数据
-        function saveBidding() {
+        async function saveBidding() {
+            // [BUG-FIX] 立即标记当前日期有未同步编辑，防止保存过程中被 Realtime/启动拉取覆盖。
+            window._biddingDirtyDates.add(currentDate);
             const formContainer = document.getElementById('biddingFormContainer');
+            const saveBtn = document.querySelector('#biddingModal .submit-btn');
             const rawRows = [];
-            
+
             // 获取所有name输入框
             const nameInputs = formContainer.querySelectorAll('[name^="name-"]');
             const count = nameInputs.length;
-            
+
             for (let i = 0; i < count; i++) {
                 const nameInput = formContainer.querySelector(`[name="name-${i}"]`);
                 const time915Input = formContainer.querySelector(`[name="time915-${i}"]`);
@@ -27997,14 +28089,14 @@
                 const time930Input = formContainer.querySelector(`[name="time930-${i}"]`);
                 const changeInput = formContainer.querySelector(`[name="change-${i}"]`);
                 const closeInput = formContainer.querySelector(`[name="close-${i}"]`);
-                
+
                 const name = nameInput ? nameInput.value.trim() : '';
                 const time915 = time915Input ? time915Input.value.trim() : '';
                 const time920 = time920Input ? time920Input.value.trim() : '';
                 const time930 = time930Input ? time930Input.value.trim() : '';
                 const change = changeInput ? changeInput.value.trim() : '';
                 const close = closeInput ? closeInput.value.trim() : '';
-                
+
                 // 保留所有行（包括名称为空的行），否则历史数据会被当前模板覆盖
                 rawRows.push({
                     name,
@@ -28068,26 +28160,8 @@
 
             getBiddingData()[currentDate] = biddingData;
             saveData();
-            // 同步到 bidding_data 独立表（非阻塞）。
-            // bidding 已经是纯云端数据源，这次推送如果失败，意味着这次编辑
-            // 实际上没有真正保存下来（内存里的显示只是暂时的，一刷新就会
-            // 恢复成云端旧值）。因此失败时必须用醒目的方式告知用户，
-            // 不能只在控制台 warn——那样用户完全不会发现数据其实没保存成功。
-            // 直接把真实错误信息显示出来（而不是笼统地说"检查网络"），
-            // 因为手机上没法看控制台，只能靠这个 toast 才能确诊真正原因
-            // （比如权限/约束问题，而不一定是网络）。
-            pushBiddingToCloud(currentDate).catch(function(e) {
-                console.warn('saveBidding pushBiddingToCloud 失败:', e);
-                const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
-                showWarningToast('⚠️ 云端同步失败，本次修改未保存！原因: ' + detail, 10000);
-            });
-            // 同步删除"云端有但表单没有"的行（用户在表单里点"删"掉的行，比如改名残留的幽灵行）
-            syncBiddingDeletionsToCloud(currentDate).catch(function(e) {
-                console.warn('saveBidding syncBiddingDeletionsToCloud 失败:', e);
-                const detail = (e && (e.message || e.details || e.hint || e.code)) || String(e);
-                showWarningToast('⚠️ 删除多余行失败: ' + detail, 10000);
-            });
-            
+
+            // 本地可见的后续操作（不依赖云端推送）
             // Fix Bug5: iOS上点"保存"时oninput可能来不及触发syncBiddingCloseToEtf
             // 在saveBidding中主动同步板块ETF数据到早盘ETF看板。
             // 兼容抓取时段：早盘填在 time930，收盘后填在 close，优先取 close，其次 time930。
@@ -28103,7 +28177,7 @@
                     _dbgLog('[BIDDING-SAVE] 保存时同步板块ETF涨数: ' + rawValue);
                 }
             }
-            
+
             // 同步账号溢价的收盘值到今日盈亏
             const accountPremiumRow = biddingData.find(row => row.name === '账号溢价');
             if (accountPremiumRow && accountPremiumRow.close && accountPremiumRow.close.trim() !== '') {
@@ -28117,19 +28191,17 @@
                     renderCircleStats();
                 }
             }
-            
+
             // 保持展开状态（用户展开编辑后，保存后保持展开）
             const boardEl = document.getElementById('biddingBoard');
             const toggleBtn = document.getElementById('biddingToggleBtn');
             boardEl.classList.remove('minimized');
             toggleBtn.textContent = '▲';
-            
+
             renderBidding();
-            
+
             // 重新计算评分（因为竞价变化数据影响评分）
             autoCalculateRecentMultiScore();
-            
-            closeBiddingModal();
 
             autoCalculateConsecutiveDays();
             renderConsecutiveUp();
@@ -28137,8 +28209,29 @@
             // 同步更新记忘看板的昨多板K线（如果保存的是上一交易日的数据）
             syncJiwangKxianFromBidding();
 
-            showToast('✅ 竞价变化保存成功！');
-            
+            // [BUG-FIX] 等待云端同步完成后再关闭模态框，避免用户在推送完成前刷新页面导致数据丢失。
+            // 之前 pushBiddingToCloud 是 fire-and-forget，手机上保存后立即切屏/刷新容易丢数据。
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '保存中...'; }
+            let cloudErr = null;
+            try {
+                await pushBiddingToCloud(currentDate);
+                // 同步删除"云端有但表单没有"的行（用户在表单里点"删"掉的行，比如改名残留的幽灵行）
+                await syncBiddingDeletionsToCloud(currentDate);
+                _dbgLog('[BIDDING-SAVE] 云端同步完成 ' + currentDate);
+            } catch (e) {
+                cloudErr = e;
+                console.warn('saveBidding 云端同步失败:', e);
+            } finally {
+                if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '保存竞价变化'; }
+                closeBiddingModal();
+                if (cloudErr) {
+                    const detail = (cloudErr && (cloudErr.message || cloudErr.details || cloudErr.hint || cloudErr.code)) || String(cloudErr);
+                    showWarningToast('⚠️ 云端同步失败，本次修改未保存！原因: ' + detail, 10000);
+                } else {
+                    showToast('✅ 竞价变化保存成功（已同步云端）！');
+                }
+            }
+
             // 自动打标顺势/逆势标签
             autoTagShunshiNishi();
         }
