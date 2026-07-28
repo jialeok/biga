@@ -6685,6 +6685,12 @@
                 <button class="nav-btn" style="font-size:12px;padding:4px 8px" onclick="syncTradingDaysFromAPI()">🔄 同步交易日</button>
             </div>
 
+            <!-- API Key 输入（手机端不用开控制台） -->
+            <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+                <input type="text" id="aicubesApiKeyInput" placeholder="粘贴 X-api-key，保存后自动同步" style="width:100%;padding:6px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;box-sizing:border-box">
+                <button class="nav-btn" style="font-size:12px;padding:4px 8px" onclick="saveAicubesApiKeyFromInput()">保存 Key 并同步</button>
+            </div>
+
             <!-- 日历 -->
             <div id="datePickerCalendar" class="date-picker-calendar"></div>
             
@@ -36052,6 +36058,12 @@
             
             // 更新假期按钮状态
             updatePickerHolidayBtn();
+
+            // 如果已有 API Key，回填到输入框方便查看
+            try {
+                const apiKeyInput = document.getElementById('aicubesApiKeyInput');
+                if (apiKeyInput) apiKeyInput.value = getAicubesApiKey();
+            } catch (e) {}
             
             let html = '';
             
@@ -36271,6 +36283,18 @@
             try {
                 localStorage.setItem('aicubes_api_key', key || '');
             } catch (e) {}
+        }
+
+        // 从日期选择器输入框保存 API Key（手机端入口）
+        function saveAicubesApiKeyFromInput() {
+            const input = document.getElementById('aicubesApiKeyInput');
+            const key = input ? input.value.trim() : '';
+            if (!key) {
+                showToast('请输入 API Key');
+                return;
+            }
+            setAicubesApiKey(key);
+            syncTradingDaysFromAPI();
         }
 
         // 从 API 拿到的交易日集合（数组，yyyy-MM-dd 格式）
