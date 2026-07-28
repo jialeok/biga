@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Auction Board Vue Test</title>
+  <script src="vue.global.prod.js"></script>
+  <style>
+    .auction-board, .page2-board, .page3-board, .stats-board { min-height: 40px; }
+    .auction-page { display: none; }
+    .auction-page.active { display: block; }
+    .group-tab.active { font-weight: bold; color: #2563eb; }
+    .page-dot.active { background: #2563eb; }
+    .auction-stock-card { padding: 4px; border-bottom: 1px solid #e2e8f0; }
+    .auction-topic-group { margin: 8px 0; padding: 8px; border: 1px solid #e2e8f0; }
+  </style>
+</head>
+<body>
+  <div id="auctionBoard"></div>
+
+  <script>
+    // JSDOM file:// 协议下 localStorage 不可用，先 mock
+    try {
+      if (!window.localStorage) throw new Error('no localStorage');
+      window.localStorage.getItem('_test_');
+    } catch (e) {
+      var _lsStore = {};
+      window.localStorage = {
+        getItem: function (k) { return _lsStore.hasOwnProperty(k) ? _lsStore[k] : null; },
+        setItem: function (k, v) { _lsStore[k] = String(v); },
+        removeItem: function (k) { delete _lsStore[k]; },
+        clear: function () { _lsStore = {}; }
+      };
+    }
+
+    // 全局状态（strict IIFE 内会直接读取这些全局标识符）
+    var currentDate = '2026-07-28';
+    var currentGroup = 'auction';
+
+    // 日志空函数
+    function _dbgLog() {}
+    function _dbgLogVerbose() {}
+    function _perfLog() {}
+
+    // 数据存取 mock
+    var __auctionGroupData = {
+      '2026-07-28': [
+        { stock: '测试A', volume: '10000', yestVolume: '5000', ratioValue: 200, topic: 'AI', starCount: 2 },
+        { stock: '测试B', volume: '8000', yestVolume: '4000', ratioValue: 200, topic: '芯片', starCount: 1 }
+      ],
+      '2026-07-27': [
+        { stock: '测试A', volume: '5000', yestVolume: '3000', ratioValue: 167, topic: 'AI', starCount: 1 }
+      ]
+    };
+
+    function getGroupData(dataSource) { return __auctionGroupData; }
+    function getTodayGroupList(dataSource) { return __auctionGroupData[currentDate] || []; }
+    function getPreviousTradingDay(date) {
+      var map = { '2026-07-28': '2026-07-27', '2026-07-27': '2026-07-26' };
+      return map[date] || null;
+    }
+    function getYesterdayDate(date) { return getPreviousTradingDay(date); }
+    function getLastNTradingDays(n) {
+      return ['2026-07-28', '2026-07-27', '2026-07-26', '2026-07-25', '2026-07-24', '2026-07-23'].slice(0, n);
+    }
+    function getTodayDuiban() { return []; }
+    function getRankData() { return {}; }
+    function getCoreTopics() { return []; }
+    function getStocksData() { return {}; }
+    function getDisplayNote(item) { return item.note || ''; }
+    function getDisplayNoteWithHistory(item) { return item.note || ''; }
+    function extractTopics(note) { return note ? note.split(/[,，;；\s]+/).filter(Boolean) : []; }
+    function buildTopicCache() {}
+    function _buildTagStateCache(date) { return { todayMap: new Map(), prevMap: new Map(), soldSet: new Set() }; }
+    function getStarSymbols(n) { return '★'.repeat(Math.max(0, n || 0)); }
+    function getTodayJiwang() { return []; }
+    function getTopicGroups(list) {
+      if (!list || !list.length) return [];
+      var groups = {};
+      list.forEach(function (it) {
+        var topic = it.topic || '其它';
+        if (!groups[topic]) groups[topic] = { topic: topic, stocks: [], starCount: 0 };
+        groups[topic].stocks.push(it);
+        groups[topic].starCount += it.starCount || 0;
+      });
+      return Object.values(groups);
+    }
+    function getTopicSortOrder() { return []; }
+    function getTopicRankCountByDate() { return 0; }
+    function deriveAuctionTagState() { return { bought: false, sold: false, selected: false, hold: false, inheritedHold: false }; }
+    function getChangePctDisplay() { return '-'; }
+    function getHighRatioStocksForDate() { return { stockNames: new Set(), items: [], count: 0 }; }
+    function getParallelStocksForDate() { return new Set(); }
+    function getJingYestHighlightSetForDate() { return new Set(); }
+    function getRatioDiffInfoForDate() { return new Map(); }
+    function getNumericVolume(v) { var n = parseFloat(v); return isNaN(n) ? null : n; }
+    function getDigitCount(n) { return String(Math.abs(Math.round(n))).length; }
+
+    // 交互回调 mock
+    var __openAuctionEditCalled = false;
+    var __openHotEditCalled = false;
+    var __openCoreTopicModalCalled = false;
+    var __toggleAuctionBoardCalled = false;
+    var __toggleAuctionSortHelpCalled = false;
+    var __onAuctionExpandAllToggleChangeCalled = false;
+    var __onHotExpandAllToggleChangeCalled = false;
+
+    function openAuctionEdit() { __openAuctionEditCalled = true; }
+    function openHotEdit() { __openHotEditCalled = true; }
+    function openCoreTopicModal() { __openCoreTopicModalCalled = true; }
+    function toggleAuctionBoard() { __toggleAuctionBoardCalled = true; }
+    function toggleAuctionSortHelp() { __toggleAuctionSortHelpCalled = true; }
+    function onAuctionExpandAllToggleChange() { __onAuctionExpandAllToggleChangeCalled = true; }
+    function onHotExpandAllToggleChange() { __onHotExpandAllToggleChangeCalled = true; }
+    function toggleAuctionTrendPanel() {}
+    function toggleAuctionTrendPanelP2() {}
+    function toggleTopicGroupTrendPanels() {}
+    function jumpToAuctionPage2() {}
+    function showAuctionNotePopup() {}
+    function showAuctionNoteInput() {}
+    function showAuctionBuyPrompt() {}
+    function toggleAuctionRowSelect() {}
+    function copyAllTopicStocks() {}
+    function copyTopicStocks() {}
+    function toggleStrengthSort() {}
+  </script>
+  <script src="auction/auction-store.js"></script>
+  <script src="auction/auction-composables.js"></script>
+  <script src="auction/auction-components.js"></script>
+  <script src="auction/auction-vue.js"></script>
+</body>
+</html>

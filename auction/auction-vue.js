@@ -105,42 +105,43 @@
     name: 'Page1Toolbar',
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
+      const tab = Vue.computed(() => props.prefix === 'hot' ? 'hot' : 'auction');
       function onChange(key, e) {
         if (store.actions) store.actions.setSortState(1, key, e.target.checked);
         if (key === 'expandAll') {
           store.actions.setExpandAll(e.target.checked, 1);
-          safeCall(window['on' + (props.prefix === 'hot' ? 'Hot' : 'Auction') + 'ExpandAllToggleChange']);
+          safeCall(window[(props.prefix === 'hot' ? 'onHot' : 'onAuction') + 'ExpandAllToggleChange']);
         }
       }
-      return { onChange };
+      return { store, tab, prefix: props.prefix, onChange };
     },
     template: `
       <div class="auction-toolbar" :id="prefix + 'Toolbar'">
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">全部展开</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'ExpandAllToggle'" @change="onChange('expandAll', $event)">
+            <input type="checkbox" :id="prefix + 'ExpandAllToggle'" :checked="store.expandAll" @change="onChange('expandAll', $event)">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">数据</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByDataToggle'" @change="onChange('byData', $event)">
+            <input type="checkbox" :id="prefix + 'SortByDataToggle'" :checked="store.sortState[tab].byData" @change="onChange('byData', $event)">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">环比</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByRatioToggle'" @change="onChange('byRatio', $event)">
+            <input type="checkbox" :id="prefix + 'SortByRatioToggle'" :checked="store.sortState[tab].byRatio" @change="onChange('byRatio', $event)">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">平行</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByParallelToggle'" @change="onChange('byParallel', $event)">
+            <input type="checkbox" :id="prefix + 'SortByParallelToggle'" :checked="store.sortState[tab].byParallel" @change="onChange('byParallel', $event)">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
@@ -153,32 +154,33 @@
     name: 'Page2Toolbar',
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
+      const tab = Vue.computed(() => props.prefix === 'hot' ? 'hot' : 'auction');
       function onChange(key, e) {
         if (store.actions) store.actions.setSortState(2, key, e.target.checked);
         if (key === 'expandAll') store.actions.setExpandAll(e.target.checked, 2);
       }
-      return { onChange };
+      return { store, tab, prefix: props.prefix, onChange };
     },
     template: `
       <div class="auction-toolbar" :id="prefix + 'Toolbar2'">
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">全部展开</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'ExpandAllToggle2'" @change="onChange('expandAll', $event)">
+            <input type="checkbox" :id="prefix + 'ExpandAllToggle2'" :checked="store.expandAllP2" @change="onChange('expandAll', $event)">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">环比</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByRatioToggle2'" @change="onChange('byRatio', $event)">
+            <input type="checkbox" :id="prefix + 'SortByRatioToggle2'" :checked="store.sortStateP2[tab].byRatio" @change="onChange('byRatio', $event)">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">平行</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByParallelToggle2'" @change="onChange('byParallel', $event)">
+            <input type="checkbox" :id="prefix + 'SortByParallelToggle2'" :checked="store.sortStateP2[tab].byParallel" @change="onChange('byParallel', $event)">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
@@ -193,15 +195,17 @@
     setup(props) {
       const suffix = props.page === 2 ? '2' : '';
       const rowId = props.prefix + 'ToolbarRow2' + (props.page === 2 ? '_2' : '');
+      const tab = Vue.computed(() => props.prefix === 'hot' ? 'hot' : 'auction');
+      const stateKey = Vue.computed(() => props.page === 2 ? 'sortStateP2' : 'sortState');
       function onChange(e) { if (store.actions) store.actions.setSortState(props.page, 'byJingYest', e.target.checked); }
-      return { suffix, rowId, onChange };
+      return { store, tab, stateKey, suffix, rowId, prefix: props.prefix, onChange };
     },
     template: `
       <div class="auction-toolbar-row2" :id="rowId">
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">竞/昨</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByJingYestToggle' + suffix" @change="onChange">
+            <input type="checkbox" :id="prefix + 'SortByJingYestToggle' + suffix" :checked="store[stateKey][tab].byJingYest" @change="onChange">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
