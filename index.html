@@ -8233,6 +8233,7 @@
          现有内核函数（deriveAuctionTagState 等）逻辑不动，仅数据源改走 store 代理。 -->
     <script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
     <script src="dashboards.js"></script>
+    <script src="remaining-boards.js"></script>
 
     <!-- 被踢下线遮罩层 -->
     <div id="kickedOverlay" style="
@@ -12104,6 +12105,16 @@
                             allData[key] = _auctionMemCache;
                             return;
                         }
+                        // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles 独立拆表，
+                        // 走独立内存缓存，不读 localStorage 旧快照，避免与云端数据不同步。
+                        if (key === 'stocks' || key === 'rank' || key === 'multi' ||
+                            key === 'hotspot' || key === 'pattern' || key === 'tagTitles') {
+                            const cache = window['_' + key + 'MemCache'];
+                            if (cache) {
+                                allData[key] = cache;
+                                return;
+                            }
+                        }
                         const raw = localStorage.getItem(_moduleKey(key));
                         if (raw !== null) {
                             try {
@@ -12122,9 +12133,15 @@
                 } else {
                     if (!_biddingMemCache) _biddingMemCache = {};
                     if (!_jiwangMemCache) _jiwangMemCache = {};
+                    if (!_stocksMemCache) _stocksMemCache = {};
+                    if (!_rankMemCache) _rankMemCache = {};
+                    if (!_multiMemCache) _multiMemCache = {};
+                    if (!_hotspotMemCache) _hotspotMemCache = {};
+                    if (!_patternMemCache) _patternMemCache = {};
+                    if (!_tagTitlesMemCache) _tagTitlesMemCache = {};
                     allData = {
-                        stocks: {}, jiwang: _jiwangMemCache, rank: {}, multi: {},
-                        hotspot: {}, pattern: {}, bidding: _biddingMemCache, tagTitles: {},
+                        stocks: _stocksMemCache, jiwang: _jiwangMemCache, rank: _rankMemCache, multi: _multiMemCache,
+                        hotspot: _hotspotMemCache, pattern: _patternMemCache, bidding: _biddingMemCache, tagTitles: _tagTitlesMemCache,
                         auction: _auctionMemCache, holidays: [], stockCodeMap: {}
                     };
                 }
@@ -12137,14 +12154,16 @@
         }
         
         // 获取各个数据集的快捷方式
-        function getStocksData() { return loadAllData().stocks; }
+        // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles 返回独立内存缓存，
+        // 不经过 loadAllData 重建，避免全量依赖与状态不一致。
+        function getStocksData() { return _stocksMemCache || loadAllData().stocks; }
         function getJiwangData() { return loadAllData().jiwang; }
-        function getRankData() { return loadAllData().rank; }
-        function getMultiData() { return loadAllData().multi; }
-        function getHotspotData() { return loadAllData().hotspot; }
-        function getPatternData() { return loadAllData().pattern; }
+        function getRankData() { return _rankMemCache || loadAllData().rank; }
+        function getMultiData() { return _multiMemCache || loadAllData().multi; }
+        function getHotspotData() { return _hotspotMemCache || loadAllData().hotspot; }
+        function getPatternData() { return _patternMemCache || loadAllData().pattern; }
         function getBiddingData() { return loadAllData().bidding; }
-        function getTagTitlesData() { return loadAllData().tagTitles; }
+        function getTagTitlesData() { return _tagTitlesMemCache || loadAllData().tagTitles; }
         
         let currentFilter = 'all';
         let isStockListCollapsed = false; // 股票列表收起状态
@@ -12343,6 +12362,16 @@
             // 不再落 localStorage，避免本地旧/空快照在下次保存或导入时把云端数据覆盖掉，
             // 也避免与 _auctionMemCache 形成两份不同步的状态
             if (name === 'auction') return;
+            // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles 已独立拆表，
+            // 不落 localStorage，改为异步推送 Supabase
+            if (name === 'stocks' || name === 'rank' || name === 'multi' ||
+                name === 'hotspot' || name === 'pattern' || name === 'tagTitles') {
+                if (typeof remainingBoards !== 'undefined' && remainingBoards.markDirty) {
+                    remainingBoards.markDirty(name, currentDate);
+                    remainingBoards.schedulePush();
+                }
+                return;
+            }
             try {
                 localStorage.setItem(_moduleKey(name), JSON.stringify(allData[name]));
             } catch (e) {
@@ -12362,6 +12391,12 @@
                 if (key === 'jiwang') return;
                 // 阶段四 Bug 4 修复：auction 同样不再落 localStorage
                 if (key === 'auction') return;
+                // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles 已独立拆表，
+                // 不走 localStorage，改为标记脏数据并异步推送 Supabase
+                if (key === 'stocks' || key === 'rank' || key === 'multi' ||
+                    key === 'hotspot' || key === 'pattern' || key === 'tagTitles') {
+                    return;
+                }
                 if (allData && allData[key] !== undefined) {
                     try {
                         localStorage.setItem(_moduleKey(key), JSON.stringify(allData[key]));
@@ -12373,6 +12408,11 @@
                     }
                 }
             });
+            // 阶段八：触发剩余看板的云端同步
+            if (typeof remainingBoards !== 'undefined' && remainingBoards.markAllDirty && currentDate) {
+                remainingBoards.markAllDirty(currentDate);
+                remainingBoards.schedulePush();
+            }
             localStorage.setItem('lastEditedDate_' + DATA_VERSION, currentDate);
             // jiwang 数据独立防抖推送到 jiwang_data 表：遍历所有被标记为脏的日期
             // （不能只推 currentDate —— 例如"昨多板K线"回填是写 nextDate，
@@ -37493,17 +37533,34 @@
                         Object.keys(importedAuctionData).forEach(function(d) {
                             setAuctionDateData(d, importedAuctionData[d], 'handleFileImport');
                         });
+                        // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles
+                        // 导入数据写入独立内存缓存，避免 allData 与缓存断开引用
+                        Object.assign(_stocksMemCache, imported.stocks || {});
+                        Object.assign(_rankMemCache, imported.rank || {});
+                        Object.assign(_multiMemCache, imported.multi || {});
+                        Object.assign(_hotspotMemCache, imported.hotspot || {});
+                        Object.assign(_patternMemCache, imported.pattern || {});
+                        Object.assign(_tagTitlesMemCache, imported.tagTitles || {});
+
                         allData = {
-                            stocks: imported.stocks || {},
+                            stocks: _stocksMemCache,
                             jiwang: _jiwangMemCache,
-                            rank: imported.rank || {},
-                            multi: imported.multi || {},
-                            hotspot: imported.hotspot || {},
-                            pattern: imported.pattern || {},
+                            rank: _rankMemCache,
+                            multi: _multiMemCache,
+                            hotspot: _hotspotMemCache,
+                            pattern: _patternMemCache,
                             bidding: _biddingMemCache,
                             auction: _auctionMemCache,
-                            tagTitles: imported.tagTitles || {}
+                            tagTitles: _tagTitlesMemCache
                         };
+
+                        // 标记所有涉及日期为脏，确保推送到 Supabase
+                        if (imported.stocks) Object.keys(imported.stocks).forEach(d => remainingBoards.markDirty('stocks', d));
+                        if (imported.rank) Object.keys(imported.rank).forEach(d => remainingBoards.markDirty('rank', d));
+                        if (imported.multi) Object.keys(imported.multi).forEach(d => remainingBoards.markDirty('multi', d));
+                        if (imported.hotspot) Object.keys(imported.hotspot).forEach(d => remainingBoards.markDirty('hotspot', d));
+                        if (imported.pattern) Object.keys(imported.pattern).forEach(d => remainingBoards.markDirty('pattern', d));
+                        if (imported.tagTitles) Object.keys(imported.tagTitles).forEach(d => remainingBoards.markDirty('tagTitles', d));
 
                         // 这是一次"整体导入覆盖"，用户已经在上面的 confirm 中明确同意
                         // "导入将覆盖现有数据"。此时导入文件里的 auction 才是权威数据，
@@ -37796,18 +37853,35 @@
                         Object.assign(_jiwangMemCache, imported.jiwang);
                         Object.keys(imported.jiwang).forEach(function(d) { markJiwangDirty(d); });
                     }
+                    // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles
+                    // 导入数据写入独立内存缓存，避免 allData 与缓存断开引用
+                    Object.assign(_stocksMemCache, imported.stocks || {});
+                    Object.assign(_rankMemCache, imported.rank || {});
+                    Object.assign(_multiMemCache, imported.multi || {});
+                    Object.assign(_hotspotMemCache, imported.hotspot || {});
+                    Object.assign(_patternMemCache, imported.pattern || {});
+                    Object.assign(_tagTitlesMemCache, imported.tagTitles || {});
+
                     allData = {
-                        stocks: imported.stocks || {},
+                        stocks: _stocksMemCache,
                         jiwang: _jiwangMemCache,
-                        rank: imported.rank || {},
-                        multi: imported.multi || {},
-                        hotspot: imported.hotspot || {},
-                        pattern: imported.pattern || {},
+                        rank: _rankMemCache,
+                        multi: _multiMemCache,
+                        hotspot: _hotspotMemCache,
+                        pattern: _patternMemCache,
                         bidding: _biddingMemCache,
                         auction: imported.auction || {},
-                        tagTitles: imported.tagTitles || {}
+                        tagTitles: _tagTitlesMemCache
                     };
-                    
+
+                    // 标记所有涉及日期为脏，确保推送到 Supabase
+                    if (imported.stocks) Object.keys(imported.stocks).forEach(d => remainingBoards.markDirty('stocks', d));
+                    if (imported.rank) Object.keys(imported.rank).forEach(d => remainingBoards.markDirty('rank', d));
+                    if (imported.multi) Object.keys(imported.multi).forEach(d => remainingBoards.markDirty('multi', d));
+                    if (imported.hotspot) Object.keys(imported.hotspot).forEach(d => remainingBoards.markDirty('hotspot', d));
+                    if (imported.pattern) Object.keys(imported.pattern).forEach(d => remainingBoards.markDirty('pattern', d));
+                    if (imported.tagTitles) Object.keys(imported.tagTitles).forEach(d => remainingBoards.markDirty('tagTitles', d));
+
                     // 修复tagTitles数据结构
                     if (allData.tagTitles) {
                         // 先找到最新的有效日期
