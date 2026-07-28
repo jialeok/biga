@@ -37,15 +37,28 @@
     // ============================================================
     // 通用工具
     // ============================================================
-    function touchReactiveCtx() {
+    function touchReactiveCtx(dataSource) {
         if (!auctionStore) return '';
-        // 不依赖 currentGroup：切换 tab 时不应让后台 tab 的 computed 重算，减少卡顿。
-        // 各组件按自己的 dataSource 读取数据，currentGroup 只给 HighRatioStat 等需要显式守卫的组件读取。
-        return auctionStore.currentDate + '|v' + auctionStore.stocksDataVersion;
+        // 按数据源读取版本号：auction / hot 独立 bump，避免一个 tab 数据更新导致后台 tab 重算。
+        // currentGroup 由调用方显式读取，不作为通用依赖。
+        const key = tabKey(dataSource);
+        const ver = auctionStore.dataVersions && auctionStore.dataVersions[key] != null
+            ? auctionStore.dataVersions[key]
+            : auctionStore.stocksDataVersion;
+        return auctionStore.currentDate + '|' + key + '|v' + ver;
     }
 
     function tabKey(dataSource) {
         return dataSource === 'hot' ? 'hot' : 'auction';
+    }
+
+    function safeCall(fn, ...args) {
+        try {
+            if (typeof fn === 'function') return fn(...args);
+        } catch (e) {
+            console.warn('[AUCTION-COMPONENTS] 全局函数调用失败:', e);
+        }
+        return undefined;
     }
 
     // ============================================================
@@ -127,7 +140,8 @@
         if (isJingYestMatch) itemClass += ' jing-yest-match';
         else if (isParallelMatch) itemClass += ' parallel-match';
         else if (isHighRatioMatch) itemClass += ' high-ratio';
-        if (name && auctionStore && auctionStore.highlightStock === name) itemClass += ' highlight-search';
+        const keyword = auctionStore ? auctionStore.highlightKeyword : '';
+        if (name && auctionStore && (auctionStore.highlightStock === name || (keyword && name.toLowerCase().includes(keyword)))) itemClass += ' highlight-search';
 
         let ratioClass = 'auction-ratio auction-ratio-clickable';
         if (isHighlight) ratioClass = 'auction-ratio highlight auction-ratio-clickable';
@@ -171,7 +185,7 @@
 
     function computeAuctionViewData(dataSource) {
         dataSource = dataSource || 'auction';
-        touchReactiveCtx();
+        touchReactiveCtx(dataSource);
         const _p = tabKey(dataSource);
         const auctionList = getTodayList(dataSource);
         const prevAuctionList = getPrevList(dataSource, currentDate);
@@ -299,7 +313,7 @@
     // ============================================================
     function computeAuctionPage2ViewData(dataSource) {
         dataSource = dataSource || 'auction';
-        touchReactiveCtx();
+        touchReactiveCtx(dataSource);
         const isStrengthSortEnabled = auctionStore.strengthSortEnabled;
         const _p = tabKey(dataSource);
         const auctionList = getTodayList(dataSource);
@@ -514,7 +528,7 @@
 
     function computeAuctionPage3ViewData(dataSource) {
         dataSource = dataSource || 'auction';
-        touchReactiveCtx();
+        touchReactiveCtx(dataSource);
         const isStrengthSortEnabled = auctionStore.strengthSortEnabled;
         const allTradingDays = getLastNTradingDays(6);
         if (allTradingDays.length === 0) return { empty: true, placeholder: '暂无交易日数据' };
@@ -674,9 +688,11 @@
     // ============================================================
     function computeAuctionStatsViewData(dataSource) {
         dataSource = dataSource || 'auction';
-        touchReactiveCtx();
+        touchReactiveCtx(dataSource);
         // 星标签统计看板是常驻显示的外层面板，始终为当前 tab 计算；切 tab 时由外层 renderAuctionStatsBoard 重新挂载。
-        if (dataSource !== currentGroup) return { skip: true };
+        // 使用响应式 store.currentGroup 作为守卫，避免读取全局 currentGroup 导致切 tab 时不更新。
+        const activeGroup = (auctionStore && auctionStore.currentGroup) || currentGroup || 'auction';
+        if (dataSource !== activeGroup) return { skip: true };
         const todayAuction = getTodayList(dataSource);
         const yesterdayDate = getYesterdayDate(currentDate);
         const yesterdayAuction = yesterdayDate ? (getGroupData(dataSource)[yesterdayDate] || []) : [];
@@ -862,7 +878,7 @@
             const ds = Vue.computed(() => tabKey(props.prefix));
             const stateKey = props.page === 2 ? 'sortStateP2' : 'sortState';
             const view = Vue.computed(() => {
-                touchReactiveCtx();
+                touchReactiveCtx(ds.value);
                 if (auctionStore.currentGroup !== ds.value) return null;
                 if (props.page === 2 && auctionStore.currentPage !== 1) return null;
                 if (props.page === 1 && auctionStore.currentPage !== 0) return null;
@@ -977,13 +993,29 @@
         setup(props) {
             const ds = Vue.computed(() => tabKey(props.dataSource));
             const view = Vue.computed(() => {
-                touchReactiveCtx();
+                touchReactiveCtx(ds.value);
+                // 仅当前 tab 可见时才重算，避免后台 tab 随数据版本 bump 反复重算导致卡顿。
+                if (auctionStore.currentGroup !== ds.value) {
+                    return { rawCount: 0, items: [], obsIndices: [], regularIndices: [], hidden: [] };
+                }
                 return computeAuctionViewData(ds.value);
             });
             const obsItems = Vue.computed(() => view.value.items.slice(0, view.value.obsIndices.length));
             const regItems = Vue.computed(() => view.value.items.slice(view.value.obsIndices.length));
             const hasObs = Vue.computed(() => view.value.obsIndices.length > 0);
             const hasReg = Vue.computed(() => view.value.regularIndices.length > 0);
+
+            // 响应式搜索关键词（与 store.highlightKeyword 双向同步）
+            const searchKeyword = Vue.computed({
+                get: () => auctionStore.highlightKeyword || '',
+                set: (v) => {
+                    if (auctionStore && auctionStore.actions) {
+                        auctionStore.actions.setHighlightKeyword(v);
+                    } else {
+                        auctionStore.highlightKeyword = (v || '').trim().toLowerCase();
+                    }
+                }
+            });
 
             // 挂载/更新后同步父容器的高亮开关类（竞/昨、平行）
             const instance = Vue.getCurrentInstance();
@@ -1001,13 +1033,22 @@
                     }
                 } catch (e) {}
             }
-            Vue.onMounted(syncContainerHighlight);
-            Vue.onUpdated(syncContainerHighlight);
+            function restoreExpandedPanels() {
+                syncContainerHighlight();
+                // Vue 重渲染会重置 .auction-trend-panel 的 display/innerHTML，
+                // 需要按全局展开集合恢复，保证趋势图展开状态在数据刷新后不丢失。
+                safeCall(window.restoreExpandedAuctionTrendPanels, ds.value);
+            }
+            Vue.onMounted(restoreExpandedPanels);
+            Vue.onUpdated(restoreExpandedPanels);
 
-            return { view, obsItems, regItems, hasObs, hasReg, dataSource: ds };
+            return { view, obsItems, regItems, hasObs, hasReg, dataSource: ds, searchKeyword };
         },
         template: `
             <div class="auction-board-vue">
+                <div class="auction-search-container">
+                    <input type="text" class="auction-search-input" :value="searchKeyword" @input="searchKeyword = $event.target.value" placeholder="输入股票名称搜索...">
+                </div>
                 <div class="auction-header-row">
                     <div class="auction-header-item auction-header-number">序号</div>
                     <div class="auction-header-item auction-header-stock">股票名称</div>
@@ -1073,7 +1114,7 @@
             const ds = Vue.computed(() => tabKey(props.dataSource));
             const handlers = createHandlers(props.dataSource);
             const view = Vue.computed(() => {
-                touchReactiveCtx();
+                touchReactiveCtx(ds.value);
                 // 仅当前 tab 且当前在第 2 页时才重算，避免切 tab/切页时后台 Page2 重算导致卡顿。
                 if (auctionStore.currentGroup !== ds.value || auctionStore.currentPage !== 1) return { empty: true, placeholder: '' };
                 return computeAuctionPage2ViewData(ds.value);
@@ -1094,8 +1135,12 @@
                     }
                 } catch (e) {}
             }
-            Vue.onMounted(syncContainerHighlight);
-            Vue.onUpdated(syncContainerHighlight);
+            function restoreExpandedPanels() {
+                syncContainerHighlight();
+                safeCall(window.restoreExpandedTopicGroupsP2, ds.value);
+            }
+            Vue.onMounted(restoreExpandedPanels);
+            Vue.onUpdated(restoreExpandedPanels);
 
             return { view, handlers, dataSource: ds };
         },
@@ -1128,7 +1173,7 @@
             const ds = Vue.computed(() => tabKey(props.dataSource));
             const handlers = createHandlers(props.dataSource);
             const view = Vue.computed(() => {
-                touchReactiveCtx();
+                touchReactiveCtx(ds.value);
                 // 仅当前 tab 且当前在第 3 页时才重算，避免切 tab/切页时后台 Page3 重算导致卡顿。
                 if (auctionStore.currentGroup !== ds.value || auctionStore.currentPage !== 2) return { empty: true, placeholder: '' };
                 return computeAuctionPage3ViewData(ds.value);
@@ -1193,9 +1238,11 @@
         name: 'StatsBoard',
         props: { dataSource: { type: String, default: 'auction' } },
         setup(props) {
-            const ds = Vue.computed(() => tabKey(props.dataSource));
+            // 星标签统计看板只有一份 DOM，始终跟随当前激活的分组，
+            // 避免切 tab 时因外部未重新挂载而导致内容停留在旧分组。
+            const ds = Vue.computed(() => (auctionStore && auctionStore.currentGroup) || tabKey(props.dataSource));
             const view = Vue.computed(() => {
-                touchReactiveCtx();
+                touchReactiveCtx(ds.value);
                 return computeAuctionStatsViewData(ds.value);
             });
             return { view };

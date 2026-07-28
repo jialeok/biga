@@ -238,10 +238,31 @@
     } catch (e) {}
   }
   syncGlobalToStore();
-  setInterval(syncGlobalToStore, 500);
+  // 不再使用 setInterval 轮询：index.html 中的 switchGroup / setCurrentDate / renderAuction*
+  // 已主动写入 store；轮询是冗余且造成卡顿/内存泄漏风险的来源。保留一次性同步即可。
+
+  // 当 store 中的全部展开状态被日期切换等逻辑重置时，同步回 DOM 开关，避免开关仍显示开启。
+  Vue.watch(() => store.expandAll, (v) => {
+    try {
+      const ids = ['auctionExpandAllToggle', 'hotExpandAllToggle'];
+      ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.checked = !!v;
+      });
+    } catch (e) {}
+  });
+  Vue.watch(() => store.expandAllP2, (v) => {
+    try {
+      const ids = ['auctionExpandAllToggle2', 'hotExpandAllToggle2'];
+      ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.checked = !!v;
+      });
+    } catch (e) {}
+  });
 
   // ============================================================
-  // 早盘竞价标题栏强度数值/箭头（Vue 路径下原 renderAuction 提前返回，需单独维护）
+  // 早盘竞价标题栏强度数值/箭头（Vue 路径下原 renderAuction 提前 return，需单独维护）
   // ============================================================
   function updateHeaderStrength() {
     const ds = store.currentGroup === 'hot' ? 'hot' : 'auction';
@@ -276,7 +297,7 @@
     }
   }
 
-  Vue.watch(() => store.currentGroup + '|' + store.currentDate + '|' + store.stocksDataVersion, updateHeaderStrength, { immediate: true });
+Vue.watch(() => store.currentGroup + '|' + store.currentDate + '|' + (store.dataVersions[store.currentGroup === 'hot' ? 'hot' : 'auction'] || 0), updateHeaderStrength, { immediate: true });
 
   console.log('[AUCTION-VUE] Vue 挂载层初始化完成');
 })();

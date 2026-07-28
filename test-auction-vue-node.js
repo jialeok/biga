@@ -80,12 +80,9 @@ async function run() {
   assert(textContains(auctionContent, '测试B'), 'auctionContent 应包含 测试B');
   assert(!textContains(auctionContent, '热门A'), 'auctionContent 不应包含 热门A');
 
-  // 4. 热门股票 tab 显示正确数据
-  const hotItems = hotContent.querySelectorAll('.auction-item');
-  assert(hotItems.length === 2, 'hotContent 股票数量应为 2，实际 ' + hotItems.length);
-  assert(textContains(hotContent, '热门A'), 'hotContent 应包含 热门A');
-  assert(textContains(hotContent, '热门B'), 'hotContent 应包含 热门B');
-  assert(!textContains(hotContent, '测试A'), 'hotContent 不应包含 测试A');
+  // 4. 后台 tab 守卫：当前未激活的热门股票 tab 不应重算/渲染数据行
+  const hotItemsBeforeSwitch = hotContent.querySelectorAll('.auction-item');
+  assert(hotItemsBeforeSwitch.length === 0, '未激活时 hotContent 不应渲染数据行，实际 ' + hotItemsBeforeSwitch.length);
 
   // 5. 切换 store.currentGroup 后内容应随数据源变化（响应式验证）
   if (win.auctionStore && win.auctionStore.actions) {
@@ -93,10 +90,23 @@ async function run() {
     win.__auctionGroupData['auction']['2026-07-28'] = [
       { stock: '新股C', volume: '15000', yestVolume: '7000', ratioValue: 214, topic: '5G', starCount: 1 }
     ];
-    // 触发 store 状态变化以强制重算
+    // 触发 store 状态变化以强制重算（按数据源版本号）
+    win.auctionStore.dataVersions['auction'] = (win.auctionStore.dataVersions['auction'] || 0) + 1;
     win.auctionStore.stocksDataVersion += 1;
     await wait(100);
     assert(textContains(auctionContent, '新股C'), '响应式更新后 auctionContent 应包含 新股C');
+  }
+
+  // 8. 点击序号应触发 toggleAuctionTrendPanel（在切换到 hot 之前测试）
+  assert(!win.__trendPanelToggled, '初始状态不应触发趋势图展开');
+  const firstNumber = auctionContent.querySelector('.auction-number');
+  if (firstNumber) {
+    firstNumber.click();
+    await wait(50);
+    assert(win.__trendPanelToggled, '点击序号未触发 toggleAuctionTrendPanel');
+    assert(win.__trendPanelIndex === 0, '点击序号传入的 index 应为 0，实际 ' + win.__trendPanelIndex);
+  } else {
+    errors.push('auctionContent 中未找到序号元素');
   }
 
   // 6. Page2 / Page3 / 独立 StatsBoard 自动挂载（可能显示 placeholder）
@@ -140,12 +150,30 @@ async function run() {
   assert(!!hotStat && hotStat.querySelector('.auction-highratio-stat-vue'), 'hotHighRatioStat 未渲染 HighRatioStat');
   win.auctionStore.actions.switchGroup('hot');
   await wait(200);
+  // 切换后原 auctionContent 应进入后台守卫状态
+  const auctionItemsAfterSwitch = auctionContent.querySelectorAll('.auction-item');
+  assert(auctionItemsAfterSwitch.length === 0, '切换到 hot 后 auctionContent 不应再渲染数据行');
   assert(textContains(hotStat, '竞/昨数'), 'hotHighRatioStat 应显示“竞/昨数”');
   assert(textContains(hotStat, '竞放量数'), 'hotHighRatioStat 应显示“竞放量数”');
   const hotJingYestCountText = hotStat.querySelector('#hotJingYestCount');
   const hotHighRatioCountText = hotStat.querySelector('#hotHighRatioCount');
   assert(!!hotJingYestCountText && hotJingYestCountText.textContent !== '-', '热门 tab 竞/昨数应为具体数字');
   assert(!!hotHighRatioCountText && hotHighRatioCountText.textContent !== '-', '热门 tab 竞放量数应为具体数字');
+
+  // 7.2.1 搜索框与响应式搜索高亮
+  const hotSearchInput = hotContent.querySelector('.auction-search-input');
+  assert(!!hotSearchInput, 'hotContent 应渲染搜索输入框');
+  win.auctionStore.actions.setHighlightKeyword('热门A');
+  await wait(100);
+  const hotHighlightedRows = hotContent.querySelectorAll('.auction-item.highlight-search');
+  assert(hotHighlightedRows.length === 1, '搜索“热门A”后应只有 1 行高亮，实际 ' + hotHighlightedRows.length);
+  // 切换分组应清空搜索关键词
+  win.auctionStore.actions.switchGroup('auction');
+  await wait(100);
+  assert(win.auctionStore.highlightKeyword === '', '切换分组后搜索关键词应被清空');
+  // 切回 hot 后再做后续断言
+  win.auctionStore.actions.switchGroup('hot');
+  await wait(100);
 
   win.auctionStore.sortState['hot'].byJingYest = true;
   await wait(300);
@@ -161,16 +189,16 @@ async function run() {
   assert(!!starStatsContent.querySelector('.stats-board'), '切换到热门 tab 后星标签统计看板应仍渲染');
   assert(!!starStatsContent.querySelector('.star-stats-donut-svg'), '切换到热门 tab 后甜甜圈应仍显示');
 
-  // 8. 点击序号应触发 toggleAuctionTrendPanel
-  assert(!win.__trendPanelToggled, '初始状态不应触发趋势图展开');
-  const firstNumber = auctionContent.querySelector('.auction-number');
-  if (firstNumber) {
-    firstNumber.click();
-    await wait(50);
-    assert(win.__trendPanelToggled, '点击序号未触发 toggleAuctionTrendPanel');
-    assert(win.__trendPanelIndex === 0, '点击序号传入的 index 应为 0，实际 ' + win.__trendPanelIndex);
-  } else {
-    errors.push('auctionContent 中未找到序号元素');
+  // 8. 全部展开状态与 store 同步
+  if (win.auctionStore && win.auctionStore.actions) {
+    win.auctionStore.actions.setExpandAll(true, 1);
+    assert(win.auctionStore.expandAll === true, 'store.expandAll 应为 true');
+    win.auctionStore.actions.setExpandAll(false, 1);
+    assert(win.auctionStore.expandAll === false, 'store.expandAll 应为 false');
+    win.auctionStore.actions.setExpandAll(true, 2);
+    assert(win.auctionStore.expandAllP2 === true, 'store.expandAllP2 应为 true');
+    win.auctionStore.actions.setExpandAll(false, 2);
+    assert(win.auctionStore.expandAllP2 === false, 'store.expandAllP2 应为 false');
   }
 
   // 9. sandbox 函数可手动挂载到任意容器

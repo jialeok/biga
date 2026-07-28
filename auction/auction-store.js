@@ -70,6 +70,7 @@
     expandedStocks: new Set(),
     p2ExpandedTopics: new Set(),
     highlightStock: '',
+    highlightKeyword: '',
 
     // 排序状态（按 tab 隔离）
     sortState: createSortState(),
@@ -85,6 +86,9 @@
     // 标签派生信号版本（兼容 index.html 中 renderAuction 的失效信号）
     stocksDataVersion: 0,
 
+    // 按数据源隔离的版本号：auction / hot 独立 bump，避免无关 tab 重算
+    dataVersions: { auction: 0, hot: 0 },
+
     // actions 占位（下方绑定）
     actions: null
   });
@@ -97,6 +101,7 @@
       if (group !== 'auction' && group !== 'hot') return;
       store.currentGroup = group;
       store.currentPage = 0;
+      store.highlightKeyword = '';
       syncGlobalCurrentGroup();
     },
 
@@ -141,6 +146,14 @@
     },
     clearHighlight() {
       store.highlightStock = '';
+    },
+
+    setHighlightKeyword(keyword) {
+      store.highlightKeyword = (keyword || '').trim().toLowerCase();
+    },
+
+    clearHighlightKeyword() {
+      store.highlightKeyword = '';
     },
 
     // --- 交互代理（统一走安全调用） ---
@@ -227,6 +240,7 @@
       store.expandedStocks.clear();
       store.p2ExpandedTopics.clear();
       store.highlightStock = '';
+      store.highlightKeyword = '';
       store.sortState = createSortState();
       store.sortStateP2 = createSortStateP2();
       store.expandAll = false;
@@ -242,6 +256,13 @@
     // --- 强度排序开关镜像 ---
     setStrengthSortEnabled(value) {
       store.strengthSortEnabled = !!value;
+    },
+
+    // --- 按数据源失效信号 ---
+    bumpDataVersion(source) {
+      if (store.dataVersions && source in store.dataVersions) {
+        store.dataVersions[source] = (store.dataVersions[source] || 0) + 1;
+      }
     }
   };
 

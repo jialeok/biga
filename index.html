@@ -19920,7 +19920,7 @@
 
             // ===== Vue 路径副作用补全（全量切换后 Vue 路径提前 return，需把 innerHTML 路径
             // 尾部的关键副作用前移，否则标签/高光/警示会丢失）=====
-            // (1) 标签派生信号（方案 B）：bump stocksDataVersion，让 computeAuctionViewData
+            // (1) 标签派生信号（方案 B）：bump 按数据源隔离的 dataVersions，让 computeAuctionViewData
             //     的 Vue computed 在 stocksData 变化时重算。enrichAuctionItem 内部调
             //     deriveAuctionTagState 实时派生 bought/sold/selected，不再需要
             //     applyDerivedTagToRow 预先写入 auctionData 行。
@@ -19931,17 +19931,23 @@
             // 重算 2 遍、单帧阻塞近 16 秒。这里把 bump 合并到同一个微任务周期：连续多次
             // 调用只会在本轮同步代码执行完毕后统一 +1 一次，不影响"数据变了要让 computed
             // 失效"这个语义，只是把多次冗余的"失效信号"合并成一次。
-            if (dataSource === 'auction') {
-                window._pendingStocksDataVersionBump = true;
-                if (!window._stocksDataVersionBumpScheduled) {
-                    window._stocksDataVersionBumpScheduled = true;
+            if (auctionStore && auctionStore.dataVersions && dataSource in auctionStore.dataVersions) {
+                window._pendingDataVersionBumps = window._pendingDataVersionBumps || {};
+                window._pendingDataVersionBumps[dataSource] = true;
+                if (!window._dataVersionBumpScheduled) {
+                    window._dataVersionBumpScheduled = true;
                     Promise.resolve().then(function() {
-                        window._stocksDataVersionBumpScheduled = false;
-                        if (window._pendingStocksDataVersionBump) {
-                            window._pendingStocksDataVersionBump = false;
-                            auctionStore.stocksDataVersion = (auctionStore.stocksDataVersion || 0) + 1;
-                            _dbgLog('[PERF] stocksDataVersion → ' + auctionStore.stocksDataVersion + '（本次调用会让4块看板 computed 全部标记为待重算，已合并同微任务周期内的重复bump）');
-                        }
+                        window._dataVersionBumpScheduled = false;
+                        const pending = window._pendingDataVersionBumps || {};
+                        window._pendingDataVersionBumps = {};
+                        Object.keys(pending).forEach(function(ds) {
+                            if (auctionStore.dataVersions[ds] != null) {
+                                auctionStore.dataVersions[ds] = (auctionStore.dataVersions[ds] || 0) + 1;
+                                _dbgLog('[PERF] dataVersions.' + ds + ' → ' + auctionStore.dataVersions[ds] + '（已合并同微任务周期内的重复 bump）');
+                            }
+                        });
+                        // 保留旧的 stocksDataVersion 递增，供 index.html 中未迁移的日志/诊断使用
+                        auctionStore.stocksDataVersion = (auctionStore.stocksDataVersion || 0) + 1;
                     });
                 }
             }
@@ -24711,6 +24717,9 @@
         // 第二页"全部展开"开关变化时的处理
         function onAuctionExpandAllToggle2Change() {
             const checked = document.getElementById('auctionExpandAllToggle2').checked;
+            if (typeof auctionStore !== 'undefined' && auctionStore && auctionStore.actions) {
+                auctionStore.actions.setExpandAll(checked, 2);
+            }
             if (checked) {
                 expandAllAuctionTrendPanelsP2('auction');
             } else {
@@ -24838,6 +24847,9 @@
         // "全部展开"开关变化时的处理
         function onAuctionExpandAllToggleChange() {
             const checked = document.getElementById('auctionExpandAllToggle').checked;
+            if (typeof auctionStore !== 'undefined' && auctionStore && auctionStore.actions) {
+                auctionStore.actions.setExpandAll(checked, 1);
+            }
             if (checked) {
                 expandAllAuctionTrendPanels('auction');
             } else {
@@ -24926,6 +24938,9 @@
         // "全部展开"开关变化时的处理（热门股票）
         function onHotExpandAllToggleChange() {
             const checked = document.getElementById('hotExpandAllToggle').checked;
+            if (typeof auctionStore !== 'undefined' && auctionStore && auctionStore.actions) {
+                auctionStore.actions.setExpandAll(checked, 1);
+            }
             if (checked) {
                 expandAllAuctionTrendPanels('hot');
             } else {
@@ -25001,6 +25016,9 @@
         // 第二页"全部展开"开关变化时的处理（热门股票）
         function onHotExpandAllToggle2Change() {
             const checked = document.getElementById('hotExpandAllToggle2').checked;
+            if (typeof auctionStore !== 'undefined' && auctionStore && auctionStore.actions) {
+                auctionStore.actions.setExpandAll(checked, 2);
+            }
             if (checked) {
                 expandAllAuctionTrendPanelsP2('hot');
             } else {
