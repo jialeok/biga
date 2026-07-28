@@ -99,12 +99,14 @@ async function run() {
     assert(textContains(auctionContent, '新股C'), '响应式更新后 auctionContent 应包含 新股C');
   }
 
-  // 6. Page2 / Page3 / Page4 容器自动挂载（可能显示 placeholder）
+  // 6. Page2 / Page3 / 独立 StatsBoard 自动挂载（可能显示 placeholder）
   assert(doc.getElementById('auctionContent2').children.length > 0, 'auctionContent2 未渲染 Page2Board');
   assert(doc.getElementById('auctionContent3').children.length > 0, 'auctionContent3 未渲染 Page3Board');
-  // StatsBoard 会跳过非 currentGroup 的数据源，因此检查所有 page4 容器是否至少有一个渲染
-  const statsEls = doc.querySelectorAll('#auctionContent4 .stats-board, #hotContent4 .stats-board');
-  assert(statsEls.length > 0, 'page4 容器未渲染 StatsBoard');
+  // StatsBoard 应挂载到独立的 #starStatsContent，而不是 page4 容器；page4 是“复制的题材股票”原生区域
+  const statsEls = doc.querySelectorAll('#starStatsContent .stats-board, #starStatsContent .star-stats-empty');
+  assert(statsEls.length > 0, '#starStatsContent 未渲染 StatsBoard');
+  const leakedStatsEls = doc.querySelectorAll('#auctionContent4 .stats-board, #hotContent4 .stats-board');
+  assert(leakedStatsEls.length === 0, 'StatsBoard 不应渲染到 page4 容器');
 
   // 7. sandbox 函数可手动挂载到任意容器
   const manualEl = doc.createElement('div');

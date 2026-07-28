@@ -36,14 +36,33 @@
     return el || null;
   }
 
+  function getComponentMarkerSelector(componentName) {
+    switch (componentName) {
+      case 'AuctionBoard': return '.auction-board-vue';
+      case 'Page2Board': return '.page2-board,.auction-topic-placeholder';
+      case 'Page3Board': return '.page3-board,.auction-topic-placeholder';
+      case 'StatsBoard': return '.stats-board,.star-stats-empty';
+      default: return null;
+    }
+  }
+
   function mountComponent(component, props, containerId) {
     const el = ensureContainer(containerId);
     if (!el) { console.warn('[AUCTION-VUE] 容器不存在:', containerId); return null; }
 
-    // 若已在此容器挂载过，先卸载，避免重复挂载
-    const key = containerId;
-    if (mountedApps.has(key)) {
-      try { mountedApps.get(key).unmount(); } catch (e) {}
+    // 同一容器 + 同一组件只挂载一次；Vue 响应式会自动处理后续数据更新，
+    // 避免原 renderAuction 每次调用都销毁/重建组件导致卡顿。
+    const key = containerId + ':' + component.name;
+    const existing = mountedApps.get(key);
+    if (existing) {
+      const marker = getComponentMarkerSelector(component.name);
+      // 如果外部已把 DOM 清空/卸载（例如 StatsBoard 切 tab 时主动 unmount），
+      // 不能继续复用旧 app，否则会出现空白容器。
+      if (!marker || el.querySelector(marker)) {
+        syncStore(props.dataSource);
+        return existing;
+      }
+      try { existing.unmount(); } catch (e) {}
       mountedApps.delete(key);
     }
 
@@ -65,8 +84,10 @@
 
   function syncStore(dataSource) {
     if (!store || !store.actions) return;
-    const g = tabKey(dataSource);
-    if (store.currentGroup !== g) store.actions.switchGroup(g);
+    // 不再在这里切换 store.currentGroup：
+    // 1) index.html 的 switchGroup / renderAuction* 自己会维护当前分组；
+    // 2) 后台 tab 的渲染不应把可见分组抢走，否则会造成所有 computed 重算、界面卡顿/闪烁。
+    // if (store.currentGroup !== g) store.actions.switchGroup(g);
     try { if (typeof currentDate !== 'undefined') store.currentDate = currentDate; } catch (e) {}
   }
 
@@ -100,27 +121,35 @@
 
   // ============================================================
   // 自动挂载：页面加载完成后，若 content 容器存在且为空，则自动挂载组件
+  // 注意：Page4 (auctionContent4 / hotContent4) 是“复制的题材股票”原生区域，
+  //       不由 Vue 接管；StatsBoard 挂载到独立的 #starStatsContent。
   // ============================================================
   function autoMountAll() {
     const slots = [
       { ds: 'auction', page: 1, cid: 'auctionContent' },
       { ds: 'auction', page: 2, cid: 'auctionContent2' },
       { ds: 'auction', page: 3, cid: 'auctionContent3' },
-      { ds: 'auction', page: 4, cid: 'auctionContent4' },
       { ds: 'hot', page: 1, cid: 'hotContent' },
       { ds: 'hot', page: 2, cid: 'hotContent2' },
-      { ds: 'hot', page: 3, cid: 'hotContent3' },
-      { ds: 'hot', page: 4, cid: 'hotContent4' }
+      { ds: 'hot', page: 3, cid: 'hotContent3' }
     ];
     for (const s of slots) {
       const el = document.getElementById(s.cid);
-      if (!el || el.querySelector('.auction-board-vue, .page2-board, .page3-board, .stats-board')) continue;
+      if (!el || el.querySelector('.auction-board-vue, .page2-board, .page3-board')) continue;
       try {
         if (s.page === 1) mountAuctionBoardSandbox(s.ds, s.cid);
         else if (s.page === 2) mountPage2BoardSandbox(s.ds, s.cid);
         else if (s.page === 3) mountPage3BoardSandbox(s.ds, s.cid);
-        else if (s.page === 4) mountStatsBoardSandbox(s.ds, s.cid);
       } catch (e) { console.warn('[AUCTION-VUE] 自动挂载失败:', s.cid, e); }
+    }
+
+    // 独立的星标签统计看板（与 tab 共用一份 DOM）
+    const starStatsEl = document.getElementById('starStatsContent');
+    if (starStatsEl && !starStatsEl.querySelector('.stats-board, .star-stats-empty')) {
+      try {
+        const g = store.currentGroup === 'hot' ? 'hot' : 'auction';
+        mountStatsBoardSandbox(g, 'starStatsContent');
+      } catch (e) { console.warn('[AUCTION-VUE] 自动挂载 StatsBoard 失败:', e); }
     }
   }
 

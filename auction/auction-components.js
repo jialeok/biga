@@ -978,6 +978,26 @@
             const regItems = Vue.computed(() => view.value.items.slice(view.value.obsIndices.length));
             const hasObs = Vue.computed(() => view.value.obsIndices.length > 0);
             const hasReg = Vue.computed(() => view.value.regularIndices.length > 0);
+
+            // 挂载/更新后同步父容器的高亮开关类（竞/昨、平行）
+            const instance = Vue.getCurrentInstance();
+            function syncContainerHighlight() {
+                try {
+                    if (typeof _updateAuctionHighlightContainerState === 'function') {
+                        _updateAuctionHighlightContainerState(ds.value);
+                    } else if (instance && instance.proxy && instance.proxy.$el && instance.proxy.$el.parentElement) {
+                        const p = ds.value === 'hot' ? 'hot' : 'auction';
+                        const content = instance.proxy.$el.parentElement;
+                        const jing1 = document.getElementById(p + 'SortByJingYestToggle');
+                        const par1 = document.getElementById(p + 'SortByParallelToggle');
+                        content.classList.toggle('jing-yest-enabled', !!(jing1 && jing1.checked));
+                        content.classList.toggle('parallel-enabled', !!(par1 && par1.checked));
+                    }
+                } catch (e) {}
+            }
+            Vue.onMounted(syncContainerHighlight);
+            Vue.onUpdated(syncContainerHighlight);
+
             return { view, obsItems, regItems, hasObs, hasReg, dataSource: ds };
         },
         template: `
@@ -1050,6 +1070,25 @@
                 touchReactiveCtx();
                 return computeAuctionPage2ViewData(ds.value);
             });
+
+            const instance = Vue.getCurrentInstance();
+            function syncContainerHighlight() {
+                try {
+                    if (typeof _updateAuctionHighlightContainerState === 'function') {
+                        _updateAuctionHighlightContainerState(ds.value);
+                    } else if (instance && instance.proxy && instance.proxy.$el && instance.proxy.$el.parentElement) {
+                        const p = ds.value === 'hot' ? 'hot' : 'auction';
+                        const content = instance.proxy.$el.parentElement;
+                        const jing2 = document.getElementById(p + 'SortByJingYestToggle2');
+                        const par2 = document.getElementById(p + 'SortByParallelToggle2');
+                        content.classList.toggle('jing-yest-enabled', !!(jing2 && jing2.checked));
+                        content.classList.toggle('parallel-enabled', !!(par2 && par2.checked));
+                    }
+                } catch (e) {}
+            }
+            Vue.onMounted(syncContainerHighlight);
+            Vue.onUpdated(syncContainerHighlight);
+
             return { view, handlers, dataSource: ds };
         },
         template: `
