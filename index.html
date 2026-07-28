@@ -6669,7 +6669,10 @@
     <div class="modal" id="datePickerModal" onclick="if(event.target===this)closeDatePickerModal()">
         <div class="modal-content" style="max-width:320px">
             <div class="modal-header">
-                <div style="font-weight:600;color:#1f2937">📅 选择日期</div>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <div style="font-weight:600;color:#1f2937">📅 选择日期</div>
+                    <button class="nav-btn" style="font-size:12px;padding:4px 8px" onclick="syncTradingDaysFromAPI()">🔄 同步</button>
+                </div>
                 <button class="close-btn" onclick="closeDatePickerModal()">×</button>
             </div>
             
@@ -6678,11 +6681,6 @@
                 <button class="nav-btn" onclick="prevPickerMonth()">◀</button>
                 <div id="pickerMonthTitle" style="font-weight:600;color:#1f2937;font-size:14px">2025年1月</div>
                 <button class="nav-btn" onclick="nextPickerMonth()">▶</button>
-            </div>
-
-            <!-- 交易日历同步 -->
-            <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:-8px 0 12px 0">
-                <button class="nav-btn" style="font-size:12px;padding:4px 8px" onclick="syncTradingDaysFromAPI()">🔄 同步交易日</button>
             </div>
 
             <!-- 日历 -->
