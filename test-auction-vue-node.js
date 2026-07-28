@@ -110,9 +110,42 @@ async function run() {
 
   // 7. 顶部竞/昨数、竞放量数统计条自动挂载
   const auctionStat = doc.getElementById('auctionHighRatioStat');
-  assert(!!auctionStat && auctionStat.querySelector('.auction-highratio-stat'), 'auctionHighRatioStat 未渲染 HighRatioStat');
+  assert(!!auctionStat && auctionStat.querySelector('.auction-highratio-stat-vue'), 'auctionHighRatioStat 未渲染 HighRatioStat');
   assert(textContains(auctionStat, '竞/昨数'), 'auctionHighRatioStat 应显示“竞/昨数”');
   assert(textContains(auctionStat, '竞放量数'), 'auctionHighRatioStat 应显示“竞放量数”');
+
+  // 7.1 竞/昨开关打开后，所有行都应出现蓝色高光，且统计数字与高光行数一致
+  win.auctionStore.sortState['auction'].byJingYest = true;
+  await wait(300);
+  const auctionRows = auctionContent.querySelectorAll('.auction-item');
+  const auctionBlueRows = auctionContent.querySelectorAll('.auction-item.jing-yest-match');
+  assert(auctionRows.length > 0, 'auctionContent 中应存在数据行');
+  assert(auctionBlueRows.length === auctionRows.length, '竞/昨开启后，蓝色高光行数(' + auctionBlueRows.length + ')应等于总行数(' + auctionRows.length + ')');
+  const auctionJingYestCountText = auctionStat.querySelector('#auctionJingYestCount');
+  assert(!!auctionJingYestCountText, '竞/昨数元素应存在');
+  assert(String(auctionJingYestCountText.textContent) === String(auctionBlueRows.length),
+    '竞/昨数显示(' + auctionJingYestCountText.textContent + ')应与蓝色高光行数(' + auctionBlueRows.length + ')一致');
+
+  // 7.2 切换到热门股票 tab 后，竞/昨数、竞放量数应同步显示且蓝色高光一致
+  const hotStat = doc.getElementById('hotHighRatioStat');
+  assert(!!hotStat && hotStat.querySelector('.auction-highratio-stat-vue'), 'hotHighRatioStat 未渲染 HighRatioStat');
+  win.auctionStore.actions.switchGroup('hot');
+  await wait(200);
+  assert(textContains(hotStat, '竞/昨数'), 'hotHighRatioStat 应显示“竞/昨数”');
+  assert(textContains(hotStat, '竞放量数'), 'hotHighRatioStat 应显示“竞放量数”');
+  const hotJingYestCountText = hotStat.querySelector('#hotJingYestCount');
+  const hotHighRatioCountText = hotStat.querySelector('#hotHighRatioCount');
+  assert(!!hotJingYestCountText && hotJingYestCountText.textContent !== '-', '热门 tab 竞/昨数应为具体数字');
+  assert(!!hotHighRatioCountText && hotHighRatioCountText.textContent !== '-', '热门 tab 竞放量数应为具体数字');
+
+  win.auctionStore.sortState['hot'].byJingYest = true;
+  await wait(300);
+  const hotRows = hotContent.querySelectorAll('.auction-item');
+  const hotBlueRows = hotContent.querySelectorAll('.auction-item.jing-yest-match');
+  assert(hotRows.length > 0, 'hotContent 中应存在数据行');
+  assert(hotBlueRows.length === hotRows.length, '热门 tab 竞/昨开启后，蓝色高光行数(' + hotBlueRows.length + ')应等于总行数(' + hotRows.length + ')');
+  assert(String(hotJingYestCountText.textContent) === String(hotBlueRows.length),
+    '热门 tab 竞/昨数显示(' + hotJingYestCountText.textContent + ')应与蓝色高光行数(' + hotBlueRows.length + ')一致');
 
   // 8. 点击序号应触发 toggleAuctionTrendPanel
   assert(!win.__trendPanelToggled, '初始状态不应触发趋势图展开');

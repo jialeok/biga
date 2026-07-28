@@ -43,7 +43,7 @@
       case 'Page2Board': return '.page2-board,.auction-topic-placeholder';
       case 'Page3Board': return '.page3-board,.auction-topic-placeholder';
       case 'StatsBoard': return '.stats-board,.star-stats-empty';
-      case 'HighRatioStat': return '.auction-highratio-stat';
+      case 'HighRatioStat': return '.auction-highratio-stat-vue';
       default: return null;
     }
   }
@@ -117,7 +117,29 @@
   }
 
   function mountHighRatioStatSandbox(prefix, page, containerId) {
-    return mountComponent(HighRatioStat, { prefix, page }, containerId);
+    const el = ensureContainer(containerId);
+    if (!el) { console.warn('[AUCTION-VUE] HighRatioStat 容器不存在:', containerId); return null; }
+
+    const key = containerId + ':HighRatioStat';
+    const existing = mountedApps.get(key);
+    if (existing) {
+      const marker = getComponentMarkerSelector('HighRatioStat');
+      if (!marker || el.querySelector(marker)) return existing;
+      try { existing.unmount(); } catch (e) {}
+      mountedApps.delete(key);
+    }
+
+    el.innerHTML = '';
+    const app = Vue.createApp({
+      name: 'HighRatioStatSandboxApp',
+      components: { HighRatioStat },
+      setup() { return { prefix, page }; },
+      template: `<HighRatioStat :prefix="prefix" :page="page"></HighRatioStat>`
+    });
+    app.config.errorHandler = (err, vm, info) => { console.warn('[AUCTION-VUE] HighRatioStat 渲染错误:', err, info); };
+    app.mount(el);
+    mountedApps.set(key, app);
+    return app;
   }
 
   window.mountAuctionBoardSandbox = mountAuctionBoardSandbox;
@@ -168,7 +190,7 @@
     ];
     for (const s of statSlots) {
       const el = document.getElementById(s.cid);
-      if (!el || el.querySelector('.auction-highratio-stat')) continue;
+      if (!el || el.querySelector('.auction-highratio-stat-vue')) continue;
       try { mountHighRatioStatSandbox(s.prefix, s.page, s.cid); }
       catch (e) { console.warn('[AUCTION-VUE] 自动挂载 HighRatioStat 失败:', s.cid, e); }
     }

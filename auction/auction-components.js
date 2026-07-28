@@ -39,7 +39,9 @@
     // ============================================================
     function touchReactiveCtx() {
         if (!auctionStore) return '';
-        return auctionStore.currentDate + '|' + auctionStore.currentGroup + '|v' + auctionStore.stocksDataVersion;
+        // 不依赖 currentGroup：切换 tab 时不应让后台 tab 的 computed 重算，减少卡顿。
+        // 各组件按自己的 dataSource 读取数据，currentGroup 只给 HighRatioStat 等需要显式守卫的组件读取。
+        return auctionStore.currentDate + '|v' + auctionStore.stocksDataVersion;
     }
 
     function tabKey(dataSource) {
@@ -673,7 +675,8 @@
     function computeAuctionStatsViewData(dataSource) {
         dataSource = dataSource || 'auction';
         touchReactiveCtx();
-        if (dataSource !== currentGroup) return { skip: true };
+        // 仅在当前 tab 的统计看板页才执行重计算，切 tab/切页时不必要的重算会导致卡顿。
+        if (dataSource !== currentGroup || auctionStore.currentPage !== 3) return { skip: true };
         const todayAuction = getTodayList(dataSource);
         const yesterdayDate = getYesterdayDate(currentDate);
         const yesterdayAuction = yesterdayDate ? (getGroupData(dataSource)[yesterdayDate] || []) : [];
@@ -906,7 +909,7 @@
             return { view, suffix, prefix: props.prefix, toggleHelp };
         },
         template: `
-            <div class="auction-highratio-stat" :id="prefix + 'HighRatioStat' + suffix">
+            <div class="auction-highratio-stat auction-highratio-stat-vue" :id="prefix + 'HighRatioStat' + suffix">
                 <span style="font-weight:700;color:#dc2626;">竞/昨数：<span :id="prefix + 'JingYestCount' + suffix">{{ view ? view.jingYestCount : '-' }}</span></span>
                 <span style="display:inline-block;width:28px;"></span>
                 竞放量数：<span :id="prefix + 'HighRatioCount' + suffix" style="font-weight:700;">{{ view ? view.highRatioCount : '-' }}</span>
@@ -925,23 +928,26 @@
         directives: { longpress: LongPressDirective },
         props: { item: { type: Object, required: true }, displayNum: { type: Number, default: 0 }, dataSource: { type: String, default: 'auction' } },
         setup(props) {
-            const handlers = createHandlers(props.dataSource);
-            const panelId = (props.dataSource === 'hot' ? 'hot' : 'auction') + 'TrendPanel-' + props.item.index;
+            // 必须用 toRefs 保持 prop 引用变化时模板能响应，否则父组件复用 StockCard
+            // （key 不变）时，setup 里捕获的 item 会是旧对象，导致 class/高亮不更新。
+            const { item, displayNum, dataSource } = Vue.toRefs(props);
+            const handlers = createHandlers(dataSource.value);
+            const panelId = Vue.computed(() => (dataSource.value === 'hot' ? 'hot' : 'auction') + 'TrendPanel-' + item.value.index);
             const yestEl = Vue.ref(null);
             const nameEl = Vue.ref(null);
 
-            function onYestClick(e) { handlers.onYestClick(yestEl.value, props.item.note, e.currentTarget._lp, e); }
+            function onYestClick(e) { handlers.onYestClick(yestEl.value, item.value.note, e.currentTarget._lp, e); }
             function onYestContext(e) { handlers.onYestContext(e); }
-            function onYestLongPress() { handlers.onYestLongPress(props.item.index, yestEl.value); }
-            function onNameClick(e) { handlers.onNameClick(props.item.stock, e.currentTarget._lp, e); }
-            function onNameDblClick(e) { handlers.onNameDblClick(props.item.note, yestEl.value, e); }
+            function onYestLongPress() { handlers.onYestLongPress(item.value.index, yestEl.value); }
+            function onNameClick(e) { handlers.onNameClick(item.value.stock, e.currentTarget._lp, e); }
+            function onNameDblClick(e) { handlers.onNameDblClick(item.value.note, yestEl.value, e); }
             function onNameContext(e) { handlers.onNameContext(e); }
-            function onNameLongPress() { handlers.onNameLongPress(props.item.stock); }
-            function onNumberClick(e) { handlers.onNumberClick(props.item.index, e); }
-            function onRatioClick(e) { handlers.onRatioClick(props.item.index, e); }
+            function onNameLongPress() { handlers.onNameLongPress(item.value.stock); }
+            function onNumberClick(e) { handlers.onNumberClick(item.value.index, e); }
+            function onRatioClick(e) { handlers.onRatioClick(item.value.index, e); }
 
             return {
-                item: props.item, displayNum: props.displayNum, panelId, yestEl, nameEl,
+                item, displayNum, panelId, yestEl, nameEl,
                 onYestClick, onYestContext, onYestLongPress,
                 onNameClick, onNameDblClick, onNameContext, onNameLongPress,
                 onNumberClick, onRatioClick
@@ -1068,6 +1074,8 @@
             const handlers = createHandlers(props.dataSource);
             const view = Vue.computed(() => {
                 touchReactiveCtx();
+                // 仅当前 tab 且当前在第 2 页时才重算，避免切 tab/切页时后台 Page2 重算导致卡顿。
+                if (auctionStore.currentGroup !== ds.value || auctionStore.currentPage !== 1) return { empty: true, placeholder: '' };
                 return computeAuctionPage2ViewData(ds.value);
             });
 
@@ -1121,6 +1129,8 @@
             const handlers = createHandlers(props.dataSource);
             const view = Vue.computed(() => {
                 touchReactiveCtx();
+                // 仅当前 tab 且当前在第 3 页时才重算，避免切 tab/切页时后台 Page3 重算导致卡顿。
+                if (auctionStore.currentGroup !== ds.value || auctionStore.currentPage !== 2) return { empty: true, placeholder: '' };
                 return computeAuctionPage3ViewData(ds.value);
             });
             return { view, handlers };
@@ -1252,6 +1262,7 @@
                 <div class="star-stats-empty">暂无星变化数据</div>
             </div>
             <div v-else-if="view.empty"><div class="star-stats-empty">暂无题材数据</div></div>
+            <div v-else-if="view.skip" class="star-stats-empty" style="display:none;"></div>
         `
     };
 

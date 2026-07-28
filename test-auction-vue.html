@@ -116,7 +116,10 @@
     function getChangePctDisplay() { return '-'; }
     function getHighRatioStocksForDate() { return { stockNames: new Set(), items: [], count: 0 }; }
     function getParallelStocksForDate() { return new Set(); }
-    function getJingYestHighlightSetForDate() { return new Set(); }
+    function getJingYestHighlightSetForDate(date, dataSource) {
+      var list = (getGroupData(dataSource || 'auction')[date || currentDate] || []).filter(function (it) { return it && it.stock; });
+      return new Set(list.map(function (it) { return it.stock.trim(); }));
+    }
     function getRatioDiffInfoForDate() { return new Map(); }
     function getNumericVolume(v) { var n = parseFloat(v); return isNaN(n) ? null : n; }
     function getDigitCount(n) { return String(Math.abs(Math.round(n))).length; }
