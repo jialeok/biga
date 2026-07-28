@@ -39,7 +39,7 @@
     // ============================================================
     function touchReactiveCtx() {
         if (!auctionStore) return '';
-        return auctionStore.currentDate + '|' + auctionStore.currentGroup;
+        return auctionStore.currentDate + '|' + auctionStore.currentGroup + '|v' + auctionStore.stocksDataVersion;
     }
 
     function tabKey(dataSource) {
@@ -1053,7 +1053,8 @@
             return { view, handlers, dataSource: ds };
         },
         template: `
-            <div class="auction-scroll-container" v-if="!view.empty">
+            <div class="page2-board" v-if="!view.empty">
+                <div class="auction-scroll-container">
                 <div class="auction-header-row">
                     <div class="auction-header-item auction-header-stock" style="flex:0 0 75px;padding-left:10px;">股票名称</div>
                     <div class="auction-header-item auction-header-change" style="flex:0 0 55px;">涨幅</div>
@@ -1064,6 +1065,7 @@
                     <div class="auction-header-item auction-header-ratio" style="flex:0 0 50px;">占比</div>
                 </div>
                 <topic-group v-for="g in view.groups" :key="g.topic" :group="g" :data-source="dataSource"></topic-group>
+                </div>
             </div>
             <div class="auction-topic-placeholder" v-else>{{ view.placeholder }}</div>
         `
@@ -1085,7 +1087,7 @@
             return { view, handlers };
         },
         template: `
-            <div v-if="!view.empty">
+            <div class="page3-board" v-if="!view.empty">
                 <div class="auction-topic-history-group" v-for="t in view.topics" :key="t.topic">
                     <div class="auction-topic-history-title">
                         <span>{{ t.topic }}</span>
@@ -1150,7 +1152,7 @@
             return { view };
         },
         template: `
-            <div v-if="view.full">
+            <div class="stats-board" v-if="view.full">
                 <div class="star-stats-donut-wrap">
                     <svg class="star-stats-donut-svg" :viewBox="'0 0 ' + view.size + ' ' + view.size" id="starStatsDonutSvg">
                         <circle :cx="view.cx" :cy="view.cy" :r="view.r" fill="none" stroke="#f1f5f9" :stroke-width="view.strokeWidth"></circle>

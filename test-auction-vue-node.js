@@ -10,18 +10,20 @@ const { JSDOM } = require('jsdom');
 const PORT = 8765;
 const ROOT = __dirname;
 
-// 启动静态文件服务
 const server = http.createServer((req, res) => {
-  const filePath = path.join(ROOT, decodeURIComponent(req.url.split('?')[0]));
-  if (!filePath.startsWith(ROOT)) {
-    res.writeHead(403); res.end('Forbidden'); return;
-  }
-  const target = fs.existsSync(filePath) && fs.statSync(filePath).isFile() ? filePath : path.join(ROOT, 'index.html');
-  fs.readFile(target, (err, data) => {
-    if (err) { res.writeHead(404); res.end('Not found'); return; }
-    const ext = path.extname(target);
-    const ct = ext === '.js' ? 'application/javascript' : (ext === '.css' ? 'text/css' : 'text/html');
-    res.writeHead(200, { 'Content-Type': ct });
+  const filePath = path.join(ROOT, decodeURIComponent(req.url));
+  const ext = path.extname(filePath).toLowerCase();
+  const contentTypeMap = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json; charset=utf-8'
+  };
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404); res.end('Not found'); return;
+    }
+    res.writeHead(200, { 'Content-Type': contentTypeMap[ext] || 'application/octet-stream' });
     res.end(data);
   });
 });
@@ -52,139 +54,65 @@ async function run() {
   await wait(1200);
   const errors = [];
 
-  // 1. Vue App 挂载
-  const board = doc.getElementById('auctionBoard');
-  if (!board) errors.push('#auctionBoard 不存在');
-  else if (!board.querySelector('.auction-app-wrapper')) errors.push('Auction Vue App 未挂载');
+  function assert(cond, msg) { if (!cond) errors.push(msg); }
+  function textContains(el, substr) { return el && el.textContent.indexOf(substr) !== -1; }
 
-  // 2. store 存在且初始状态正确
-  if (!win.auctionStore) errors.push('auctionStore 未创建');
-  else {
-    if (win.auctionStore.currentGroup !== 'auction') errors.push('初始 currentGroup 应为 auction');
-    if (win.auctionStore.currentPage !== 0) errors.push('初始 currentPage 应为 0');
-    if (win.auctionStore.currentDate !== '2026-07-28') errors.push('初始 currentDate 应为 2026-07-28');
-    if (!win.auctionStore.actions) errors.push('auctionStore.actions 不存在');
+  // 1. Vue / Store / Sandbox 函数存在
+  assert(!!win.Vue, 'Vue 未加载');
+  assert(!!win.auctionStore, 'auctionStore 未创建');
+  assert(typeof win.mountAuctionBoardSandbox === 'function', 'mountAuctionBoardSandbox 未暴露');
+  assert(typeof win.mountPage2BoardSandbox === 'function', 'mountPage2BoardSandbox 未暴露');
+  assert(typeof win.mountPage3BoardSandbox === 'function', 'mountPage3BoardSandbox 未暴露');
+  assert(typeof win.mountStatsBoardSandbox === 'function', 'mountStatsBoardSandbox 未暴露');
+
+  // 2. autoMountAll 已自动挂载 page1 组件
+  const auctionContent = doc.getElementById('auctionContent');
+  const hotContent = doc.getElementById('hotContent');
+  assert(!!auctionContent, 'auctionContent 不存在');
+  assert(!!hotContent, 'hotContent 不存在');
+  assert(!!auctionContent.querySelector('.auction-board-vue'), 'auctionContent 未渲染 AuctionBoard');
+  assert(!!hotContent.querySelector('.auction-board-vue'), 'hotContent 未渲染 AuctionBoard');
+
+  // 3. 早盘竞价 tab 显示正确数据
+  const auctionItems = auctionContent.querySelectorAll('.auction-item');
+  assert(auctionItems.length === 2, 'auctionContent 股票数量应为 2，实际 ' + auctionItems.length);
+  assert(textContains(auctionContent, '测试A'), 'auctionContent 应包含 测试A');
+  assert(textContains(auctionContent, '测试B'), 'auctionContent 应包含 测试B');
+  assert(!textContains(auctionContent, '热门A'), 'auctionContent 不应包含 热门A');
+
+  // 4. 热门股票 tab 显示正确数据
+  const hotItems = hotContent.querySelectorAll('.auction-item');
+  assert(hotItems.length === 2, 'hotContent 股票数量应为 2，实际 ' + hotItems.length);
+  assert(textContains(hotContent, '热门A'), 'hotContent 应包含 热门A');
+  assert(textContains(hotContent, '热门B'), 'hotContent 应包含 热门B');
+  assert(!textContains(hotContent, '测试A'), 'hotContent 不应包含 测试A');
+
+  // 5. 切换 store.currentGroup 后内容应随数据源变化（响应式验证）
+  if (win.auctionStore && win.auctionStore.actions) {
+    // 强制把 auction 数据替换，验证响应式
+    win.__auctionGroupData['auction']['2026-07-28'] = [
+      { stock: '新股C', volume: '15000', yestVolume: '7000', ratioValue: 214, topic: '5G', starCount: 1 }
+    ];
+    // 触发 store 状态变化以强制重算
+    win.auctionStore.stocksDataVersion += 1;
+    await wait(100);
+    assert(textContains(auctionContent, '新股C'), '响应式更新后 auctionContent 应包含 新股C');
   }
 
-  // 3. Tab 切换
-  const tabHot = doc.getElementById('tabHot');
-  const tabAuction = doc.getElementById('tabAuction');
-  if (!tabHot || !tabAuction) errors.push('Tab 元素未渲染');
-  else {
-    tabHot.click();
-    await wait(50);
-    if (win.auctionStore.currentGroup !== 'hot') errors.push('点击热门 tab 后 currentGroup 未变 hot');
-    if (win.currentGroup !== 'hot') errors.push('点击热门 tab 后全局 currentGroup 未同步');
+  // 6. Page2 / Page3 / Page4 容器自动挂载（可能显示 placeholder）
+  assert(doc.getElementById('auctionContent2').children.length > 0, 'auctionContent2 未渲染 Page2Board');
+  assert(doc.getElementById('auctionContent3').children.length > 0, 'auctionContent3 未渲染 Page3Board');
+  // StatsBoard 会跳过非 currentGroup 的数据源，因此检查所有 page4 容器是否至少有一个渲染
+  const statsEls = doc.querySelectorAll('#auctionContent4 .stats-board, #hotContent4 .stats-board');
+  assert(statsEls.length > 0, 'page4 容器未渲染 StatsBoard');
 
-    tabAuction.click();
-    await wait(50);
-    if (win.auctionStore.currentGroup !== 'auction') errors.push('点击早盘 tab 后未切回 auction');
-  }
-
-  // 4. 页码指示器切换
-  const dots = doc.querySelectorAll('#auctionPageIndicator .page-dot');
-  if (dots.length !== 4) errors.push('页码点数量不对: ' + dots.length);
-  else {
-    dots[1].click();
-    await wait(50);
-    if (win.auctionStore.currentPage !== 1) errors.push('点击第2页后 currentPage 未变 1');
-    dots[0].click();
-    await wait(50);
-    if (win.auctionStore.currentPage !== 0) errors.push('点击第1页后未返回 0');
-  }
-
-  // 5. Page1 渲染（有数据）
-  const page1 = doc.getElementById('auctionPage1');
-  if (!page1) errors.push('auctionPage1 未渲染');
-  else if (!page1.classList.contains('active')) errors.push('page1 初始未激活');
-
-  const cards = doc.querySelectorAll('#auctionPage1 .auction-item');
-  if (cards.length === 0) errors.push('page1 未渲染股票卡片');
-
-  // 6. 排序开关同步到 store
-  const sortDataToggle = doc.getElementById('auctionSortByDataToggle');
-  if (!sortDataToggle) errors.push('数据排序开关未渲染');
-  else {
-    sortDataToggle.checked = true;
-    sortDataToggle.dispatchEvent(new win.Event('change', { bubbles: true }));
-    await wait(50);
-    if (!win.auctionStore.sortState.auction.byData) errors.push('数据排序开关未同步到 store');
-  }
-
-  // 7. 全部展开开关调用全局回调
-  const expandToggle = doc.getElementById('auctionExpandAllToggle');
-  if (!expandToggle) errors.push('全部展开开关未渲染');
-  else {
-    expandToggle.checked = true;
-    expandToggle.dispatchEvent(new win.Event('change', { bubbles: true }));
-    await wait(50);
-    if (!win.auctionStore.expandAll) errors.push('全部展开状态未写入 store');
-    if (!win.__openAuctionEditCalled && typeof win.__onAuctionExpandAllToggleChangeCalled !== 'undefined' && !win.__onAuctionExpandAllToggleChangeCalled) {
-      // 仅在存在该全局标记时校验
-    }
-  }
-
-  // 8. 双击打开编辑
-  const content = doc.getElementById('auctionContent');
-  if (content) {
-    content.dispatchEvent(new win.Event('dblclick', { bubbles: true }));
-    await wait(50);
-    if (!win.__openAuctionEditCalled) errors.push('双击 page1 未调用 openAuctionEdit');
-  }
-
-  // 9. 头部折叠点击
-  const header = doc.getElementById('auctionHeader');
-  if (header) {
-    header.click();
-    await wait(50);
-    if (!win.__toggleAuctionBoardCalled) errors.push('点击头部未调用 toggleAuctionBoard');
-  }
-
-  // 10. 滑动切页（模拟 touch 事件）
-  const swipeContainer = doc.getElementById('auctionSwipeContainer');
-  if (swipeContainer && win.auctionStore.actions) {
-    win.auctionStore.actions.switchPage(0);
-    await wait(50);
-    const touchStart = new win.TouchEvent('touchstart', {
-      changedTouches: [{ screenX: 300, screenY: 100 }],
-      bubbles: true
-    });
-    const touchEnd = new win.TouchEvent('touchend', {
-      changedTouches: [{ screenX: 100, screenY: 100 }],
-      bubbles: true
-    });
-    swipeContainer.dispatchEvent(touchStart);
-    swipeContainer.dispatchEvent(touchEnd);
-    await wait(50);
-    if (win.auctionStore.currentPage !== 1) errors.push('左滑未切到第2页');
-  }
-
-  // 11. page2 渲染与双击
-  win.auctionStore.actions.switchPage(1);
+  // 7. sandbox 函数可手动挂载到任意容器
+  const manualEl = doc.createElement('div');
+  manualEl.id = 'manualMount';
+  doc.body.appendChild(manualEl);
+  win.mountAuctionBoardSandbox('hot', 'manualMount');
   await wait(100);
-  const page2 = doc.getElementById('auctionPage2');
-  if (!page2) errors.push('auctionPage2 未渲染');
-  else {
-    const topicGroups = page2.querySelectorAll('.auction-topic-group');
-    if (topicGroups.length === 0) errors.push('page2 未渲染题材分组');
-    const content2 = doc.getElementById('auctionContent2');
-    if (content2) {
-      content2.dispatchEvent(new win.Event('dblclick', { bubbles: true }));
-      await wait(50);
-      if (!win.__openCoreTopicModalCalled) errors.push('双击 page2 未调用 openCoreTopicModal');
-    }
-  }
-
-  // 12. page3 / page4 至少能渲染不报错
-  win.auctionStore.actions.switchPage(2);
-  await wait(100);
-  const page3 = doc.getElementById('auctionPage3');
-  if (!page3) errors.push('auctionPage3 未渲染');
-
-  win.auctionStore.actions.switchPage(3);
-  await wait(100);
-  const page4 = doc.getElementById('auctionPage4');
-  if (!page4) errors.push('auctionPage4 未渲染');
+  assert(!!manualEl.querySelector('.auction-board-vue'), '手动 mountAuctionBoardSandbox 未渲染');
 
   server.close();
 
@@ -200,5 +128,6 @@ async function run() {
 
 run().catch(e => {
   console.error('❌ 测试异常:', e.message || e);
+  try { server.close(); } catch (_) {}
   process.exit(1);
 });

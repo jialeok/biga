@@ -15,7 +15,16 @@
   </style>
 </head>
 <body>
-  <div id="auctionBoard"></div>
+  <div id="auctionBoard" class="auction-board">
+    <div class="auction-content" id="auctionContent"></div>
+    <div class="auction-content" id="auctionContent2"></div>
+    <div class="auction-content" id="auctionContent3"></div>
+    <div class="auction-content" id="auctionContent4"></div>
+    <div class="auction-content" id="hotContent"></div>
+    <div class="auction-content" id="hotContent2"></div>
+    <div class="auction-content" id="hotContent3"></div>
+    <div class="auction-content" id="hotContent4"></div>
+  </div>
 
   <script>
     // JSDOM file:// 协议下 localStorage 不可用，先 mock
@@ -41,19 +50,30 @@
     function _dbgLogVerbose() {}
     function _perfLog() {}
 
-    // 数据存取 mock
+    // 数据存取 mock（区分 auction / hot）
     var __auctionGroupData = {
-      '2026-07-28': [
-        { stock: '测试A', volume: '10000', yestVolume: '5000', ratioValue: 200, topic: 'AI', starCount: 2 },
-        { stock: '测试B', volume: '8000', yestVolume: '4000', ratioValue: 200, topic: '芯片', starCount: 1 }
-      ],
-      '2026-07-27': [
-        { stock: '测试A', volume: '5000', yestVolume: '3000', ratioValue: 167, topic: 'AI', starCount: 1 }
-      ]
+      'auction': {
+        '2026-07-28': [
+          { stock: '测试A', volume: '10000', yestVolume: '5000', ratioValue: 200, topic: 'AI', starCount: 2 },
+          { stock: '测试B', volume: '8000', yestVolume: '4000', ratioValue: 200, topic: '芯片', starCount: 1 }
+        ],
+        '2026-07-27': [
+          { stock: '测试A', volume: '5000', yestVolume: '3000', ratioValue: 167, topic: 'AI', starCount: 1 }
+        ]
+      },
+      'hot': {
+        '2026-07-28': [
+          { stock: '热门A', volume: '12000', yestVolume: '6000', ratioValue: 200, topic: '新能源', starCount: 2 },
+          { stock: '热门B', volume: '9000', yestVolume: '4500', ratioValue: 200, topic: '机器人', starCount: 1 }
+        ],
+        '2026-07-27': [
+          { stock: '热门A', volume: '6000', yestVolume: '3000', ratioValue: 200, topic: '新能源', starCount: 1 }
+        ]
+      }
     };
 
-    function getGroupData(dataSource) { return __auctionGroupData; }
-    function getTodayGroupList(dataSource) { return __auctionGroupData[currentDate] || []; }
+    function getGroupData(dataSource) { return __auctionGroupData[dataSource] || __auctionGroupData['auction']; }
+    function getTodayGroupList(dataSource) { return (getGroupData(dataSource)[currentDate]) || []; }
     function getPreviousTradingDay(date) {
       var map = { '2026-07-28': '2026-07-27', '2026-07-27': '2026-07-26' };
       return map[date] || null;

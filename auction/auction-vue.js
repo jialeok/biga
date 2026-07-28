@@ -48,11 +48,12 @@
     }
 
     el.innerHTML = '';
+    const dataSourceRef = Vue.computed(() => props.dataSource);
     const app = Vue.createApp({
       name: 'AuctionSandboxApp',
       components: { [component.name]: component },
-      setup() { return props; },
-      template: `<${component.name} v-bind="props"></${component.name}>`
+      setup() { return { dataSource: dataSourceRef }; },
+      template: `<${component.name} :data-source="dataSource"></${component.name}>`
     });
     app.config.errorHandler = (err, vm, info) => { console.warn('[AUCTION-VUE] 渲染错误:', err, info); };
     app.mount(el);
@@ -96,6 +97,38 @@
   window.mountPage2BoardSandbox = mountPage2BoardSandbox;
   window.mountPage3BoardSandbox = mountPage3BoardSandbox;
   window.mountStatsBoardSandbox = mountStatsBoardSandbox;
+
+  // ============================================================
+  // 自动挂载：页面加载完成后，若 content 容器存在且为空，则自动挂载组件
+  // ============================================================
+  function autoMountAll() {
+    const slots = [
+      { ds: 'auction', page: 1, cid: 'auctionContent' },
+      { ds: 'auction', page: 2, cid: 'auctionContent2' },
+      { ds: 'auction', page: 3, cid: 'auctionContent3' },
+      { ds: 'auction', page: 4, cid: 'auctionContent4' },
+      { ds: 'hot', page: 1, cid: 'hotContent' },
+      { ds: 'hot', page: 2, cid: 'hotContent2' },
+      { ds: 'hot', page: 3, cid: 'hotContent3' },
+      { ds: 'hot', page: 4, cid: 'hotContent4' }
+    ];
+    for (const s of slots) {
+      const el = document.getElementById(s.cid);
+      if (!el || el.querySelector('.auction-board-vue, .page2-board, .page3-board, .stats-board')) continue;
+      try {
+        if (s.page === 1) mountAuctionBoardSandbox(s.ds, s.cid);
+        else if (s.page === 2) mountPage2BoardSandbox(s.ds, s.cid);
+        else if (s.page === 3) mountPage3BoardSandbox(s.ds, s.cid);
+        else if (s.page === 4) mountStatsBoardSandbox(s.ds, s.cid);
+      } catch (e) { console.warn('[AUCTION-VUE] 自动挂载失败:', s.cid, e); }
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', autoMountAll);
+  } else {
+    autoMountAll();
+  }
 
   // ============================================================
   // 覆盖遗留 render 函数：Vue 挂载后只同步状态，避免 innerHTML 覆盖
