@@ -10017,6 +10017,8 @@
         async function loadHotStocksFromCloud() {
             // 若刚推送了本地修改（saveAuction 的 hot 分支），跳过重新加载，防止云端空数据覆盖本地修改
             if (_justPushedHotAuction) return;
+            // [HOT-GUARD] 加载前先修复引用，确保后续写入都落在 store 响应式代理上
+            _ensureHotAuctionDataReactive();
             const sb = getSupabase();
             const result = {};
             _hotFullRowCache = {};
@@ -10073,7 +10075,8 @@
                             selected: local ? (local.selected || false) : (row.selected || false),
                             bought: local ? (local.bought || false) : (row.bought || false),
                             sold: local ? (local.sold || false) : (row.sold || false),
-                            fixed: local ? (local.fixed || false) : (row.fixed || false)
+                            fixed: local ? (local.fixed || false) : (row.fixed || false),
+                            in_watchlist: true
                         });
                     }
                 });
@@ -10081,6 +10084,11 @@
                 offset += pageSize;
             }
             _hotAuctionTableAvailable = true;
+            // [DEBUG-VUE-FIX] 记录本次云端拉取结果，帮助诊断"后台有数据但前台不显示"
+            const _cloudTotalRows = Object.values(_hotFullRowCache).reduce(function(sum, arr) { return sum + (arr || []).length; }, 0);
+            const _cloudWatchRows = Object.values(result).reduce(function(sum, arr) { return sum + (arr || []).length; }, 0);
+            const _todayWatchRows = (result[currentDate] || []).length;
+            _dbgLog('[HOT-LOAD] loadHotStocksFromCloud 完成：云端总行=' + _cloudTotalRows + '，正式列表行=' + _cloudWatchRows + '，今天正式行=' + _todayWatchRows + '，当前日期=' + currentDate + '，结果日期数=' + Object.keys(result).length);
             // [PERF-FIX 2026-07-24] 原实现对响应式代理逐 key delete 再逐 key 赋值
             // （211 个日期 = 400+ 次独立响应式 trigger），每次 trigger 都可能让
             // 依赖它的 Vue computed（hot 分组的 AuctionBoard/Page2Board 等）判定为脏
@@ -10090,31 +10098,48 @@
             // 内容未变可以跳过），只对真正变化的 key 做响应式写入，且只在最后
             // bump 一次 stocksDataVersion 作为统一失效信号，而不是让每次单独的
             // 属性增删各自触发一轮依赖失效判定。
-            if (auctionStore && _hotAuctionData === auctionStore.hotAuctionData) {
-                const _t0 = performance.now();
-                const oldKeys = Object.keys(_hotAuctionData);
-                const newKeys = Object.keys(result);
-                const newKeySet = new Set(newKeys);
-                let _removed = 0, _changed = 0, _unchanged = 0;
-                // 1) 删除云端已不存在的日期
-                oldKeys.forEach(function (d) {
-                    if (!newKeySet.has(d)) { delete _hotAuctionData[d]; _removed++; }
-                });
-                // 2) 只有内容真正变化（JSON 不同）才写入，内容相同的日期跳过，
-                //    避免给没有变化的日期也触发一次响应式 set
-                newKeys.forEach(function (d) {
-                    const oldVal = _hotAuctionData[d];
-                    const newVal = result[d];
-                    if (oldVal === undefined || JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
-                        _hotAuctionData[d] = newVal;
-                        _changed++;
-                    } else {
-                        _unchanged++;
-                    }
-                });
-                _dbgLog('[PERF-FIX] loadHotStocksFromCloud 响应式写入：删除' + _removed + '/变化' + _changed + '/未变跳过' + _unchanged + '，diff+写入耗时=' + (performance.now() - _t0).toFixed(1) + 'ms');
-            } else {
-                _hotAuctionData = result;
+            // [HOT-GUARD] 写入前再次确保 _hotAuctionData 指向 store 响应式代理；
+            // 如果之前某处把 _hotAuctionData 换成了普通对象，这里先修复引用，
+            // 避免把 result 赋给一个脱离 store 的变量，导致 Vue 看不到变化、界面空白。
+            _ensureHotAuctionDataReactive();
+            const _t0 = performance.now();
+            const oldKeys = Object.keys(_hotAuctionData);
+            const newKeys = Object.keys(result);
+            const newKeySet = new Set(newKeys);
+            let _removed = 0, _changed = 0, _unchanged = 0;
+            // 1) 删除云端已不存在的日期
+            oldKeys.forEach(function (d) {
+                if (!newKeySet.has(d)) { delete _hotAuctionData[d]; _removed++; }
+            });
+            // 2) 只有内容真正变化（JSON 不同）才写入，内容相同的日期跳过，
+            //    避免给没有变化的日期也触发一次响应式 set
+            newKeys.forEach(function (d) {
+                const oldVal = _hotAuctionData[d];
+                const newVal = result[d];
+                if (oldVal === undefined || JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+                    _hotAuctionData[d] = newVal;
+                    _changed++;
+                } else {
+                    _unchanged++;
+                }
+            });
+            _dbgLog('[PERF-FIX] loadHotStocksFromCloud 响应式写入：删除' + _removed + '/变化' + _changed + '/未变跳过' + _unchanged + '，diff+写入耗时=' + (performance.now() - _t0).toFixed(1) + 'ms');
+            // [PERF-FIX] 统一失效信号：有数据变化时 bump stocksDataVersion，确保四块看板
+            // computed（尤其是依赖本信号的 _memoizedView）在当前 tab 可见时立即重算，
+            // 避免仅依赖响应式 proxy 写入时偶尔不触发 Vue 更新导致界面空白。
+            if ((_changed > 0 || _removed > 0) && auctionStore) {
+                auctionStore.stocksDataVersion = (auctionStore.stocksDataVersion || 0) + 1;
+                _dbgLog('[PERF-FIX] loadHotStocksFromCloud bump stocksDataVersion → ' + auctionStore.stocksDataVersion + '（有数据变化）');
+                // [HOT-VUE-FIX 2026-07-28] 兜底：热门股票 tab 提前激活时，Vue 响应式链路
+                // 偶尔不自动触发 DOM 重渲染。数据变化后若当前正在看 hot tab，强制 update。
+                if (currentGroup === 'hot') {
+                    _forceAuctionBoardUpdate('hot');
+                    // 同时展开看板，避免折叠导致"完全空白"
+                    const board = document.getElementById('auctionBoard');
+                    const btn = document.getElementById('auctionToggleBtn');
+                    if (board) board.classList.remove('collapsed');
+                    if (btn) btn.textContent = '▲';
+                }
             }
             console.log('hot_stocks 加载完成:', Object.keys(result).length, '个日期');
         }
@@ -10579,6 +10604,12 @@
 
             // 重新渲染当前分组的数据
             renderAuction(g);
+
+            // [COLLAPSE-FIX 2026-07-28] 切换分组时自动展开看板，避免用户因折叠而看到空白页
+            const board = document.getElementById('auctionBoard');
+            const toggleBtn = document.getElementById('auctionToggleBtn');
+            if (board) board.classList.remove('collapsed');
+            if (toggleBtn) toggleBtn.textContent = '▲';
 
             // 切换 Tab 后滚动到标题栏位置（延迟执行，覆盖 renderAuction 内部的滚动位置恢复）
             // 减去 .date-nav 高度，确保紫色标题栏和 Tab 栏在日期栏下方可见
@@ -11978,6 +12009,21 @@
         }
         _dbgLog('页面脚本加载: currentDate 初始化为 ' + currentDate + ' | 代码版本 v3-0804-RANKCACHE-FIX（找到真正瓶颈：getRankData每题材调用N次→改为每次渲染只调用1次，避免反复触发响应式store写入）');
         _dbgLog('[AUCTION-GUARD] selfCheck active=true refIdentity=' + (_auctionMemCache === (typeof auctionStore !== 'undefined' && auctionStore ? auctionStore.auctionData : null)) + ' dates=' + Object.keys(_auctionMemCache || {}).length);
+        _dbgLog('[HOT-GUARD] selfCheck active=true refIdentity=' + (_hotAuctionData === (typeof auctionStore !== 'undefined' && auctionStore ? auctionStore.hotAuctionData : null)) + ' dates=' + Object.keys(_hotAuctionData || {}).length);
+        // [HOT-GUARD] 兜底修复：若 _hotAuctionData 因某处重新赋值而脱离 store 响应式代理，
+        // 把它重新指回 store.hotAuctionData，并把旧数据 merge 回去，确保 Vue 响应式链路不断。
+        (function _hotAuctionDataRefGuard() {
+            if (!auctionStore) return;
+            if (_hotAuctionData !== auctionStore.hotAuctionData) {
+                _dbgLog('[HOT-GUARD] ⚠️ _hotAuctionData 引用脱离 store，执行兜底修复');
+                const oldData = _hotAuctionData || {};
+                _hotAuctionData = auctionStore.hotAuctionData;
+                Object.keys(oldData).forEach(function(d) {
+                    _hotAuctionData[d] = oldData[d];
+                });
+                _dbgLog('[HOT-GUARD] 兜底修复完成，当前日期行数=' + (_hotAuctionData[currentDate] || []).length);
+            }
+        })();
 
         let isStrengthSortEnabled = false;
 
@@ -12853,6 +12899,65 @@
         // 热门股票专用数据源（不共用 getGroupData，避免任何耦合）
         function getHotAuctionData() { return _hotAuctionData || (_hotAuctionData = {}); }
 
+        // [HOT-GUARD] 兜底修复：若 _hotAuctionData 因某处重新赋值而脱离 store 响应式代理，
+        // 把它重新指回 store.hotAuctionData，并把旧数据 merge 回去，确保 Vue 响应式链路不断。
+        function _ensureHotAuctionDataReactive() {
+            if (typeof auctionStore === 'undefined' || !auctionStore) return;
+            if (_hotAuctionData === auctionStore.hotAuctionData) return;
+            const oldData = _hotAuctionData || {};
+            _hotAuctionData = auctionStore.hotAuctionData;
+            Object.keys(oldData).forEach(function(d) {
+                _hotAuctionData[d] = oldData[d];
+            });
+            _dbgLog('[HOT-GUARD] _ensureHotAuctionDataReactive 兜底修复：旧引用共 ' + Object.keys(oldData).length + ' 个日期，当前日期行数=' + (_hotAuctionData[currentDate] || []).length);
+        }
+
+        // [HOT-VUE-FIX 2026-07-28] 兜底修复：热门股票 tab 提前激活时，Vue 响应式链路
+        // 偶尔无法自动触发 DOM 重渲染（computed 值已更新为 111，但 DOM 仍停留在"暂无数据"）。
+        // 在确认数据变化后显式触发当前可见 tab 的 AuctionBoard 强制 update()，确保界面同步。
+        function _forceAuctionBoardUpdate(dataSource) {
+            if (!window._auctionVueApps) return;
+            const _p = dataSource === 'hot' ? 'hot' : 'auction';
+            const appOrInst = window._auctionVueApps[_p];
+            if (!appOrInst) return;
+            try {
+                let inst = appOrInst;
+                if (inst._ && inst._.update && typeof inst._.update === 'function') inst = inst._;
+                if (inst.update && typeof inst.update === 'function') {
+                    inst.update();
+                    _dbgLog('[HOT-VUE-FIX] _forceAuctionBoardUpdate(' + dataSource + ') 触发 root update 成功');
+                    return;
+                }
+                if (inst.subTree) {
+                    const findAndUpdate = function(vnode) {
+                        if (!vnode) return false;
+                        if (vnode.component) {
+                            if (vnode.component.type && vnode.component.type.name === 'AuctionBoard' && typeof vnode.component.update === 'function') {
+                                vnode.component.update();
+                                return true;
+                            }
+                            if (vnode.component.subTree && findAndUpdate(vnode.component.subTree)) return true;
+                        }
+                        if (vnode.children) {
+                            if (Array.isArray(vnode.children)) {
+                                for (let i = 0; i < vnode.children.length; i++) if (findAndUpdate(vnode.children[i])) return true;
+                            } else if (typeof vnode.children === 'object') {
+                                for (const k in vnode.children) if (findAndUpdate(vnode.children[k])) return true;
+                            }
+                        }
+                        return false;
+                    };
+                    if (findAndUpdate(inst.subTree)) {
+                        _dbgLog('[HOT-VUE-FIX] _forceAuctionBoardUpdate(' + dataSource + ') 通过子树 update 成功');
+                        return;
+                    }
+                }
+                _dbgLog('[HOT-VUE-FIX] _forceAuctionBoardUpdate(' + dataSource + ') 未找到可 update 的实例');
+            } catch (e) {
+                _dbgLog('[HOT-VUE-FIX] _forceAuctionBoardUpdate(' + dataSource + ') 失败: ' + (e && e.message));
+            }
+        }
+
         // 打开热门股票编辑弹窗（独立 DOM #hotEditModal）
         function openHotEdit() {
             openHotEditModal();
@@ -13112,7 +13217,8 @@
                         selected: existingItem ? existingItem.selected : false,
                         bought: existingItem ? existingItem.bought : false,
                         sold: existingItem ? existingItem.sold : false,
-                        fixed: existingItem ? existingItem.fixed : false
+                        fixed: existingItem ? existingItem.fixed : false,
+                        in_watchlist: true
                     });
                 }
             });
@@ -13121,6 +13227,7 @@
                 const ratioB = parseFloat(b.volume) / parseFloat(b.yestVolume) || 0;
                 return ratioB - ratioA;
             });
+            hotList.forEach(function(item) { if (item && item.in_watchlist === undefined) item.in_watchlist = true; });
             getHotAuctionData()[currentDate] = hotList;
             invalidateTopicCache();
             renderAuction('hot');
@@ -13281,7 +13388,8 @@
                         code: dataItem.code || scMap[dataItem.stock] || (cached ? (cached.code || '') : '') || '',
                         note: historyTopics,
                         changePct: dataItem.changePct || parsedHist.changePct,
-                        topics: dataItem.topics || parsedHist.topics
+                        topics: dataItem.topics || parsedHist.topics,
+                        in_watchlist: true
                     });
                     fullDataCount++;
                 }
@@ -13340,7 +13448,8 @@
                         stock: noteItem.stock, volume: '', yestVolume: '',
                         code: scMap[noteItem.stock] || (cached2 ? (cached2.code || '') : '') || '',
                         note: buildNoteFromFields(finalChangePct, finalTopics),
-                        changePct: finalChangePct, topics: finalTopics, selected: false
+                        changePct: finalChangePct, topics: finalTopics, selected: false,
+                        in_watchlist: true
                     });
                     noteNewCount++;
                 }
@@ -13355,6 +13464,7 @@
             }
 
             // 写入 _hotAuctionData（不写 localStorage，不调 saveModule/saveData）
+            hotList.forEach(function(item) { if (item && item.in_watchlist === undefined) item.in_watchlist = true; });
             getHotAuctionData()[currentDate] = hotList;
             invalidateTopicCache();
             // 同步到 hot_stocks 表：增删/状态用 syncHotStocksListForDate，
@@ -16380,7 +16490,8 @@
                         selected: existing ? existing.selected : false,
                         bought: existing ? existing.bought : false,
                         sold: existing ? existing.sold : false,
-                        fixed: existing ? existing.fixed : false
+                        fixed: existing ? existing.fixed : false,
+                        in_watchlist: true
                     };
                 });
 
@@ -16527,7 +16638,8 @@
                         selected: existing ? existing.selected : false,
                         bought: existing ? existing.bought : false,
                         sold: existing ? existing.sold : false,
-                        fixed: existing ? existing.fixed : false
+                        fixed: existing ? existing.fixed : false,
+                        in_watchlist: true
                     };
                 });
 
@@ -19753,11 +19865,16 @@
         let _lastHotRenderDate = null;
 
         function renderAuction(dataSource='auction') {
+            // [HOT-GUARD] 渲染热门股票前强制修复引用，避免 Vue 路径读取到普通对象导致空白
+            if (dataSource === 'hot') _ensureHotAuctionDataReactive();
             try {
-                var _rows = (typeof getAuctionData === 'function' && getAuctionData()[currentDate]) || (auctionStore && auctionStore.auctionData && auctionStore.auctionData[currentDate]) || [];
+                var _src = dataSource === 'hot' ? 'hot' : 'auction';
+                var _dataSrc = dataSource === 'hot' ? getHotAuctionData() : getAuctionData();
+                var _rows = (typeof getGroupData === 'function' && getGroupData(dataSource)[currentDate]) || [];
                 var _sample = _rows.slice(0,3).map(function(r){return r&&r.stock||'?';}).join(',');
+                var _listLen = (typeof getTodayGroupList === 'function' ? getTodayGroupList(dataSource) : _rows).length;
                 var _flag = (auctionStore && currentDate !== auctionStore.currentDate) ? ' ⚠️' : '';
-                _dbgLog('[AUCTION-RENDER] currentDate=' + currentDate + ' auctionStore.currentDate=' + (auctionStore&&auctionStore.currentDate) + ' rows=' + _rows.length + ' sample=' + _sample + _flag);
+                _dbgLog('[AUCTION-RENDER] dataSource=' + _src + ' currentDate=' + currentDate + ' auctionStore.currentDate=' + (auctionStore&&auctionStore.currentDate) + ' groupRows=' + _rows.length + ' listLen=' + _listLen + ' sample=' + _sample + ' hotRefOk=' + (auctionStore ? (_hotAuctionData === auctionStore.hotAuctionData) : 'N/A') + _flag);
             } catch(e){}
             // [PERF-DEBUG] 记录 renderAuction 的调用来源和频率，用于确认每次交互
             // 是否都触发了 stocksDataVersion++（进而让四块看板 computed 全部失效）
@@ -22143,11 +22260,24 @@
                         catch (e) { _dbgLog('[AUCTION-VUE] Page3 挂载失败，回退 innerHTML：' + e.message); }
                     }
                     if (auctionStore) { auctionStore.currentDate = currentDate; auctionStore.currentGroup = currentGroup; }
-                    const __rp3Total = performance.now() - __rp3T0;
-                    if (__rp3Total > 30) {
-                        _dbgLog('[PERF-MOUNT] renderAuctionPage3/' + dataSource + ' 总耗时=' + __rp3Total.toFixed(1) + 'ms（含querySelector判断+可能的挂载）');
+                    // [DEBUG-VUE-FIX] 检测 Vue 是否真正渲染出内容；若挂载后仍空白，
+                    // 则卸载并走下方 innerHTML 兜底，避免用户看到完全空白的第三页。
+                    const __hasContentAfterMount = !!_vueEl.querySelector('.auction-topic-history-group,.auction-topic-placeholder');
+                    _dbgLog('[PERF-MOUNT] renderAuctionPage3/' + dataSource + ' 挂载后内容检测=' + __hasContentAfterMount);
+                    if (__hasContentAfterMount) {
+                        const __rp3Total = performance.now() - __rp3T0;
+                        if (__rp3Total > 30) {
+                            _dbgLog('[PERF-MOUNT] renderAuctionPage3/' + dataSource + ' 总耗时=' + __rp3Total.toFixed(1) + 'ms（含querySelector判断+可能的挂载）');
+                        }
+                        return;
                     }
-                    return;
+                    _dbgLog('[AUCTION-VUE] Page3 Vue 挂载后仍空白，回退 innerHTML 兜底');
+                    try {
+                        if (window._auctionVuePage3Apps && window._auctionVuePage3Apps[_p] && typeof window._auctionVuePage3Apps[_p].unmount === 'function') {
+                            window._auctionVuePage3Apps[_p].unmount();
+                        }
+                    } catch (eu) {}
+                    delete window._auctionVuePage3Apps[_p];
                 }
             }
 
@@ -39469,6 +39599,7 @@
             }
 
             function computeAuctionPage3ViewData(dataSource) {
+                try {
                 dataSource = dataSource || 'auction';
                 _touchReactiveCtx();
                 const isStrengthSortEnabled = auctionStore.strengthSortEnabled; // 响应式镜像
@@ -39656,6 +39787,10 @@
                 _dbgLogVerbose('[RANK-CACHE] calls=' + window._rankCacheStats.calls + ' earlyReturn=' + window._rankCacheStats.earlyReturn + ' hit=' + window._rankCacheStats.hit + ' missNoEntry=' + window._rankCacheStats.missNoEntry + ' missRefChanged=' + window._rankCacheStats.missRefChanged + ' missNoTopic=' + window._rankCacheStats.missNoTopic + ' | cache当前共缓存' + _topicRankByDateCache.size + '天 | allData是否为null=' + (allData === null));
 
                 return { empty: false, dataSource, topics: enrichedTopics, isStrengthSortEnabled };
+                } catch (e) {
+                    _dbgLog('[PAGE3-ERR] computeAuctionPage3ViewData 异常: ' + (e && e.message) + ' | stack=' + (e && e.stack ? e.stack.split('\n').slice(0,3).join(' <- ') : '?'));
+                    return { empty: true, placeholder: '计算出错: ' + (e && e.message || '未知错误') };
+                }
             }
 
             // 第三页箭头计算（提取自原 20462-20523，hasData 对比规则 A/B）
@@ -39988,9 +40123,10 @@
                     template: '<page3-board :data-source="ds"></page3-board>',
                     data() { return { ds: dataSource || 'auction' }; }
                 });
-                const __result = app.mount(el);
+                app.mount(el);
                 _dbgLog('[PERF-MOUNT] mountPage3BoardSandbox 创建+挂载耗时=' + (performance.now() - __mT0).toFixed(1) + 'ms');
-                return __result;
+                // 返回 app 而非组件实例：调用方可能需要 unmount() 做兜底清理
+                return app;
             }
 
             function mountStatsBoardSandbox(dataSource, mountElId) {
