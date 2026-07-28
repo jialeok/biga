@@ -8232,7 +8232,6 @@
          用于早盘竞价看板 Vue 化：auctionStore 为 reactive 代理，
          现有内核函数（deriveAuctionTagState 等）逻辑不动，仅数据源改走 store 代理。 -->
     <script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
-    <script src="dashboards.js"></script>
     <script src="remaining-boards.js"></script>
 
     <!-- 被踢下线遮罩层 -->
@@ -38356,6 +38355,9 @@
             }
         });
     </script>
+
+    <script src="dashboards.js"></script>
+    <script src="rank-vue.js"></script>
 
     <!-- ============================================================
          早盘竞价看板 Vue 化 Phase 2 脚手架（增量、非破坏）
