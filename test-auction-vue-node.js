@@ -108,6 +108,15 @@ async function run() {
   const leakedStatsEls = doc.querySelectorAll('#auctionContent4 .stats-board, #hotContent4 .stats-board');
   assert(leakedStatsEls.length === 0, 'StatsBoard 不应渲染到 page4 容器');
 
+  // 6.1 标题栏强度数值与星标签统计看板甜甜圈应显示
+  const strengthValueEl = doc.getElementById('auctionStrengthValue');
+  const strengthArrowEl = doc.getElementById('auctionStrengthArrow');
+  assert(!!strengthValueEl && strengthValueEl.textContent !== '-', '标题栏强度数值应显示，实际 ' + (strengthValueEl && strengthValueEl.textContent));
+  assert(!!strengthArrowEl, '标题栏强度箭头元素应存在');
+  const starStatsContent = doc.getElementById('starStatsContent');
+  assert(!!starStatsContent.querySelector('.stats-board'), '星标签统计看板应渲染');
+  assert(!!starStatsContent.querySelector('.star-stats-donut-svg'), '星标签统计看板应显示甜甜圈');
+
   // 7. 顶部竞/昨数、竞放量数统计条自动挂载
   const auctionStat = doc.getElementById('auctionHighRatioStat');
   assert(!!auctionStat && auctionStat.querySelector('.auction-highratio-stat-vue'), 'auctionHighRatioStat 未渲染 HighRatioStat');
@@ -146,6 +155,11 @@ async function run() {
   assert(hotBlueRows.length === hotRows.length, '热门 tab 竞/昨开启后，蓝色高光行数(' + hotBlueRows.length + ')应等于总行数(' + hotRows.length + ')');
   assert(String(hotJingYestCountText.textContent) === String(hotBlueRows.length),
     '热门 tab 竞/昨数显示(' + hotJingYestCountText.textContent + ')应与蓝色高光行数(' + hotBlueRows.length + ')一致');
+
+  // 7.3 切换 tab 后标题栏强度数值与甜甜圈应跟随更新
+  assert(strengthValueEl.textContent !== '-', '切换到热门 tab 后标题栏强度数值应仍显示');
+  assert(!!starStatsContent.querySelector('.stats-board'), '切换到热门 tab 后星标签统计看板应仍渲染');
+  assert(!!starStatsContent.querySelector('.star-stats-donut-svg'), '切换到热门 tab 后甜甜圈应仍显示');
 
   // 8. 点击序号应触发 toggleAuctionTrendPanel
   assert(!win.__trendPanelToggled, '初始状态不应触发趋势图展开');

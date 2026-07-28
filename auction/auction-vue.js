@@ -240,5 +240,43 @@
   syncGlobalToStore();
   setInterval(syncGlobalToStore, 500);
 
+  // ============================================================
+  // 早盘竞价标题栏强度数值/箭头（Vue 路径下原 renderAuction 提前返回，需单独维护）
+  // ============================================================
+  function updateHeaderStrength() {
+    const ds = store.currentGroup === 'hot' ? 'hot' : 'auction';
+    const valueEl = document.getElementById('auctionStrengthValue');
+    const arrowEl = document.getElementById('auctionStrengthArrow');
+    if (!valueEl || !arrowEl) return;
+
+    let todayStrength = null;
+    let yesterdayStrength = null;
+    try {
+      const view = typeof window.computeAuctionViewData === 'function' ? window.computeAuctionViewData(ds) : null;
+      if (view && view.stats) {
+        todayStrength = view.stats.todayStrength;
+        yesterdayStrength = view.stats.yesterdayStrength;
+      }
+    } catch (e) {
+      console.warn('[AUCTION-VUE] 计算标题强度失败:', e);
+    }
+
+    if (todayStrength != null) {
+      valueEl.textContent = todayStrength + '% ';
+      if (yesterdayStrength != null) {
+        if (todayStrength > yesterdayStrength) arrowEl.textContent = '⬆';
+        else if (todayStrength < yesterdayStrength) arrowEl.textContent = '⬇';
+        else arrowEl.textContent = '-';
+      } else {
+        arrowEl.textContent = '-';
+      }
+    } else {
+      valueEl.textContent = '-';
+      arrowEl.textContent = '-';
+    }
+  }
+
+  Vue.watch(() => store.currentGroup + '|' + store.currentDate + '|' + store.stocksDataVersion, updateHeaderStrength, { immediate: true });
+
   console.log('[AUCTION-VUE] Vue 挂载层初始化完成');
 })();

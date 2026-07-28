@@ -675,8 +675,8 @@
     function computeAuctionStatsViewData(dataSource) {
         dataSource = dataSource || 'auction';
         touchReactiveCtx();
-        // 仅在当前 tab 的统计看板页才执行重计算，切 tab/切页时不必要的重算会导致卡顿。
-        if (dataSource !== currentGroup || auctionStore.currentPage !== 3) return { skip: true };
+        // 星标签统计看板是常驻显示的外层面板，始终为当前 tab 计算；切 tab 时由外层 renderAuctionStatsBoard 重新挂载。
+        if (dataSource !== currentGroup) return { skip: true };
         const todayAuction = getTodayList(dataSource);
         const yesterdayDate = getYesterdayDate(currentDate);
         const yesterdayAuction = yesterdayDate ? (getGroupData(dataSource)[yesterdayDate] || []) : [];
