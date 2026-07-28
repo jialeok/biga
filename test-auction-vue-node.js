@@ -108,7 +108,25 @@ async function run() {
   const leakedStatsEls = doc.querySelectorAll('#auctionContent4 .stats-board, #hotContent4 .stats-board');
   assert(leakedStatsEls.length === 0, 'StatsBoard 不应渲染到 page4 容器');
 
-  // 7. sandbox 函数可手动挂载到任意容器
+  // 7. 顶部竞/昨数、竞放量数统计条自动挂载
+  const auctionStat = doc.getElementById('auctionHighRatioStat');
+  assert(!!auctionStat && auctionStat.querySelector('.auction-highratio-stat'), 'auctionHighRatioStat 未渲染 HighRatioStat');
+  assert(textContains(auctionStat, '竞/昨数'), 'auctionHighRatioStat 应显示“竞/昨数”');
+  assert(textContains(auctionStat, '竞放量数'), 'auctionHighRatioStat 应显示“竞放量数”');
+
+  // 8. 点击序号应触发 toggleAuctionTrendPanel
+  assert(!win.__trendPanelToggled, '初始状态不应触发趋势图展开');
+  const firstNumber = auctionContent.querySelector('.auction-number');
+  if (firstNumber) {
+    firstNumber.click();
+    await wait(50);
+    assert(win.__trendPanelToggled, '点击序号未触发 toggleAuctionTrendPanel');
+    assert(win.__trendPanelIndex === 0, '点击序号传入的 index 应为 0，实际 ' + win.__trendPanelIndex);
+  } else {
+    errors.push('auctionContent 中未找到序号元素');
+  }
+
+  // 9. sandbox 函数可手动挂载到任意容器
   const manualEl = doc.createElement('div');
   manualEl.id = 'manualMount';
   doc.body.appendChild(manualEl);

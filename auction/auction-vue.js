@@ -20,7 +20,8 @@
   const Page2Board = window.Page2BoardComponent;
   const Page3Board = window.Page3BoardComponent;
   const StatsBoard = window.StatsBoardComponent;
-  if (!AuctionBoard || !Page2Board || !Page3Board || !StatsBoard) {
+  const HighRatioStat = window.HighRatioStatComponent;
+  if (!AuctionBoard || !Page2Board || !Page3Board || !StatsBoard || !HighRatioStat) {
     console.warn('[AUCTION-VUE] 组件未就绪');
     return;
   }
@@ -42,6 +43,7 @@
       case 'Page2Board': return '.page2-board,.auction-topic-placeholder';
       case 'Page3Board': return '.page3-board,.auction-topic-placeholder';
       case 'StatsBoard': return '.stats-board,.star-stats-empty';
+      case 'HighRatioStat': return '.auction-highratio-stat';
       default: return null;
     }
   }
@@ -114,10 +116,15 @@
     return mountComponent(StatsBoard, { dataSource }, containerId);
   }
 
+  function mountHighRatioStatSandbox(prefix, page, containerId) {
+    return mountComponent(HighRatioStat, { prefix, page }, containerId);
+  }
+
   window.mountAuctionBoardSandbox = mountAuctionBoardSandbox;
   window.mountPage2BoardSandbox = mountPage2BoardSandbox;
   window.mountPage3BoardSandbox = mountPage3BoardSandbox;
   window.mountStatsBoardSandbox = mountStatsBoardSandbox;
+  window.mountHighRatioStatSandbox = mountHighRatioStatSandbox;
 
   // ============================================================
   // 自动挂载：页面加载完成后，若 content 容器存在且为空，则自动挂载组件
@@ -150,6 +157,20 @@
         const g = store.currentGroup === 'hot' ? 'hot' : 'auction';
         mountStatsBoardSandbox(g, 'starStatsContent');
       } catch (e) { console.warn('[AUCTION-VUE] 自动挂载 StatsBoard 失败:', e); }
+    }
+
+    // 顶部"竞/昨数 / 竞放量数"统计条（page1 / page2 各一组）
+    const statSlots = [
+      { prefix: 'auction', page: 1, cid: 'auctionHighRatioStat' },
+      { prefix: 'auction', page: 2, cid: 'auctionHighRatioStat2' },
+      { prefix: 'hot', page: 1, cid: 'hotHighRatioStat' },
+      { prefix: 'hot', page: 2, cid: 'hotHighRatioStat2' }
+    ];
+    for (const s of statSlots) {
+      const el = document.getElementById(s.cid);
+      if (!el || el.querySelector('.auction-highratio-stat')) continue;
+      try { mountHighRatioStatSandbox(s.prefix, s.page, s.cid); }
+      catch (e) { console.warn('[AUCTION-VUE] 自动挂载 HighRatioStat 失败:', s.cid, e); }
     }
   }
 

@@ -438,7 +438,9 @@
                 // Page1 行交互
                 onNumberClick: (index, e) => {
                     if (e) e.stopPropagation();
-                    actions.toggleTrendPanel(index);
+                    // 直接调用原生的趋势图切换函数（store.toggleTrendPanel 只维护展开集合，
+                    // 没有代理到全局函数，导致点击序号无反应）。
+                    safeCall(window.toggleAuctionTrendPanel, index);
                 },
                 onRatioClick: (index, e) => {
                     if (e) e.stopPropagation();

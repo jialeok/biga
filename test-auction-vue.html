@@ -26,6 +26,10 @@
     <div class="auction-content" id="hotContent4"></div>
   </div>
   <div id="starStatsContent"></div>
+  <div id="auctionHighRatioStat"></div>
+  <div id="auctionHighRatioStat2"></div>
+  <div id="hotHighRatioStat"></div>
+  <div id="hotHighRatioStat2"></div>
 
   <script>
     // JSDOM file:// 协议下 localStorage 不可用，先 mock
@@ -151,6 +155,14 @@
     function expandAllAuctionTrendPanelsP2() {}
     function restoreExpandedTopicGroupsP2() {}
     function _getExpandedStocksSet() { return new Set(); }
+
+    // 趋势图展开交互 mock
+    window.__trendPanelToggled = false;
+    window.__trendPanelIndex = null;
+    function toggleAuctionTrendPanel(index) {
+      window.__trendPanelToggled = true;
+      window.__trendPanelIndex = index;
+    }
   </script>
   <script src="auction/auction-store.js"></script>
   <script src="auction/auction-composables.js"></script>
