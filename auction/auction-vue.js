@@ -2,8 +2,9 @@
  * auction-vue.js
  * 早盘竞价看板单一 Vue App 入口（彻底重构版）
  * - 在 #auctionBoard 上挂载一个应用，完全接管内部渲染
- * - 保留与旧全局函数兼容的 DOM id，确保 innerHTML 回退路径（若被触发）可定位
- * - 所有交互优先通过 auctionStore.actions 驱动，store 响应式自动同步到组件
+ * - 使用 KeepAlive 缓存 1-4 页，滑动/Tab 切换时后台页面状态保留、响应瞬时
+ * - 覆盖 window.renderAuction，消除 innerHTML 双轨渲染隐患
+ * - 所有交互通过 auctionStore.actions / useAuctionEvents，不再直接依赖全局函数
  */
 (function () {
   'use strict';
@@ -14,31 +15,114 @@
   const store = window.auctionStore;
   if (!store) { console.warn('[AUCTION-VUE] auctionStore 未就绪'); return; }
 
-  // 复用 auction-components.js 暴露的组件
   const AuctionBoard = window.AuctionBoardComponent;
   const Page2Board = window.Page2BoardComponent;
   const Page3Board = window.Page3BoardComponent;
   const StatsBoard = window.StatsBoardComponent;
+  const HighRatioStat = window.HighRatioStatComponent;
 
-  const tabLabels = { auction: '早盘竞价', hot: '热门股票' };
-
-  // 安全调用全局函数
-  function safeCall(fn, ...args) {
-    try { if (typeof fn === 'function') return fn(...args); } catch (e) { console.warn('[AUCTION-VUE] 全局函数调用失败:', e); }
+  if (!AuctionBoard || !Page2Board || !Page3Board || !StatsBoard || !HighRatioStat) {
+    console.warn('[AUCTION-VUE] 组件未就绪');
+    return;
   }
 
+  const { createHandlers } = window.useAuctionEvents();
+  const { useSwipe } = window.useAuctionGesture();
+  const tabLabels = { auction: '早盘竞价', hot: '热门股票' };
+
+  // ============================================================
+  // 数据驱动：头部强度统计
+  // ============================================================
+  const HeaderStats = {
+    name: 'HeaderStats',
+    setup() {
+      const stats = Vue.computed(() => {
+        if (!store.currentDate) return { text: '-', arrow: '-' };
+        const ds = store.currentGroup === 'hot' ? 'hot' : 'auction';
+        const list = window.getTodayGroupList ? window.getTodayGroupList(ds) : [];
+        const prevList = (window.getPreviousTradingDay && window.getPreviousTradingDay(store.currentDate))
+          ? (window.getGroupData(ds)[window.getPreviousTradingDay(store.currentDate)] || [])
+          : [];
+        const prevPrevDate = window.getPreviousTradingDay ? window.getPreviousTradingDay(window.getPreviousTradingDay(store.currentDate)) : null;
+        const prevPrevList = prevPrevDate ? (window.getGroupData(ds)[prevPrevDate] || []) : [];
+        if (list.length === 0) return { text: '-', arrow: '-' };
+
+        const prevMap = new Map();
+        prevList.forEach(it => { if (it && it.stock) prevMap.set(it.stock.trim(), it); });
+        const prevPrevMap = new Map();
+        prevPrevList.forEach(it => { if (it && it.stock) prevPrevMap.set(it.stock.trim(), it); });
+
+        let strongCount = 0;
+        list.forEach(item => {
+          let hasDown = false;
+          if (prevList.length > 0 && item.stock) {
+            const pi = prevMap.get(item.stock.trim());
+            if (pi && pi.yestVolume) {
+              const pv = parseFloat(pi.volume) || 0;
+              const py = parseFloat(pi.yestVolume) || 0;
+              if (py > 0) {
+                const prr = (pv / py) * 100;
+                const crr = (parseFloat(item.volume) || 0) / (parseFloat(item.yestVolume) || 1) * 100;
+                if (crr < prr) hasDown = true;
+              }
+            }
+          }
+          if (!hasDown) strongCount++;
+        });
+        const todayStrength = Math.round((strongCount / list.length) * 100);
+
+        let yStrongCount = 0;
+        const yTotal = prevList.length;
+        if (yTotal > 0) {
+          prevList.forEach(item => {
+            let hasDown = false;
+            if (prevPrevList.length > 0 && item.stock) {
+              const pp = prevPrevMap.get(item.stock.trim());
+              if (pp && pp.yestVolume) {
+                const ppv = parseFloat(pp.volume) || 0;
+                const ppy = parseFloat(pp.yestVolume) || 0;
+                if (ppy > 0) {
+                  const pprr = (ppv / ppy) * 100;
+                  const prr = (parseFloat(item.volume) || 0) / (parseFloat(item.yestVolume) || 1) * 100;
+                  if (prr < pprr) hasDown = true;
+                }
+              }
+            }
+            if (!hasDown) yStrongCount++;
+          });
+        }
+        const yesterdayStrength = yTotal > 0 ? Math.round((yStrongCount / yTotal) * 100) : null;
+
+        return {
+          text: todayStrength + '% ',
+          arrow: yesterdayStrength !== null ? (todayStrength > yesterdayStrength ? '⬆' : (todayStrength < yesterdayStrength ? '⬇' : '-')) : '-'
+        };
+      });
+      return { stats };
+    },
+    template: `
+      <span id="auctionTotalStrength" style="margin-left: 8px; font-weight: 600;">
+        强度：<span id="auctionStrengthValue" style="color: #ffffff;">{{ stats.text }}</span>
+        <span id="auctionStrengthArrow" style="color: #ffffff; font-size: 14px; font-weight: bold;">{{ stats.arrow }}</span>
+      </span>
+    `
+  };
+
+  // ============================================================
   // Tab 栏
+  // ============================================================
   const TabBar = {
     name: 'TabBar',
     setup() {
+      const handlers = createHandlers(store.currentGroup === 'hot' ? 'hot' : 'auction');
       const tabs = [
         { key: 'auction', label: tabLabels.auction },
         { key: 'hot', label: tabLabels.hot }
       ];
-      function select(key) {
-        if (store.actions) store.actions.switchGroup(key);
-        // 兼容旧全局函数
-        safeCall(window.switchGroup, key);
+      function select(key, e) {
+        if (e) e.stopPropagation();
+        handlers.switchGroup(key);
+        try { if (typeof switchGroup === 'function') switchGroup(key); } catch (e) {}
       }
       return { tabs, store, select };
     },
@@ -47,17 +131,23 @@
         <span v-for="tab in tabs" :key="tab.key"
               :id="tab.key === 'hot' ? 'tabHot' : 'tabAuction'"
               :class="['group-tab', store.currentGroup === tab.key ? 'active' : '']"
-              @click="select(tab.key)">{{ tab.label }}</span>
+              @click="select(tab.key, $event)">{{ tab.label }}</span>
       </div>
     `
   };
 
+  // ============================================================
   // 页码指示器
+  // ============================================================
   const PageIndicator = {
     name: 'PageIndicator',
     setup() {
+      const handlers = createHandlers(store.currentGroup === 'hot' ? 'hot' : 'auction');
       const pages = [0, 1, 2, 3];
-      function go(page) { if (store.actions) store.actions.switchPage(page); }
+      function go(page, e) {
+        if (e) e.stopPropagation();
+        handlers.switchPage(page);
+      }
       return { pages, store, go };
     },
     template: `
@@ -65,18 +155,24 @@
         <span v-for="p in pages" :key="p"
               :class="['page-dot', store.currentPage === p ? 'active' : '']"
               :data-page="p"
-              @click="go(p)"></span>
+              @click="go(p, $event)"></span>
       </div>
     `
   };
 
+  // ============================================================
   // 头部
+  // ============================================================
   const AuctionHeader = {
     name: 'AuctionHeader',
-    components: { TabBar, PageIndicator },
+    components: { TabBar, PageIndicator, HeaderStats },
     setup() {
+      const handlers = createHandlers(store.currentGroup === 'hot' ? 'hot' : 'auction');
       const title = Vue.computed(() => tabLabels[store.currentGroup] || tabLabels.auction);
-      function toggleBoard() { safeCall(window.toggleAuctionBoard); }
+      function toggleBoard(e) {
+        if (e) e.stopPropagation();
+        handlers.toggleBoard();
+      }
       return { store, title, toggleBoard };
     },
     template: `
@@ -85,10 +181,7 @@
           <tab-bar></tab-bar>
           <div class="auction-title">
             <span id="auctionBoardTitle">{{ title }}</span>
-            <span id="auctionTotalStrength" style="margin-left: 8px; font-weight: 600;">
-              强度：<span id="auctionStrengthValue" style="color: #ffffff;">-</span>
-              <span id="auctionStrengthArrow" style="color: #ffffff; font-size: 14px; font-weight: bold;">-</span>
-            </span>
+            <header-stats></header-stats>
           </div>
           <div class="auction-subtitle"></div>
         </div>
@@ -100,48 +193,48 @@
     `
   };
 
-  // Page1 工具栏（含全部展开、数据、环比、平行）
+  // ============================================================
+  // 工具栏组件
+  // ============================================================
   const Page1Toolbar = {
     name: 'Page1Toolbar',
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
+      const handlers = createHandlers(props.prefix);
       const tab = Vue.computed(() => props.prefix === 'hot' ? 'hot' : 'auction');
-      function onChange(key, e) {
-        if (store.actions) store.actions.setSortState(1, key, e.target.checked);
-        if (key === 'expandAll') {
-          store.actions.setExpandAll(e.target.checked, 1);
-          safeCall(window[(props.prefix === 'hot' ? 'onHot' : 'onAuction') + 'ExpandAllToggleChange']);
-        }
-      }
-      return { store, tab, prefix: props.prefix, onChange };
+      function onExpandAll(e) { handlers.onExpandAllChange(1, e.target.checked); }
+      function onData(e) { handlers.onSortChange(1, 'byData', e.target.checked); }
+      function onRatio(e) { handlers.onSortChange(1, 'byRatio', e.target.checked); }
+      function onParallel(e) { handlers.onSortChange(1, 'byParallel', e.target.checked); }
+      return { store, tab, prefix: props.prefix, onExpandAll, onData, onRatio, onParallel };
     },
     template: `
       <div class="auction-toolbar" :id="prefix + 'Toolbar'">
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">全部展开</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'ExpandAllToggle'" :checked="store.expandAll" @change="onChange('expandAll', $event)">
+            <input type="checkbox" :id="prefix + 'ExpandAllToggle'" :checked="store.expandAll" @change="onExpandAll">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">数据</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByDataToggle'" :checked="store.sortState[tab].byData" @change="onChange('byData', $event)">
+            <input type="checkbox" :id="prefix + 'SortByDataToggle'" :checked="store.sortState[tab].byData" @change="onData">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">环比</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByRatioToggle'" :checked="store.sortState[tab].byRatio" @change="onChange('byRatio', $event)">
+            <input type="checkbox" :id="prefix + 'SortByRatioToggle'" :checked="store.sortState[tab].byRatio" @change="onRatio">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">平行</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByParallelToggle'" :checked="store.sortState[tab].byParallel" @change="onChange('byParallel', $event)">
+            <input type="checkbox" :id="prefix + 'SortByParallelToggle'" :checked="store.sortState[tab].byParallel" @change="onParallel">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
@@ -149,38 +242,37 @@
     `
   };
 
-  // Page2 工具栏
   const Page2Toolbar = {
     name: 'Page2Toolbar',
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
+      const handlers = createHandlers(props.prefix);
       const tab = Vue.computed(() => props.prefix === 'hot' ? 'hot' : 'auction');
-      function onChange(key, e) {
-        if (store.actions) store.actions.setSortState(2, key, e.target.checked);
-        if (key === 'expandAll') store.actions.setExpandAll(e.target.checked, 2);
-      }
-      return { store, tab, prefix: props.prefix, onChange };
+      function onExpandAll(e) { handlers.onExpandAllChange(2, e.target.checked); }
+      function onRatio(e) { handlers.onSortChange(2, 'byRatio', e.target.checked); }
+      function onParallel(e) { handlers.onSortChange(2, 'byParallel', e.target.checked); }
+      return { store, tab, prefix: props.prefix, onExpandAll, onRatio, onParallel };
     },
     template: `
       <div class="auction-toolbar" :id="prefix + 'Toolbar2'">
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">全部展开</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'ExpandAllToggle2'" :checked="store.expandAllP2" @change="onChange('expandAll', $event)">
+            <input type="checkbox" :id="prefix + 'ExpandAllToggle2'" :checked="store.expandAllP2" @change="onExpandAll">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">环比</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByRatioToggle2'" :checked="store.sortStateP2[tab].byRatio" @change="onChange('byRatio', $event)">
+            <input type="checkbox" :id="prefix + 'SortByRatioToggle2'" :checked="store.sortStateP2[tab].byRatio" @change="onRatio">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
         <div class="auction-toggle-item">
           <span class="auction-toggle-label">平行</span>
           <label class="auction-toggle-switch">
-            <input type="checkbox" :id="prefix + 'SortByParallelToggle2'" :checked="store.sortStateP2[tab].byParallel" @change="onChange('byParallel', $event)">
+            <input type="checkbox" :id="prefix + 'SortByParallelToggle2'" :checked="store.sortStateP2[tab].byParallel" @change="onParallel">
             <span class="auction-toggle-slider"></span>
           </label>
         </div>
@@ -188,16 +280,16 @@
     `
   };
 
-  // 竞/昨单独一行
   const JingYestRow = {
     name: 'JingYestRow',
     props: { prefix: { type: String, default: 'auction' }, page: { type: Number, default: 1 } },
     setup(props) {
+      const handlers = createHandlers(props.prefix);
       const suffix = props.page === 2 ? '2' : '';
       const rowId = props.prefix + 'ToolbarRow2' + (props.page === 2 ? '_2' : '');
       const tab = Vue.computed(() => props.prefix === 'hot' ? 'hot' : 'auction');
       const stateKey = Vue.computed(() => props.page === 2 ? 'sortStateP2' : 'sortState');
-      function onChange(e) { if (store.actions) store.actions.setSortState(props.page, 'byJingYest', e.target.checked); }
+      function onChange(e) { handlers.onSortChange(props.page, 'byJingYest', e.target.checked); }
       return { store, tab, stateKey, suffix, rowId, prefix: props.prefix, onChange };
     },
     template: `
@@ -213,143 +305,105 @@
     `
   };
 
-  // 统计条
-  const HighRatioStat = {
-    name: 'HighRatioStat',
-    props: { prefix: { type: String, default: 'auction' }, page: { type: Number, default: 1 } },
-    setup(props) {
-      const suffix = props.page === 2 ? '2' : '';
-      const panelId = props.prefix + 'SortHelpPanel' + suffix;
-      function toggleHelp() { safeCall(window.toggleAuctionSortHelp, panelId); }
-      return { suffix, panelId, toggleHelp };
-    },
-    template: `
-      <div class="auction-highratio-stat" :id="prefix + 'HighRatioStat' + suffix">
-        <span style="font-weight:700;color:#dc2626;">竞/昨数：<span :id="prefix + 'JingYestCount' + suffix">-</span></span>
-        <span style="display:inline-block;width:28px;"></span>
-        竞放量数：<span :id="prefix + 'HighRatioCount' + suffix" style="font-weight:700;">-</span>
-        <span :id="prefix + 'HighRatioArrow' + suffix" style="font-weight:700;"></span>
-        <span class="auction-sort-help-icon" @click.stop="toggleHelp">?</span>
-        <div class="auction-sort-help-panel" :id="panelId" @click.stop></div>
-      </div>
-    `
-  };
-
-  // Page1 内容页
-  const Page1 = {
-    name: 'AuctionPage1',
+  // ============================================================
+  // 页面组件（KeepAlive 缓存）
+  // ============================================================
+  const PageList = {
+    name: 'PageList',
     components: { Page1Toolbar, JingYestRow, HighRatioStat, AuctionBoard },
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
-      const active = Vue.computed(() => store.currentGroup === props.prefix && store.currentPage === 0);
-      function openEdit() { safeCall(props.prefix === 'hot' ? window.openHotEdit : window.openAuctionEdit); }
-      return { active, prefix: props.prefix, openEdit, AuctionBoard };
+      const handlers = createHandlers(props.prefix);
+      return { prefix: props.prefix, handlers };
     },
     template: `
-      <div class="auction-page auction-page-1" :class="{ active: active }" :id="prefix + 'Page1'">
+      <div class="auction-page auction-page-1 active" :id="prefix + 'Page1'">
         <page1-toolbar :prefix="prefix"></page1-toolbar>
         <jing-yest-row :prefix="prefix" :page="1"></jing-yest-row>
         <high-ratio-stat :prefix="prefix" :page="1"></high-ratio-stat>
-        <div class="auction-content" :id="prefix + 'Content'" @dblclick.stop="openEdit">
-          <auction-board v-if="AuctionBoard" :data-source="prefix"></auction-board>
+        <div class="auction-content" :id="prefix + 'Content'" @dblclick.stop="handlers.openEdit()">
+          <auction-board :data-source="prefix"></auction-board>
         </div>
       </div>
     `
   };
 
-  // Page2 内容页
-  const Page2 = {
-    name: 'AuctionPage2',
+  const PageTopic = {
+    name: 'PageTopic',
     components: { Page2Toolbar, JingYestRow, HighRatioStat, Page2Board },
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
-      const active = Vue.computed(() => store.currentGroup === props.prefix && store.currentPage === 1);
-      function openCoreTopic() { safeCall(window.openCoreTopicModal); }
-      return { active, prefix: props.prefix, openCoreTopic, Page2Board };
+      const handlers = createHandlers(props.prefix);
+      return { prefix: props.prefix, handlers };
     },
     template: `
-      <div class="auction-page auction-page-2" :class="{ active: active }" :id="prefix + 'Page2'">
+      <div class="auction-page auction-page-2 active" :id="prefix + 'Page2'">
         <page2-toolbar :prefix="prefix"></page2-toolbar>
         <jing-yest-row :prefix="prefix" :page="2"></jing-yest-row>
         <high-ratio-stat :prefix="prefix" :page="2"></high-ratio-stat>
-        <div class="auction-content" :id="prefix + 'Content2'" @dblclick.stop="openCoreTopic">
-          <page2-board v-if="Page2Board" :data-source="prefix"></page2-board>
+        <div class="auction-content" :id="prefix + 'Content2'" @dblclick.stop="handlers.openCoreTopicModal()">
+          <page2-board :data-source="prefix"></page2-board>
         </div>
       </div>
     `
   };
 
-  // Page3 内容页
-  const Page3 = {
-    name: 'AuctionPage3',
+  const PageHistory = {
+    name: 'PageHistory',
     components: { Page3Board },
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
-      const active = Vue.computed(() => store.currentGroup === props.prefix && store.currentPage === 2);
-      return { active, prefix: props.prefix, Page3Board };
+      return { prefix: props.prefix };
     },
     template: `
-      <div class="auction-page auction-page-3" :class="{ active: active }" :id="prefix + 'Page3'">
+      <div class="auction-page auction-page-3 active" :id="prefix + 'Page3'">
         <div class="auction-content" :id="prefix + 'Content3'">
-          <page3-board v-if="Page3Board" :data-source="prefix"></page3-board>
+          <page3-board :data-source="prefix"></page3-board>
         </div>
       </div>
     `
   };
 
-  // Page4 内容页
-  const Page4 = {
-    name: 'AuctionPage4',
+  const PageStats = {
+    name: 'PageStats',
     components: { StatsBoard },
     props: { prefix: { type: String, default: 'auction' } },
     setup(props) {
-      const active = Vue.computed(() => store.currentGroup === props.prefix && store.currentPage === 3);
-      return { active, prefix: props.prefix, StatsBoard };
+      return { prefix: props.prefix };
     },
     template: `
-      <div class="auction-page auction-page-4" :class="{ active: active }" :id="prefix + 'Page4'">
+      <div class="auction-page auction-page-4 active" :id="prefix + 'Page4'">
         <div class="auction-content" :id="prefix + 'Content4'">
-          <stats-board v-if="StatsBoard" :data-source="prefix"></stats-board>
+          <stats-board :data-source="prefix"></stats-board>
         </div>
         <div class="auction-clear-all-btn" :id="prefix + 'ClearAllBtn'">全部清除</div>
       </div>
     `
   };
 
+  // ============================================================
   // 滑动容器
+  // ============================================================
   const PageContainer = {
     name: 'PageContainer',
-    components: { Page1, Page2, Page3, Page4 },
+    components: { PageList, PageTopic, PageHistory, PageStats },
     setup() {
-      let touchStartX = 0;
-      let touchStartY = 0;
-      function onTouchStart(e) {
-        touchStartX = e.changedTouches[0].screenX;
-        touchStartY = e.changedTouches[0].screenY;
-      }
-      function onTouchEnd(e) {
-        const dx = e.changedTouches[0].screenX - touchStartX;
-        const dy = e.changedTouches[0].screenY - touchStartY;
-        if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return;
-        if (!store.actions) return;
-        if (dx < 0 && store.currentPage < 3) store.actions.switchPage(store.currentPage + 1);
-        else if (dx > 0 && store.currentPage > 0) store.actions.switchPage(store.currentPage - 1);
-      }
-      return { store, onTouchStart, onTouchEnd };
+      const { onTouchStart, onTouchEnd } = useSwipe(store);
+      const activeComponent = Vue.computed(() => {
+        const map = [PageList, PageTopic, PageHistory, PageStats];
+        return map[store.currentPage] || PageList;
+      });
+      const activeKey = Vue.computed(() => store.currentGroup + '-page-' + store.currentPage);
+      return { store, onTouchStart, onTouchEnd, activeComponent, activeKey };
     },
     template: `
       <div class="auction-swipe-container" id="auctionSwipeContainer"
            @touchstart="onTouchStart" @touchend="onTouchEnd">
         <div class="auction-swipe-wrapper" id="auctionSwipeWrapper"
              :style="{ transform: 'translateX(-' + (store.currentPage * 100) + '%)' }">
-          <page1 prefix="auction"></page1>
-          <page2 prefix="auction"></page2>
-          <page3 prefix="auction"></page3>
-          <page4 prefix="auction"></page4>
-          <page1 prefix="hot"></page1>
-          <page2 prefix="hot"></page2>
-          <page3 prefix="hot"></page3>
-          <page4 prefix="hot"></page4>
+          <keep-alive>
+            <component :is="activeComponent" :prefix="store.currentGroup" :key="activeKey"></component>
+          </keep-alive>
         </div>
       </div>
     `
@@ -369,11 +423,34 @@
   function mount() {
     const root = document.getElementById('auctionBoard');
     if (!root) { console.warn('[AUCTION-VUE] #auctionBoard 不存在'); return; }
-    // 清空旧 innerHTML 结构，避免双轨渲染冲突
     root.innerHTML = '';
     const app = Vue.createApp(AuctionApp);
     app.mount(root);
     window._auctionSingleApp = app;
+
+    // 覆盖遗留 renderAuction，消除双轨渲染隐患
+    window.renderAuction = function (dataSource) {
+      if (dataSource === 'hot' || dataSource === 'auction') {
+        if (store.currentGroup !== dataSource) store.actions.switchGroup(dataSource);
+      }
+    };
+    window.renderAuctionPage2 = function (dataSource) {
+      if ((dataSource === 'hot' || dataSource === 'auction') && store.currentGroup === dataSource) {
+        store.actions.switchPage(1);
+      }
+    };
+    window.renderAuctionPage3 = function (dataSource) {
+      if ((dataSource === 'hot' || dataSource === 'auction') && store.currentGroup === dataSource) {
+        store.actions.switchPage(2);
+      }
+    };
+    window.renderAuctionStatsBoard = function (dataSource) {
+      if ((dataSource === 'hot' || dataSource === 'auction') && store.currentGroup === dataSource) {
+        store.actions.switchPage(3);
+      }
+    };
+    window.renderAuctionPage4 = window.renderAuctionStatsBoard;
+
     return app;
   }
 

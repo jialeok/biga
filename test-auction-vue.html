@@ -86,6 +86,7 @@
     }
     function getTopicSortOrder() { return []; }
     function getTopicRankCountByDate() { return 0; }
+    function getTopicRankCountThisWeek() { return 0; }
     function deriveAuctionTagState() { return { bought: false, sold: false, selected: false, hold: false, inheritedHold: false }; }
     function getChangePctDisplay() { return '-'; }
     function getHighRatioStocksForDate() { return { stockNames: new Set(), items: [], count: 0 }; }
@@ -115,6 +116,7 @@
     function toggleAuctionTrendPanelP2() {}
     function toggleTopicGroupTrendPanels() {}
     function jumpToAuctionPage2() {}
+    function jumpToAuctionPage1() {}
     function showAuctionNotePopup() {}
     function showAuctionNoteInput() {}
     function showAuctionBuyPrompt() {}
@@ -122,6 +124,12 @@
     function copyAllTopicStocks() {}
     function copyTopicStocks() {}
     function toggleStrengthSort() {}
+    function openAuctionNoteEditFromPage2() {}
+    function expandAllAuctionTrendPanels() {}
+    function restoreExpandedAuctionTrendPanels() {}
+    function expandAllAuctionTrendPanelsP2() {}
+    function restoreExpandedTopicGroupsP2() {}
+    function _getExpandedStocksSet() { return new Set(); }
   </script>
   <script src="auction/auction-store.js"></script>
   <script src="auction/auction-composables.js"></script>
