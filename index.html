@@ -5825,7 +5825,233 @@
         </div>
 
         <!-- 最近多板早盘竞价看板 -->
-        <div class="auction-board trading-day-element collapsed" id="auctionBoard"></div>
+        <div class="auction-board trading-day-element collapsed" id="auctionBoard">
+            <div class="auction-header" id="auctionHeader" onclick="toggleAuctionBoard()" style="cursor:pointer">
+                <div>
+                    <div class="group-tab-bar" id="groupTabBar" onclick="event.stopPropagation()">
+                        <span class="group-tab active" id="tabAuction" onclick="event.stopPropagation();switchGroup('auction')">早盘竞价</span>
+                        <span class="group-tab" id="tabHot" onclick="event.stopPropagation();switchGroup('hot')">热门股票</span>
+                    </div>
+                    <div class="auction-title">
+                        <span id="auctionBoardTitle">早盘竞价</span>
+                        <span id="auctionTotalStrength" style="margin-left: 8px; font-weight: 600;">
+                            强度：<span id="auctionStrengthValue" style="color: #ffffff;">-</span><span id="auctionStrengthArrow" style="color: #ffffff; font-size: 14px; font-weight: bold;">-</span>
+                        </span>
+                    </div>
+                    <div class="auction-subtitle"></div>
+                </div>
+                <div class="auction-header-right">
+                    <div class="auction-page-indicator" id="auctionPageIndicator">
+                        <span class="page-dot active" data-page="0"></span>
+                        <span class="page-dot" data-page="1"></span>
+                        <span class="page-dot" data-page="2"></span>
+                        <span class="page-dot" data-page="3"></span>
+                    </div>
+                    <div class="auction-toggle-btn" id="auctionToggleBtn">▼</div>
+                </div>
+            </div>
+            <div class="auction-swipe-container" id="auctionSwipeContainer">
+                <div class="auction-swipe-wrapper" id="auctionSwipeWrapper">
+                    <div class="auction-page auction-page-1 active" id="auctionPage1">
+                        <div class="auction-toolbar" id="auctionToolbar">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionExpandAllToggle" onchange="onAuctionExpandAllToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">数据</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByDataToggle" onchange="onAuctionSortByDataToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">环比</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByRatioToggle" onchange="onAuctionSortByRatioToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByParallelToggle" onchange="onAuctionSortByParallelToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-toolbar-row2" id="auctionToolbarRow2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">竞/昨</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByJingYestToggle" onchange="onAuctionSortByJingYestToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="auctionHighRatioStat">
+                            <span style="font-weight:700;color:#dc2626;">竞/昨数：<span id="auctionJingYestCount">-</span></span><span style="display:inline-block;width:28px;"></span>竞放量数：<span id="auctionHighRatioCount" style="font-weight:700;">-</span><span id="auctionHighRatioArrow" style="font-weight:700;"></span>
+                            <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('auctionSortHelpPanel')">?</span>
+                            <div class="auction-sort-help-panel" id="auctionSortHelpPanel" onclick="event.stopPropagation();"></div>
+                        </div>
+                        <div class="auction-content" id="auctionContent" ondblclick="event.stopPropagation();openAuctionEdit()">
+                        </div>
+                    </div>
+                    <div class="auction-page auction-page-2" id="auctionPage2">
+                        <div class="auction-toolbar" id="auctionToolbar2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionExpandAllToggle2" onchange="onAuctionExpandAllToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">环比</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByRatioToggle2" onchange="onAuctionSortByRatioToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByParallelToggle2" onchange="onAuctionSortByParallelToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-toolbar-row2" id="auctionToolbarRow2_2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">竞/昨</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="auctionSortByJingYestToggle2" onchange="onAuctionSortByJingYestToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="auctionHighRatioStat2">
+                            <span style="font-weight:700;color:#dc2626;">竞/昨数：<span id="auctionJingYestCount2">-</span></span><span style="display:inline-block;width:28px;"></span>竞放量数：<span id="auctionHighRatioCount2" style="font-weight:700;">-</span><span id="auctionHighRatioArrow2" style="font-weight:700;"></span>
+                            <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('auctionSortHelpPanel2')">?</span>
+                            <div class="auction-sort-help-panel" id="auctionSortHelpPanel2" onclick="event.stopPropagation();"></div>
+                        </div>
+                        <div class="auction-content" id="auctionContent2" ondblclick="event.stopPropagation();openCoreTopicModal()">
+                        </div>
+                    </div>
+                    <div class="auction-page auction-page-3" id="auctionPage3">
+                        <div class="auction-content" id="auctionContent3">
+                        </div>
+                    </div>
+                    <div class="auction-page auction-page-4" id="auctionPage4">
+                        <div class="auction-content" id="auctionContent4">
+                        </div>
+                        <div class="auction-clear-all-btn" id="auctionClearAllBtn">全部清除</div>
+                    </div>
+                    <!-- 热门股票分组四页（id 用 hot 前缀，CSS class 复用 auction-* 以保持样式一致） -->
+                    <div class="auction-page auction-page-1" id="hotPage1">
+                        <div class="auction-toolbar" id="hotToolbar">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotExpandAllToggle" onchange="onHotExpandAllToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">数据</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotSortByDataToggle" onchange="onHotSortByDataToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">环比</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotSortByRatioToggle" onchange="onHotSortByRatioToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotSortByParallelToggle" onchange="onHotSortByParallelToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-toolbar-row2" id="hotToolbarRow2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">竞/昨</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotSortByJingYestToggle" onchange="onHotSortByJingYestToggleChange()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="hotHighRatioStat">
+                            <span style="font-weight:700;color:#dc2626;">竞/昨数：<span id="hotJingYestCount">-</span></span><span style="display:inline-block;width:28px;"></span>竞放量数：<span id="hotHighRatioCount" style="font-weight:700;">-</span><span id="hotHighRatioArrow" style="font-weight:700;"></span>
+                            <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('hotSortHelpPanel')">?</span>
+                            <div class="auction-sort-help-panel" id="hotSortHelpPanel" onclick="event.stopPropagation();"></div>
+                        </div>
+                        <div class="auction-content" id="hotContent" ondblclick="event.stopPropagation();openHotEdit()">
+                        </div>
+                    </div>
+                    <div class="auction-page auction-page-2" id="hotPage2">
+                        <div class="auction-toolbar" id="hotToolbar2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">全部展开</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotExpandAllToggle2" onchange="onHotExpandAllToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">环比</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotSortByRatioToggle2" onchange="onHotSortByRatioToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">平行</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotSortByParallelToggle2" onchange="onHotSortByParallelToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-toolbar-row2" id="hotToolbarRow2_2">
+                            <div class="auction-toggle-item">
+                                <span class="auction-toggle-label">竞/昨</span>
+                                <label class="auction-toggle-switch">
+                                    <input type="checkbox" id="hotSortByJingYestToggle2" onchange="onHotSortByJingYestToggle2Change()">
+                                    <span class="auction-toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auction-highratio-stat" id="hotHighRatioStat2">
+                            <span style="font-weight:700;color:#dc2626;">竞/昨数：<span id="hotJingYestCount2">-</span></span><span style="display:inline-block;width:28px;"></span>竞放量数：<span id="hotHighRatioCount2" style="font-weight:700;">-</span><span id="hotHighRatioArrow2" style="font-weight:700;"></span>
+                            <span class="auction-sort-help-icon" onclick="event.stopPropagation();toggleAuctionSortHelp('hotSortHelpPanel2')">?</span>
+                            <div class="auction-sort-help-panel" id="hotSortHelpPanel2" onclick="event.stopPropagation();"></div>
+                        </div>
+                        <div class="auction-content" id="hotContent2" ondblclick="event.stopPropagation();openCoreTopicModal()">
+                        </div>
+                    </div>
+                    <div class="auction-page auction-page-3" id="hotPage3">
+                        <div class="auction-content" id="hotContent3">
+                        </div>
+                    </div>
+                    <div class="auction-page auction-page-4" id="hotPage4">
+                        <div class="auction-content" id="hotContent4">
+                        </div>
+                        <div class="auction-clear-all-btn" id="hotClearAllBtn">全部清除</div>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- 最近多板看板 -->
         <div class="duiban-board trading-day-element">

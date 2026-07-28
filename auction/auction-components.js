@@ -856,18 +856,18 @@
         props: { prefix: { type: String, default: 'auction' }, page: { type: Number, default: 1 } },
         setup(props) {
             const suffix = props.page === 2 ? '2' : '';
-            const ds = tabKey(props.prefix);
+            const ds = Vue.computed(() => tabKey(props.prefix));
             const stateKey = props.page === 2 ? 'sortStateP2' : 'sortState';
             const view = Vue.computed(() => {
                 touchReactiveCtx();
-                if (auctionStore.currentGroup !== ds) return null;
+                if (auctionStore.currentGroup !== ds.value) return null;
                 if (props.page === 2 && auctionStore.currentPage !== 1) return null;
                 if (props.page === 1 && auctionStore.currentPage !== 0) return null;
-                const dataSource = ds;
+                const dataSource = ds.value;
                 if (props.page === 2) {
                     const list = getTodayList(dataSource);
                     if (list.length === 0) return { jingYestCount: '-', highRatioCount: '-', arrow: '' };
-                    const ss = auctionStore.sortStateP2[ds];
+                    const ss = auctionStore.sortStateP2[ds.value];
                     const signalSets = {
                         parallel: ss.byParallel ? getParallelStocksForDate(currentDate, dataSource) : null,
                         jingYest: getJingYestHighlightSetForDate(currentDate, dataSource),
@@ -969,10 +969,10 @@
         components: { StockCard },
         props: { dataSource: { type: String, default: 'auction' } },
         setup(props) {
-            const ds = tabKey(props.dataSource);
+            const ds = Vue.computed(() => tabKey(props.dataSource));
             const view = Vue.computed(() => {
                 touchReactiveCtx();
-                return computeAuctionViewData(ds);
+                return computeAuctionViewData(ds.value);
             });
             const obsItems = Vue.computed(() => view.value.items.slice(0, view.value.obsIndices.length));
             const regItems = Vue.computed(() => view.value.items.slice(view.value.obsIndices.length));
@@ -1044,11 +1044,11 @@
         components: { TopicGroup },
         props: { dataSource: { type: String, default: 'auction' } },
         setup(props) {
-            const ds = tabKey(props.dataSource);
+            const ds = Vue.computed(() => tabKey(props.dataSource));
             const handlers = createHandlers(props.dataSource);
             const view = Vue.computed(() => {
                 touchReactiveCtx();
-                return computeAuctionPage2ViewData(ds);
+                return computeAuctionPage2ViewData(ds.value);
             });
             return { view, handlers, dataSource: ds };
         },
@@ -1076,11 +1076,11 @@
         name: 'Page3Board',
         props: { dataSource: { type: String, default: 'auction' } },
         setup(props) {
-            const ds = tabKey(props.dataSource);
+            const ds = Vue.computed(() => tabKey(props.dataSource));
             const handlers = createHandlers(props.dataSource);
             const view = Vue.computed(() => {
                 touchReactiveCtx();
-                return computeAuctionPage3ViewData(ds);
+                return computeAuctionPage3ViewData(ds.value);
             });
             return { view, handlers };
         },
@@ -1142,10 +1142,10 @@
         name: 'StatsBoard',
         props: { dataSource: { type: String, default: 'auction' } },
         setup(props) {
-            const ds = tabKey(props.dataSource);
+            const ds = Vue.computed(() => tabKey(props.dataSource));
             const view = Vue.computed(() => {
                 touchReactiveCtx();
-                return computeAuctionStatsViewData(ds);
+                return computeAuctionStatsViewData(ds.value);
             });
             return { view };
         },

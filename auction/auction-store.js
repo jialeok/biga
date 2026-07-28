@@ -62,6 +62,10 @@
     currentGroup: 'auction', // 'auction' | 'hot'
     currentPage: 0,          // 0=主列表, 1=题材分组, 2=题材历史, 3=统计看板
 
+    // 数据源（保持与 index.html 中 _auctionMemCache / _hotAuctionData 的引用兼容）
+    auctionData: {},
+    hotAuctionData: {},
+
     // UI 状态
     expandedStocks: new Set(),
     p2ExpandedTopics: new Set(),
@@ -77,6 +81,9 @@
 
     // 强度排序开关
     strengthSortEnabled: false,
+
+    // 标签派生信号版本（兼容 index.html 中 renderAuction 的失效信号）
+    stocksDataVersion: 0,
 
     // actions 占位（下方绑定）
     actions: null
