@@ -7197,6 +7197,7 @@
                     <textarea id="stockCodeMapInput_hot" placeholder="贵州茅台&#9;600519&#10;平安银行&#9;000001&#10;..." style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bbf7d0; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
                     <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
                         <button type="button" onclick="importStockCodeMapHot()" style="padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #10b981, #059669); color: #fff; border: none; border-radius: 4px; cursor: pointer;">导入代码映射</button>
+                        <button type="button" onclick="autoCompleteMissingStockCodes('hot')" style="padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: #fff; border: none; border-radius: 4px; cursor: pointer;">自动补全代码</button>
                         <button type="button" onclick="clearStockCodeMapHot()" style="padding: 6px 12px; font-size: 12px; background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; cursor: pointer;">清空映射</button>
                         <span id="stockCodeMapStatus_hot" style="font-size: 12px; color: #059669;"></span>
                     </div>
@@ -7379,6 +7380,7 @@
                     <textarea id="stockCodeMapInput" placeholder="贵州茅台&#9;600519&#10;平安银行&#9;000001&#10;..." style="width: 100%; height: 80px; padding: 8px; font-size: 12px; border: 1px solid #bbf7d0; border-radius: 4px; resize: vertical; box-sizing: border-box; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: auto;"></textarea>
                     <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
                         <button type="button" onclick="importStockCodeMap()" style="padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #10b981, #059669); color: #fff; border: none; border-radius: 4px; cursor: pointer;">导入代码映射</button>
+                        <button type="button" onclick="autoCompleteMissingStockCodes('auction')" style="padding: 6px 12px; font-size: 12px; background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: #fff; border: none; border-radius: 4px; cursor: pointer;">自动补全代码</button>
                         <button type="button" onclick="clearStockCodeMap()" style="padding: 6px 12px; font-size: 12px; background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; cursor: pointer;">清空映射</button>
                         <span id="stockCodeMapStatus" style="font-size: 12px; color: #059669;"></span>
                     </div>
@@ -13903,6 +13905,75 @@
             const ta = document.getElementById('stockCodeMapInput_hot');
             if (ta) ta.value = '';
             setStockCodeMapStatusHot('已清空股票代码映射', false);
+        }
+
+        // 通过同花顺 fuyao 标的检索接口，按名称补全缺失的 6 位股票代码
+        async function searchTickerCodeByName(name) {
+            if (!name) return '';
+            try {
+                const data = await fuyaoApiGet('/api/meta/tickers/search', {
+                    q: name.trim(),
+                    asset_type: 'a-share',
+                    limit: 5
+                });
+                if (!data || !Array.isArray(data.item) || data.item.length === 0) return '';
+                const target = name.trim();
+                const match = data.item.find(function(it) {
+                    return it && it.name && it.name.trim() === target;
+                });
+                const item = match || data.item[0];
+                if (item && item.ticker) return String(item.ticker).trim();
+            } catch (e) {
+                _dbgLog('[AUTO-CODE] 搜索 ' + name + ' 失败: ' + (e && e.message || e));
+            }
+            return '';
+        }
+
+        // 自动补全当前日期指定分组（auction/hot）下缺失代码的股票
+        async function autoCompleteMissingStockCodes(dataSource) {
+            const ds = dataSource === 'hot' ? 'hot' : 'auction';
+            const list = (getGroupData(ds)[currentDate] || []).filter(function(r) { return r && r.stock; });
+            const scMap = loadAllData().stockCodeMap || {};
+            const missing = list.filter(function(r) {
+                const existing = (r.code || '').trim() || scMap[r.stock.trim()];
+                return !existing;
+            });
+            if (missing.length === 0) {
+                showToast('没有缺失代码的股票');
+                return;
+            }
+
+            let completed = 0, failed = 0;
+            const patches = [];
+            for (let i = 0; i < missing.length; i++) {
+                const item = missing[i];
+                const name = item.stock.trim();
+                const code = await searchTickerCodeByName(name);
+                if (code) {
+                    scMap[name] = code;
+                    patches.push({ stock: name, code: code });
+                    completed++;
+                } else {
+                    failed++;
+                }
+            }
+
+            if (patches.length > 0) {
+                allData.stockCodeMap = scMap;
+                saveModule('stockCodeMap');
+                if (ds === 'hot') {
+                    await patchHotFieldBatch(currentDate, patches);
+                } else {
+                    await patchAuctionFieldBatch(currentDate, patches);
+                }
+            }
+
+            showToast('代码补全：' + completed + ' 只成功，' + failed + ' 只失败');
+            if (ds === 'hot') {
+                if (typeof renderHotStocks === 'function') renderHotStocks();
+            } else {
+                if (typeof renderAuction === 'function') renderAuction();
+            }
         }
 
         // ============ 股票代码映射（stockCodeMap）============
