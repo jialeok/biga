@@ -6679,7 +6679,12 @@
                 <div id="pickerMonthTitle" style="font-weight:600;color:#1f2937;font-size:14px">2025年1月</div>
                 <button class="nav-btn" onclick="nextPickerMonth()">▶</button>
             </div>
-            
+
+            <!-- 交易日历同步 -->
+            <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:-8px 0 12px 0">
+                <button class="nav-btn" style="font-size:12px;padding:4px 8px" onclick="syncTradingDaysFromAPI()">🔄 同步交易日</button>
+            </div>
+
             <!-- 日历 -->
             <div id="datePickerCalendar" class="date-picker-calendar"></div>
             
@@ -11511,7 +11516,7 @@
                 const cloudObj = data.data;
 
                 // 将云端数据写入 localStorage（覆盖本地）
-                const moduleKeys = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'stockCodeMap'];
+                const moduleKeys = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'tradingDays', 'stockCodeMap'];
                 const DV = 'v42';
                 moduleKeys.forEach(key => {
                     if (cloudObj[key] !== undefined) {
@@ -11948,7 +11953,7 @@
         }
 
         const DATA_VERSION = 'v42';
-        const MODULE_KEYS = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'stockCodeMap'];
+        const MODULE_KEYS = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'tradingDays', 'stockCodeMap'];
 
         // 一次性清理：早期测试阶段遗留的陈旧 lastEditedDate（如 2025-01-02）会导致
         // 应用一直卡在那个日期。这里清除"去年今日"之前的值，让它退回默认走"今天"。
@@ -12008,7 +12013,7 @@
                 MODULE_KEYS.forEach(key => {
                     const val = parsed[key];
                     if (val !== undefined) {
-                        localStorage.setItem(_moduleKey(key), JSON.stringify(key === 'holidays' ? (val || []) : (val || {})));
+                        localStorage.setItem(_moduleKey(key), JSON.stringify((key === 'holidays' || key === 'tradingDays') ? (val || []) : (val || {})));
                     }
                 });
                 localStorage.setItem(_moduleKey('_migrated'), '1');
@@ -12113,10 +12118,10 @@
                             try {
                                 allData[key] = JSON.parse(raw);
                             } catch (e) {
-                                allData[key] = (key === 'holidays') ? [] : {};
+                                allData[key] = (key === 'holidays' || key === 'tradingDays') ? [] : {};
                             }
                         } else {
-                            allData[key] = (key === 'holidays') ? [] : {};
+                            allData[key] = (key === 'holidays' || key === 'tradingDays') ? [] : {};
                         }
                     });
                     if (!allData.notesNormalized) {
@@ -12135,7 +12140,7 @@
                     allData = {
                         stocks: _stocksMemCache, jiwang: _jiwangMemCache, rank: _rankMemCache, multi: _multiMemCache,
                         hotspot: _hotspotMemCache, pattern: _patternMemCache, bidding: _biddingMemCache, tagTitles: _tagTitlesMemCache,
-                        auction: _auctionMemCache, holidays: [], stockCodeMap: {}
+                        auction: _auctionMemCache, holidays: [], tradingDays: [], stockCodeMap: {}
                     };
                 }
             }
@@ -36074,20 +36079,22 @@
                 const dayOfWeek = date.getDay();
                 const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
                 const isHoliday = holidays.includes(dateStr);
+                const autoHoliday = !isHoliday && !isWeekend && isAutoHoliday(dateStr);
                 const isSelected = dateStr === currentDate;
-                
+
                 let className = 'calendar-day';
                 if (isSelected) {
                     className += ' selected';
-                } else if (isHoliday) {
+                } else if (isHoliday || autoHoliday) {
                     className += ' holiday';
                 } else if (isWeekend) {
                     className += ' weekend';
                 } else {
                     className += ' normal-day';
                 }
-                
-                html += `<div class="${className}" onclick="selectPickerDate('${dateStr}')">${day}</div>`;
+
+                const titleAttr = autoHoliday ? ' title="自动识别：非交易日"' : '';
+                html += `<div class="${className}" onclick="selectPickerDate('${dateStr}')"${titleAttr}>${day}</div>`;
             }
             calendar.innerHTML = html;
         }
@@ -36251,17 +36258,99 @@
             return allData.holidays;
         }
 
+        // 同花顺 fuyao API key（先读 localStorage，未设置时留空）
+        function getAicubesApiKey() {
+            try {
+                return localStorage.getItem('aicubes_api_key') || '';
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function setAicubesApiKey(key) {
+            try {
+                localStorage.setItem('aicubes_api_key', key || '');
+            } catch (e) {}
+        }
+
+        // 从 API 拿到的交易日集合（数组，yyyy-MM-dd 格式）
+        function getTradingDays() {
+            if (!allData) loadAllData();
+            if (!allData.tradingDays) allData.tradingDays = [];
+            return allData.tradingDays;
+        }
+
+        // 同步交易日历：从 fuyao 接口拉取近一年交易日，并自动把工作日非交易日识别为假期。
+        async function syncTradingDaysFromAPI() {
+            const apiKey = getAicubesApiKey();
+            if (!apiKey) {
+                showToast('请先设置 API Key：在控制台执行 setAicubesApiKey("你的key")');
+                return { ok: false, error: 'missing_api_key' };
+            }
+            try {
+                const resp = await fetch('https://fuyao.aicubes.cn/api/a-share/calendar/trading-days', {
+                    method: 'GET',
+                    headers: { 'X-api-key': apiKey }
+                });
+                const json = await resp.json();
+                if (!json || json.code !== 0 || !Array.isArray(json.data && json.data.item)) {
+                    showToast('同步交易日历失败：' + (json && json.message ? json.message : '未知错误'));
+                    return { ok: false, error: json };
+                }
+                const dates = json.data.item.map(function(it) {
+                    if (!it || !it.date) return '';
+                    // 把 yyyyMMdd 转成 yyyy-MM-dd
+                    const s = String(it.date);
+                    return s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);
+                }).filter(Boolean);
+                if (!allData) loadAllData();
+                allData.tradingDays = dates;
+                saveData();
+                renderPickerCalendar();
+                updateDateDisplay();
+                showToast('✅ 已同步 ' + dates.length + ' 个交易日');
+                return { ok: true, count: dates.length };
+            } catch (e) {
+                showToast('同步交易日历异常：' + (e && e.message ? e.message : '网络错误'));
+                return { ok: false, error: e };
+            }
+        }
+
+        // 判断 dateStr 是否落在 API 已覆盖的历史窗口内，且不是交易日（即自动假期）
+        function isAutoHoliday(dateStr) {
+            const tradingDays = getTradingDays();
+            if (tradingDays.includes(dateStr)) return false;
+            const today = _getLocalTodayStr ? _getLocalTodayStr() : new Date().toISOString().slice(0, 10);
+            const oneYearAgo = (function() {
+                const d = new Date(today + 'T00:00:00');
+                d.setFullYear(d.getFullYear() - 1);
+                return d.toISOString().slice(0, 10);
+            })();
+            // 近一年窗口内、工作日、但不在 API 交易日列表里 -> 自动识别为假期
+            return dateStr >= oneYearAgo && dateStr <= today;
+        }
+
         // 判断是否为交易日
         function isTradingDay(dateStr) {
             const date = new Date(dateStr + 'T00:00:00');
             const dayOfWeek = date.getDay();
-            
+
             // 周六日肯定不是交易日
             if (dayOfWeek === 0 || dayOfWeek === 6) return false;
-            
-            // 在假期列表中也不是交易日
+
+            // 手动标记的假期优先级最高
             const holidays = getHolidays();
-            return !holidays.includes(dateStr);
+            if (holidays.includes(dateStr)) return false;
+
+            // 如果 API 交易日列表里明确包含，就是交易日
+            const tradingDays = getTradingDays();
+            if (tradingDays.includes(dateStr)) return true;
+
+            // 在近一年 API 窗口内但不在交易日列表里的工作日 -> 自动识别为假期
+            if (isAutoHoliday(dateStr)) return false;
+
+            // 超出 API 窗口的未知未来日期，默认允许进入（不自动封禁）
+            return true;
         }
 
         // 「最近交易日」= 自然日今天往前找（含今天），第一个满足 isTradingDay 的日期。
@@ -37354,6 +37443,7 @@
                 coreTopics: JSON.parse(localStorage.getItem('coreTopics') || '[]'),
                 biddingDefaultTemplate: JSON.parse(localStorage.getItem('biddingDefaultTemplate_v41') || '[]'),
                 holidays: allData.holidays || [],
+                tradingDays: allData.tradingDays || [],
                 scoreSettings: scoreSettings,
                 hasFumianTopics: hasFumianTopics,
                 summaries: summaries,
@@ -37468,6 +37558,7 @@
                 coreTopics: JSON.parse(localStorage.getItem('coreTopics') || '[]'),
                 biddingDefaultTemplate: JSON.parse(localStorage.getItem('biddingDefaultTemplate_v41') || '[]'),
                 holidays: allData.holidays || [],
+                tradingDays: allData.tradingDays || [],
                 scoreSettings: scoreSettings,
                 hasFumianTopics: hasFumianTopics,
                 summaries: summaries,
@@ -37617,6 +37708,9 @@
                         }
                         if (imported.holidays) {
                             allData.holidays = imported.holidays;
+                        }
+                        if (imported.tradingDays) {
+                            allData.tradingDays = imported.tradingDays;
                         }
                         if (imported.scoreSettings) {
                             ['recentMulti', 'sectorEtf', 'topicDirection'].forEach(type => {
@@ -38138,7 +38232,14 @@
             
             // 先加载数据
             loadAllData();
-            
+
+            // 如果已配置 fuyao API key，启动时自动同步一次近一年交易日历
+            if (getAicubesApiKey()) {
+                setTimeout(function() {
+                    syncTradingDaysFromAPI().catch(function(e) { console.warn('自动同步交易日历失败', e); });
+                }, 2000);
+            }
+
             // 迁移 auction 数据到独立表（拆表后新增，首次运行时自动执行）
             migrateAuctionToTable();
             // 迁移 bidding 数据到独立表（拆表后新增，首次运行时自动执行）
