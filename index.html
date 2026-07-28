@@ -23178,7 +23178,7 @@
         }
 
         // 渲染第四页
-        function renderAuctionPage4(dataSource='auction') {
+        function renderAuctionPage4(dataSource=currentGroup) {
             const _p = dataSource === 'hot' ? 'hot' : 'auction';
             const auctionContent4 = document.getElementById(_p + 'Content4');
             const currentStocks = getCopiedStocksByDate();
