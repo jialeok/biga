@@ -161,14 +161,24 @@ alter table auction_watchlist enable row level security;
 alter table hot_stocks enable row level security;
 alter table market_metrics enable row level security;
 
-create policy "allow_all_auction_watchlist" on auction_watchlist
-  for all to anon using (true) with check (true);
+-- PostgreSQL 没有 create policy if not exists，用 DO 块幂等创建
+do $$
+begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'auction_watchlist' and policyname = 'allow_all_auction_watchlist') then
+    create policy "allow_all_auction_watchlist" on auction_watchlist
+      for all to anon using (true) with check (true);
+  end if;
 
-create policy "allow_all_hot_stocks" on hot_stocks
-  for all to anon using (true) with check (true);
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'hot_stocks' and policyname = 'allow_all_hot_stocks') then
+    create policy "allow_all_hot_stocks" on hot_stocks
+      for all to anon using (true) with check (true);
+  end if;
 
-create policy "allow_all_market_metrics" on market_metrics
-  for all to anon using (true) with check (true);
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'market_metrics' and policyname = 'allow_all_market_metrics') then
+    create policy "allow_all_market_metrics" on market_metrics
+      for all to anon using (true) with check (true);
+  end if;
+end $$;
 
 -- 5. 自动更新时间戳触发器
 create or replace function public.set_updated_at()
