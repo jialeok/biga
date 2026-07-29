@@ -1,12 +1,12 @@
 /**
- * 竞价变化 + 记忘看板 · 合并定时抓取 Worker
+ * 竞价变化 + 记忘看板 + 情绪看板 · 合并定时抓取 Worker
  *
  * 共 5 个 cron（Cloudflare Free 账号上限 5 个）：
  *   1. 9:15  (UTC 01:15) → 抓竞价变化 5 行，写入 time915
  *   2. 9:20  (UTC 01:20) → 抓竞价变化 5 行，写入 time920
  *   3. 9:25  (UTC 01:25) → 抓竞价变化 5 行 + 猫爪封单家数，写入 time930
  *   4. 9:26  (UTC 01:26) → 二次抓取「最近多板%」，保留 9:25 首次值实现叠加效果
- *   5. 16:00 (UTC 08:00) → 抓记忘看板昨收盘涨跌家数 + 竞价收盘
+ *   5. 16:00 (UTC 08:00) → 抓记忘看板昨收盘涨跌家数 + 竞价收盘 + 情绪看板
  *
  * 手动触发：GET /fetch?token=<FETCH_TOKEN>&point=t0915|t0920|t0925|t0926|close|jiwang|auto
  *
@@ -83,13 +83,28 @@ const CONFIG = {
     { code: '159887.SZ', name: '银行ETF富国', type: 'stock' },
   ],
 
-  // NumCat 情绪周期接口（封单家数来源）
+  // NumCat 情绪周期接口（封单家数来源 + 情绪看板数据来源）
   NUMCAT_URL: 'https://numcat.net/api/reference-proxy/market/emoindic-daily',
   NUMCAT_APINAME: 'emoindic_daily',
   SEAL_FIELD: 's3',
 
+  // 情绪看板：字段映射（NumCat 情绪周期接口字段名 → 内部指标名）
+  // 由于接口文档未公开字段含义，此处配置多个候选字段名，按顺序匹配第一个存在的。
+  // 如首次运行时日志提示可用字段，可据此调整下面的候选名。
+  EMOTION_FIELDS: {
+    amount:        ['amount', 's_amount', 'total_amount', 's7', 's_amt'],           // 成交额（元）
+    predictVol:    ['predict_vol', 'predict_volume', 's_pv', 's8'],                  // 预测量能（元）
+    limitUp:       ['limit_up', 'zhangting', 'zt_count', 's1', 's4'],                // 涨停家数
+    limitDown:     ['limit_down', 'dieting', 'dt_count', 's5'],                      // 跌停家数
+    onceLimit:     ['once_limit', 'yiziban', 'yzb_count', 's9'],                     // 一字板家数
+    highestLb:     ['highest_lb', 'max_lb', 'highest_limit', 's10'],                 // 最高连板天数
+    zhaban:        ['zhaban', 'bomb', 'zhb_count', 's11'],                           // 炸板家数
+    zhabanRate:    ['zhaban_rate', 'bomb_rate', 'zhb_rate', 's12'],                  // 炸板率
+  },
+
   // 记忘看板配置
   JIWANG_TABLE: 'jiwang_data',
+  EMOTION_TABLE: 'emotion_data',
 };
 
 const CRON_TO_POINT = {
@@ -152,7 +167,10 @@ async function isTradingDay(env) {
   }
 }
 
-async function numcatEmoindic(env) {
+// ══════════════════════════ NumCat 情绪周期接口（通用）══════════════════════════
+// 一次性拉取完整数据，供 s2/s6（记忘看板）、s3（封单家数）、情绪看板共用，节省额度。
+
+async function fetchNumCatEmotionFull(env) {
   const resp = await fetch(CONFIG.NUMCAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -169,6 +187,11 @@ async function numcatEmoindic(env) {
   if (!Array.isArray(fields) || !Array.isArray(items) || items.length === 0) {
     throw new Error('NumCat API 返回数据格式异常');
   }
+  return { fields, items };
+}
+
+async function numcatEmoindic(env) {
+  const { fields, items } = await fetchNumCatEmotionFull(env);
   let latest = items[items.length - 1];
   const dateField = ['trade_date', 'trading_day', 'date', 'tradedate'].find(name => fields.indexOf(name) >= 0);
   if (dateField) {
@@ -187,6 +210,20 @@ async function numcatEmoindic(env) {
   }
   return { sealCount: Number(latest[sealIdx]), availableFields: fields };
 }
+
+// 从 fields + items 中按候选字段名提取指标值（返回第一个匹配到的字段值）
+function pickEmotionValue(fields, item, candidates) {
+  for (const name of candidates) {
+    const idx = fields.indexOf(name);
+    if (idx >= 0) {
+      const v = item[idx];
+      if (v !== null && v !== undefined && v !== '') return Number(v);
+    }
+  }
+  return null;
+}
+
+// ══════════════════════════ 竞价变化计算 ══════════════════════════
 
 async function getConstituentThscodes(env, indexThscode) {
   const data = await fuyaoGet(env, '/api/a-share-index/constituents/ths-stock-list', { thscode: indexThscode });
@@ -260,8 +297,6 @@ function avgOf(numbers) {
 function fmtPct(n) {
   return (Math.round(n * 100) / 100).toFixed(2);
 }
-
-// ══════════════════════════ 竞价变化计算 ══════════════════════════
 
 async function computeBiddingRows(env, point) {
   const rows = {};
@@ -369,37 +404,30 @@ async function writeLog(env, entry) {
 
 // ══════════════════════════ 记忘看板逻辑 ══════════════════════════
 
-async function fetchNumCatMarketStats(env) {
-  const resp = await fetch(CONFIG.NUMCAT_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiname: CONFIG.NUMCAT_APINAME, apikey: env.NUMCAT_API_KEY, params: {} })
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error('NumCat API HTTP ' + resp.status + ': ' + text.slice(0, 200));
-  }
-  const json = await resp.json();
-  if (json.code !== 200) throw new Error('NumCat API 返回错误: ' + (json.message || JSON.stringify(json)));
-  const fields = json.data.fields;
-  const items = json.data.items;
-  if (!Array.isArray(fields) || !Array.isArray(items) || items.length === 0) throw new Error('NumCat API 返回数据格式异常');
-  let latest = items[items.length - 1];
+function findTodayItem(fields, items) {
   const dateField = ['trade_date', 'trading_day', 'date', 'tradedate'].find(name => fields.indexOf(name) >= 0);
-  if (dateField) {
-    const idx = fields.indexOf(dateField);
-    const todayIso = beijingToday();
-    const todayCompact = beijingTodayCompact();
-    const match = items.find(it => {
-      const v = String(it[idx] || '').replace(/-/g, '');
-      return v === todayIso || v === todayCompact;
-    });
-    if (match) latest = match;
-  }
+  if (!dateField) return items[items.length - 1];
+  const idx = fields.indexOf(dateField);
+  const todayIso = beijingToday();
+  const todayCompact = beijingTodayCompact();
+  const match = items.find(it => {
+    const v = String(it[idx] || '').replace(/-/g, '');
+    return v === todayIso || v === todayCompact;
+  });
+  return match || items[items.length - 1];
+}
+
+function buildJiwangStats(fields, items) {
+  const latest = findTodayItem(fields, items);
   const upIdx = fields.indexOf('s2');
   const downIdx = fields.indexOf('s6');
   if (upIdx < 0 || downIdx < 0) throw new Error('NumCat API 响应缺少 s2/s6 字段，可用字段: ' + fields.join(', '));
   return { up: Number(latest[upIdx]), down: Number(latest[downIdx]) };
+}
+
+async function fetchNumCatMarketStats(env) {
+  const { fields, items } = await fetchNumCatEmotionFull(env);
+  return buildJiwangStats(fields, items);
 }
 
 async function getNextTradingDay(env, today) {
@@ -448,6 +476,130 @@ async function updateJiwangShouguJieguo(env, date, stats) {
     const text = await resp.text().catch(() => '');
     throw new Error('Supabase upsert 失败: HTTP ' + resp.status + ': ' + text.slice(0, 300));
   }
+}
+
+// ══════════════════════════ 情绪看板逻辑 ══════════════════════════
+
+async function runEmotion(env, source, sharedFull) {
+  const date = beijingToday();
+  const logBase = { run_date: date, time_point: 'close', source: source || 'cron', job: 'emotion' };
+
+  if (!(await isTradingDay(env))) {
+    await writeLog(env, Object.assign(logBase, { ok: false, detail: { skipped: '非交易日' } }));
+    return { ok: false, error: '非交易日，已跳过' };
+  }
+
+  let full;
+  try {
+    full = sharedFull || await fetchNumCatEmotionFull(env);
+  } catch (e) {
+    await writeLog(env, Object.assign(logBase, { ok: false, detail: { error: e.message } }));
+    return { ok: false, error: e.message };
+  }
+
+  const fields = full.fields;
+  const items = full.items;
+
+  // 取今日对应行
+  let todayIdx = items.length - 1;
+  const dateField = ['trade_date', 'trading_day', 'date', 'tradedate'].find(name => fields.indexOf(name) >= 0);
+  if (dateField) {
+    const idx = fields.indexOf(dateField);
+    const todayCompact = beijingTodayCompact();
+    const todayIso = beijingToday();
+    const match = items.findIndex(it => {
+      const v = String(it[idx] || '').replace(/-/g, '');
+      return v === todayCompact || v === todayIso;
+    });
+    if (match >= 0) todayIdx = match;
+  }
+  const todayItem = items[todayIdx];
+
+  // 提取指标
+  const metrics = {};
+  const missingFields = [];
+  for (const key of Object.keys(CONFIG.EMOTION_FIELDS)) {
+    const val = pickEmotionValue(fields, todayItem, CONFIG.EMOTION_FIELDS[key]);
+    metrics[key] = val;
+    if (val === null) missingFields.push(key + '(' + CONFIG.EMOTION_FIELDS[key].join('/') + ')');
+  }
+
+  // 计算昨日成交额环比差值（亿）：需要 amount 连续两天都有值
+  let amountDiff = null;
+  if (todayIdx > 0) {
+    const prevItem = items[todayIdx - 1];
+    const todayAmount = pickEmotionValue(fields, todayItem, CONFIG.EMOTION_FIELDS.amount);
+    const prevAmount = pickEmotionValue(fields, prevItem, CONFIG.EMOTION_FIELDS.amount);
+    if (todayAmount !== null && prevAmount !== null) {
+      amountDiff = (todayAmount - prevAmount) / 1e8; // 元 → 亿
+    }
+  }
+  metrics.amountDiff = amountDiff !== null ? Number(amountDiff.toFixed(2)) : null;
+
+  // 组装五日数据（取最近5条，日期升序）
+  const fiveDays = items.slice(Math.max(0, items.length - 5)).map(function (item) {
+    const row = {};
+    for (const key of Object.keys(CONFIG.EMOTION_FIELDS)) {
+      row[key] = pickEmotionValue(fields, item, CONFIG.EMOTION_FIELDS[key]);
+    }
+    // 日期
+    if (dateField) {
+      const dIdx = fields.indexOf(dateField);
+      row._date = normalizeDate(item[dIdx]);
+    } else {
+      row._date = '';
+    }
+    return row;
+  });
+
+  // 写入 emotion_data 表
+  const url = CONFIG.SUPABASE_URL + '/rest/v1/' + CONFIG.EMOTION_TABLE;
+  const body = {
+    date: date,
+    metrics: metrics,
+    five_days: fiveDays,
+    api_fields: fields,
+    updated_at: new Date().toISOString()
+  };
+
+  let writeError = null;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: Object.assign(sbHeaders(env), {
+        'Prefer': 'resolution=merge-duplicates, return=minimal'
+      }),
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error('HTTP ' + resp.status + ': ' + text.slice(0, 300));
+    }
+  } catch (e) {
+    writeError = e.message;
+  }
+
+  await writeLog(env, Object.assign(logBase, {
+    ok: !writeError,
+    detail: {
+      metrics,
+      amountDiff,
+      missingFields,
+      availableFields: fields,
+      fiveDaysCount: fiveDays.length,
+      writeError
+    }
+  }));
+
+  return {
+    ok: !writeError,
+    date,
+    metrics,
+    amountDiff,
+    missingFields,
+    availableFields: fields,
+    writeError
+  };
 }
 
 // ══════════════════════════ 主流程 ══════════════════════════
@@ -560,7 +712,7 @@ async function runDuobanSecond(env, source) {
   return { ok, date, point: 't0926', written: duobanResult.value !== null ? [row] : [], row: duobanResult, writeError };
 }
 
-async function runJiwang(env, source) {
+async function runJiwang(env, source, sharedFull) {
   const date = beijingToday();
   const logBase = { run_date: date, time_point: 'close', source: source || 'cron', job: 'jiwang' };
 
@@ -570,7 +722,9 @@ async function runJiwang(env, source) {
   }
 
   try {
-    const stats = await fetchNumCatMarketStats(env);
+    const stats = sharedFull
+      ? buildJiwangStats(sharedFull.fields, sharedFull.items)
+      : await fetchNumCatMarketStats(env);
     const nextTradingDay = await getNextTradingDay(env, date);
     await updateJiwangShouguJieguo(env, nextTradingDay, stats);
     await writeLog(env, Object.assign(logBase, { ok: true, detail: { today: date, nextTradingDay, stats } }));
@@ -582,11 +736,38 @@ async function runJiwang(env, source) {
 }
 
 async function runClose(env, source) {
-  const [jiwangResult, biddingResult] = await Promise.all([
-    runJiwang(env, source),
-    runBidding(env, 'close', source)
+  // 记忘看板 + 情绪看板都依赖 NumCat 情绪周期接口，合并到一次调用以节省每日 10 次的额度。
+  let sharedFull = null;
+  let sharedFullError = null;
+  try {
+    sharedFull = await fetchNumCatEmotionFull(env);
+  } catch (e) {
+    sharedFullError = e.message;
+  }
+
+  // NumCat 接口失败时，记忘/情绪两项直接复用该错误，避免额外消耗调用额度。
+  const jiwangPromise = sharedFull
+    ? runJiwang(env, source, sharedFull)
+    : Promise.resolve({ ok: false, error: 'NumCat 共享接口失败: ' + sharedFullError });
+  const emotionPromise = sharedFull
+    ? runEmotion(env, source, sharedFull)
+    : Promise.resolve({ ok: false, error: 'NumCat 共享接口失败: ' + sharedFullError });
+
+  const [jiwangResult, biddingResult, emotionResult] = await Promise.allSettled([
+    jiwangPromise,
+    runBidding(env, 'close', source),
+    emotionPromise
   ]);
-  return { ok: jiwangResult.ok && biddingResult.ok, jiwang: jiwangResult, bidding: biddingResult };
+
+  return {
+    ok: (jiwangResult.status === 'fulfilled' && jiwangResult.value.ok) &&
+        (biddingResult.status === 'fulfilled' && biddingResult.value.ok) &&
+        (emotionResult.status === 'fulfilled' && emotionResult.value.ok),
+    jiwang: jiwangResult.status === 'fulfilled' ? jiwangResult.value : { ok: false, error: jiwangResult.reason?.message },
+    bidding: biddingResult.status === 'fulfilled' ? biddingResult.value : { ok: false, error: biddingResult.reason?.message },
+    emotion: emotionResult.status === 'fulfilled' ? emotionResult.value : { ok: false, error: emotionResult.reason?.message },
+    sharedFullError
+  };
 }
 
 function autoPoint() {

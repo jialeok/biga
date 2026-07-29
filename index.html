@@ -400,6 +400,154 @@
             font-size: 9px;
         }
 
+        /* 情绪看板 */
+        .emotion-board {
+            margin: 0 15px 10px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }
+
+        .emotion-header {
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            transition: background 0.2s;
+        }
+
+        .emotion-header:hover {
+            background: linear-gradient(135deg, #d97706, #b45309);
+        }
+
+        .emotion-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #ffffff;
+            white-space: nowrap;
+        }
+
+        .emotion-summary {
+            flex: 1;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.95);
+            text-align: right;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .emotion-toggle-btn {
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.9);
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .emotion-content {
+            padding: 10px 12px;
+            background: #ffffff;
+        }
+
+        .emotion-volume-line {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 10px;
+            margin-bottom: 8px;
+            background: #fffbeb;
+            border: 1px solid #fde68a;
+            border-radius: 10px;
+            font-size: 12px;
+            color: #92400e;
+            font-weight: 500;
+        }
+
+        .emotion-volume-line .emv-val {
+            font-weight: 600;
+            color: #b45309;
+        }
+
+        .emotion-row {
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .emotion-row:last-child {
+            border-bottom: none;
+        }
+
+        .emotion-row-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 9px 6px;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: background 0.15s;
+        }
+
+        .emotion-row-header:hover {
+            background: #f8fafc;
+        }
+
+        .emotion-row-title {
+            font-size: 13px;
+            color: #374151;
+            font-weight: 500;
+        }
+
+        .emotion-row-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1f2937;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .emotion-row-value .unit {
+            font-size: 11px;
+            color: #6b7280;
+            font-weight: 400;
+        }
+
+        .emotion-row-value.up {
+            color: #dc2626;
+        }
+
+        .emotion-row-value.down {
+            color: #16a34a;
+        }
+
+        .emotion-trend-panel {
+            padding: 4px 4px 8px;
+            background: #f8fafc;
+            border-radius: 0 0 8px 8px;
+            display: none;
+        }
+
+        .emotion-trend-panel.show {
+            display: block;
+        }
+
+        .emotion-trend-title {
+            font-size: 10px;
+            color: #94a3b8;
+            margin-bottom: 2px;
+            padding: 0 2px;
+        }
+
         /* 记忘看板 */
         .jiwang-board {
             margin: 0 15px 10px;
@@ -5562,6 +5710,21 @@
             </div>
         </div>
 
+        <!-- 情绪看板 -->
+        <div class="emotion-board trading-day-element" id="emotionBoard">
+            <div class="emotion-header" onclick="toggleEmotionExpand(event)">
+                <div class="emotion-title">情绪看板</div>
+                <div class="emotion-summary" id="emotionSummary">-</div>
+                <div class="emotion-toggle-btn" id="emotionToggleBtn">▼</div>
+            </div>
+            <div class="emotion-content" id="emotionContent" style="display:none;">
+                <div class="emotion-volume-line" id="emotionVolumeLine">-</div>
+                <div class="emotion-list" id="emotionList">
+                    <!-- 情绪指标行由 JS 渲染 -->
+                </div>
+            </div>
+        </div>
+
         <!-- 连涨连跌天数柱状图 -->
         <div class="consecutive-up-chart trading-day-element">
             <div class="chart-title">连涨连跌天数</div>
@@ -8685,6 +8848,7 @@
             startStockTopicsRealtime(); // 同时启动 stock_topics 表的 Realtime 订阅（题材库）
             startBiddingRealtime(); // 同时启动 bidding_data 表的 Realtime 订阅（竞价变化看板）
             startJiwangRealtime(); // 同时启动 jiwang_data 表的 Realtime 订阅（记忘看板）
+            startEmotionRealtime(); // 同时启动 emotion_data 表的 Realtime 订阅（情绪看板）
             startHighlightsRealtime(); // 同时启动 daily_highlights 表的 Realtime 订阅（竞/昨高光）
             startHotStocksRealtime(); // 同时启动 hot_stocks 表的 Realtime 订阅（热门股票）
             startHotHighlightsRealtime(); // 同时启动 hot_stocks_highlights 表的 Realtime 订阅（热门股票竞/昨高光）
@@ -8717,6 +8881,7 @@
                                 renderList(); renderJiwang(); renderRank(); renderAuction();
                                 renderMulti(); renderHotspot(); renderPattern(); renderBidding();
                                 renderDuiban();
+                                renderEmotionBoard();
                                 if (typeof renderEtf === 'function') renderEtf();
                                 _dbgLog('Realtime: pullFromCloud 完成并已重新渲染');
                             }).catch(function(e) { _dbgLog('Realtime: pullFromCloud 失败: ' + (e && e.message)); });
@@ -11701,6 +11866,7 @@
                 renderList(); renderJiwang(); renderRank(); renderAuction();
                 renderMulti(); renderHotspot(); renderPattern(); renderBidding();
                 renderDuiban();
+                renderEmotionBoard();
                 if (typeof renderEtf === 'function') renderEtf();
                 updateCloudSyncUI('synced');
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
@@ -27545,6 +27711,199 @@
             closeDuibanHistoryPopup();
         }
 
+        // ═══════════════════════════════════════════════════════════
+        // 情绪看板（emotion_data 表）
+        // ═══════════════════════════════════════════════════════════
+
+        let _emotionDataCache = null; // { date: { metrics, five_days, updated_at } }
+        let _emotionRealtimeChannel = null;
+        let _emotionTableAvailable = false;
+        let _emotionExpandedRows = new Set(); // 已展开趋势图的行 key
+
+        const EMOTION_ROW_CONFIG = [
+            { key: 'amountDiff', title: '昨日成交额环比差值', unit: '亿', hasTrend: true, field: 'amount' },
+            { key: 'onceLimit', title: '昨日一字板家数', unit: '家', hasTrend: true, field: 'onceLimit' },
+            { key: 'highestLb', title: '昨日最高连板天数', unit: '天', hasTrend: true, field: 'highestLb' },
+            { key: 'limitUp', title: '昨日涨停家数', unit: '家', hasTrend: true, field: 'limitUp' },
+            { key: 'limitDown', title: '昨日跌停家数', unit: '家', hasTrend: true, field: 'limitDown' },
+            { key: 'zhaban', title: '昨日炸板家数', unit: '家', hasTrend: false, field: 'zhaban', extraKey: 'zhabanRate', extraUnit: '%' }
+        ];
+
+        function formatEmotionNumber(v, decimals) {
+            if (v === null || v === undefined || isNaN(v)) return '-';
+            if (decimals === undefined) return String(Math.round(Number(v)));
+            return Number(v).toFixed(decimals);
+        }
+
+        function yuanToYi(v) {
+            if (v === null || v === undefined || isNaN(v)) return null;
+            return Number((Number(v) / 1e8).toFixed(2));
+        }
+
+        async function loadEmotionData(date) {
+            date = date || currentDate;
+            if (_emotionDataCache && _emotionDataCache.date === date) return _emotionDataCache.data;
+
+            // 优先读云端 emotion_data 表
+            try {
+                const sb = getSupabase();
+                const { data, error } = await sb.from('emotion_data')
+                    .select('date, metrics, five_days, updated_at')
+                    .eq('date', date)
+                    .limit(1);
+                if (error) throw error;
+                if (data && data.length > 0) {
+                    _emotionDataCache = { date: date, data: data[0] };
+                    return data[0];
+                }
+            } catch (e) {
+                console.warn('读取 emotion_data 失败:', e.message);
+            }
+
+            _emotionDataCache = { date: date, data: null };
+            return null;
+        }
+
+        function toggleEmotionExpand(event) {
+            if (event) event.stopPropagation();
+            const boardEl = document.getElementById('emotionBoard');
+            const contentEl = document.getElementById('emotionContent');
+            const toggleBtn = document.getElementById('emotionToggleBtn');
+            if (!contentEl || !toggleBtn) return;
+            const isHidden = contentEl.style.display === 'none';
+            contentEl.style.display = isHidden ? 'block' : 'none';
+            toggleBtn.textContent = isHidden ? '▲' : '▼';
+            if (isHidden) renderEmotionBoard();
+        }
+
+        function toggleEmotionRow(key) {
+            const panel = document.getElementById('emotionTrendPanel-' + key);
+            if (!panel) return;
+            const isOpen = panel.classList.contains('show');
+            if (isOpen) {
+                panel.classList.remove('show');
+                _emotionExpandedRows.delete(key);
+            } else {
+                panel.classList.add('show');
+                _emotionExpandedRows.add(key);
+            }
+        }
+
+        function renderEmotionTrend(fiveDays, field, title, isPercent) {
+            if (!Array.isArray(fiveDays) || fiveDays.length === 0) return '<div style="font-size:11px;color:#94a3b8;padding:6px;">暂无趋势数据</div>';
+            const points = fiveDays.map(function (d) {
+                let v = d[field];
+                if (field === 'amount' && v !== null && v !== undefined) v = yuanToYi(v);
+                return { date: d._date || '', value: (v === null || v === undefined || isNaN(v)) ? null : Number(v) };
+            });
+            return renderMiniTrendSvg(points, '#f59e0b', { percent: !!isPercent });
+        }
+
+        async function renderEmotionBoard() {
+            const data = await loadEmotionData(currentDate);
+            const summaryEl = document.getElementById('emotionSummary');
+            const volumeLineEl = document.getElementById('emotionVolumeLine');
+            const listEl = document.getElementById('emotionList');
+            const toggleBtn = document.getElementById('emotionToggleBtn');
+            if (!summaryEl || !listEl) return;
+
+            const metrics = (data && data.metrics) || {};
+            const fiveDays = (data && data.five_days) || [];
+
+            // 标题摘要：涨停/跌停/最高连板
+            const up = metrics.limitUp, down = metrics.limitDown, lb = metrics.highestLb;
+            const summaryParts = [];
+            if (up !== null && !isNaN(up)) summaryParts.push('涨停 ' + Math.round(up));
+            if (down !== null && !isNaN(down)) summaryParts.push('跌停 ' + Math.round(down));
+            if (lb !== null && !isNaN(lb)) summaryParts.push('最高 ' + Math.round(lb) + '板');
+            summaryEl.textContent = summaryParts.length > 0 ? summaryParts.join(' / ') : '暂无数据';
+
+            // 量能行：当天预测量能 / 昨日成交额（三市总成交额）
+            const predictVol = metrics.predictVol;
+            const yesterdayAmount = (Array.isArray(fiveDays) && fiveDays.length >= 2)
+                ? fiveDays[fiveDays.length - 2].amount
+                : null;
+            const predictYi = predictVol !== null && predictVol !== undefined ? yuanToYi(predictVol) : null;
+            const yestYi = yesterdayAmount !== null && yesterdayAmount !== undefined ? yuanToYi(yesterdayAmount) : null;
+            const volParts = [];
+            if (predictYi !== null) volParts.push('预测 ' + predictYi + '亿');
+            if (yestYi !== null) volParts.push('昨日 ' + yestYi + '亿');
+            volumeLineEl.innerHTML = volParts.length > 0
+                ? volParts.map(function (s) {
+                    const kv = s.split(' ');
+                    return '<span>' + kv[0] + ' <span class="emv-val">' + kv[1] + '</span></span>';
+                }).join('<span style="color:#d1d5db;">/</span>')
+                : '<span>量能数据未抓取</span>';
+
+            // 列表行
+            let html = '';
+            EMOTION_ROW_CONFIG.forEach(function (cfg) {
+                const key = cfg.key;
+                let val = metrics[key];
+                if (key === 'amountDiff') val = metrics.amountDiff;
+                const isMissing = val === null || val === undefined || isNaN(val);
+                const numVal = isMissing ? null : Number(val);
+                let valueClass = '';
+                if (!isMissing && cfg.key === 'amountDiff') {
+                    valueClass = numVal > 0 ? 'up' : (numVal < 0 ? 'down' : '');
+                }
+                let extraHtml = '';
+                if (cfg.extraKey && metrics[cfg.extraKey] !== null && metrics[cfg.extraKey] !== undefined && !isNaN(metrics[cfg.extraKey])) {
+                    extraHtml = '<span style="color:#6b7280;font-weight:500;font-size:12px;margin-left:4px;">/ ' + Number(metrics[cfg.extraKey]).toFixed(1) + '%</span>';
+                }
+
+                html += '<div class="emotion-row">';
+                html += '<div class="emotion-row-header" onclick="toggleEmotionRow(\'' + key + '\')">';
+                html += '<div class="emotion-row-title">' + cfg.title + '</div>';
+                html += '<div class="emotion-row-value ' + valueClass + '">' +
+                    '<span>' + formatEmotionNumber(val, cfg.key === 'amountDiff' ? 2 : 0) + '</span>' +
+                    (isMissing ? '' : '<span class="unit">' + cfg.unit + '</span>') +
+                    extraHtml +
+                    '</div>';
+                html += '</div>';
+                html += '<div class="emotion-trend-panel" id="emotionTrendPanel-' + key + '">';
+                if (cfg.hasTrend) {
+                    html += '<div class="emotion-trend-title">' + cfg.title + ' 近5日</div>';
+                    html += renderEmotionTrend(fiveDays, cfg.field, cfg.title, false);
+                }
+                html += '</div>';
+                html += '</div>';
+            });
+            listEl.innerHTML = html;
+
+            // 恢复展开状态
+            _emotionExpandedRows.forEach(function (key) {
+                const panel = document.getElementById('emotionTrendPanel-' + key);
+                if (panel) panel.classList.add('show');
+            });
+
+            if (toggleBtn) {
+                const contentEl = document.getElementById('emotionContent');
+                toggleBtn.textContent = (contentEl && contentEl.style.display === 'none') ? '▼' : '▲';
+            }
+        }
+
+        async function startEmotionRealtime() {
+            if (_emotionRealtimeChannel) return;
+            try {
+                const sb = getSupabase();
+                _emotionRealtimeChannel = sb
+                    .channel('emotion_data_changes')
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'emotion_data' }, function (payload) {
+                        const changedDate = payload.new && payload.new.date;
+                        if (changedDate === currentDate) {
+                            _emotionDataCache = null;
+                            renderEmotionBoard();
+                        }
+                    })
+                    .subscribe(function (status) {
+                        _emotionTableAvailable = (status === 'SUBSCRIBED');
+                    });
+            } catch (e) {
+                console.warn('emotion_data Realtime 订阅失败:', e.message);
+            }
+        }
+
         // 竞价变化看板诊断：可在控制台执行 runBiddingDiagnostics() 查看当前状态
         async function runBiddingDiagnostics() {
             const lines = [];
@@ -35950,6 +36309,12 @@
                 _dbgLog('refreshJiwangForDateSwitch: ' + date + ' 拉取失败: ' + (e && e.message));
                 showWarningToast('⚠️ 记忘看板拉取失败，当前显示的可能是过期数据。原因: ' + (e && e.message || e), 8000);
             });
+
+            // 情绪看板同为纯云端表，切换日期时同步刷新
+            _emotionDataCache = null;
+            loadEmotionData(date).then(function() {
+                if (date === currentDate) renderEmotionBoard();
+            }).catch(function(e) { console.warn('切换日期加载情绪看板失败:', e.message); });
         }
 
         // 改变日期
@@ -38358,6 +38723,7 @@
                 renderConsecutiveUp();
                 autoTagShunshiNishi(); // 根据竞价变化自动打标顺势/逆势
                 renderAuctionPage4(); // 渲染第四页
+                renderEmotionBoard(); // 渲染情绪看板（首次快速展示缓存/空状态）
             }, 50);
             
             // 监听页面可见性变化，当切换回页面时重新加载数据（避免多标签页数据不同步）
@@ -38377,6 +38743,11 @@
                     pullBiddingForDate(currentDate).then(function() {
                         renderBidding();
                     }).catch(function(e) { console.warn('切回前台重新拉取 bidding 失败:', e.message); });
+                    // 情绪看板：纯云端表，切回前台时补拉一次避免 WebSocket 断线导致过期
+                    _emotionDataCache = null;
+                    loadEmotionData(currentDate).then(function() {
+                        renderEmotionBoard();
+                    }).catch(function(e) { console.warn('切回前台重新加载情绪看板失败:', e.message); });
                     // jiwang 同理：也是纯云端表 + Realtime 订阅，手机切后台一段时间
                     // WebSocket 断线后不一定自动重连，之前这里漏掉了 jiwang 的补拉，
                     // 导致"切回前台一段时间后再操作/翻页"看到的是过期的内存缓存
@@ -38553,6 +38924,7 @@
                     }
                     renderMulti(); renderHotspot(); renderPattern(); renderBidding();
                     renderDuiban();
+                    renderEmotionBoard();
                     if (typeof renderEtf === 'function') renderEtf();
                 }).catch(function(e) { _dbgLog('[AUCTION-ERR] background pullFromCloud ' + (e && e.message || e)); });
             } else {
