@@ -513,10 +513,38 @@ async function runEmotion(env, source, sharedFull) {
   // 接口返回可能按日期降序，先统一升序排列
   const items = sortItemsByDate(fields, full.items);
 
-  // 定位今日行与昨日行：情绪指标取昨日收盘数据，预测量能取今日实时快照
-  // 以接口返回的最晚日期作为「今日」行（若市场未开盘，则可能是昨日收盘价快照）
-  const todayIdx = items.length - 1;
-  const yesterdayIdx = todayIdx > 0 ? todayIdx - 1 : todayIdx;
+  // 以日历上的「今天」为基准定位今日/昨日行
+  const todayStr = beijingToday();            // e.g. 2026-07-30
+  const todayCompact = beijingTodayCompact(); // e.g. 20260730
+  let todayIdx = -1;
+  let yesterdayIdx = -1;
+
+  if (dateField) {
+    const dateIdx = fields.indexOf(dateField);
+    todayIdx = items.findIndex(function (it) {
+      const v = String(it[dateIdx] || '').replace(/-/g, '');
+      return v === todayStr || v === todayCompact;
+    });
+
+    if (todayIdx >= 0) {
+      // 接口里有今天（盘中），昨天就是前一天
+      yesterdayIdx = todayIdx > 0 ? todayIdx - 1 : todayIdx;
+    } else {
+      // 接口里还没今天（如开盘前或节假日），找小于今天的最晚那条作为昨天
+      for (let i = items.length - 1; i >= 0; i--) {
+        const v = String(items[i][dateIdx] || '').replace(/-/g, '');
+        if (Number(v) < Number(todayCompact)) {
+          yesterdayIdx = i;
+          break;
+        }
+      }
+      if (yesterdayIdx < 0) yesterdayIdx = items.length - 1;
+    }
+  }
+
+  if (todayIdx < 0) todayIdx = items.length - 1;
+  if (yesterdayIdx < 0) yesterdayIdx = todayIdx > 0 ? todayIdx - 1 : todayIdx;
+
   const todayItem = items[todayIdx];
   const yesterdayItem = items[yesterdayIdx];
 
@@ -630,10 +658,32 @@ async function refreshEmotionPredictVol(env, source) {
   }
 
   const fields = full.fields;
+  const dateField = findDateField(fields);
   const items = sortItemsByDate(fields, full.items);
 
-  // 定位今日行：以接口返回的最晚日期那一行为准
-  const todayIdx = items.length - 1;
+  // 定位今日行：优先找日历今天，找不到则取小于今天的最近一条
+  const todayStr = beijingToday();
+  const todayCompact = beijingTodayCompact();
+  let todayIdx = items.length - 1;
+
+  if (dateField) {
+    const dateIdx = fields.indexOf(dateField);
+    const found = items.findIndex(function (it) {
+      const v = String(it[dateIdx] || '').replace(/-/g, '');
+      return v === todayStr || v === todayCompact;
+    });
+    if (found >= 0) {
+      todayIdx = found;
+    } else {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const v = String(items[i][dateIdx] || '').replace(/-/g, '');
+        if (Number(v) < Number(todayCompact)) {
+          todayIdx = i;
+          break;
+        }
+      }
+    }
+  }
 
   const predictVol = pickEmotionValue(fields, items[todayIdx], CONFIG.EMOTION_FIELDS.predictVol);
   if (predictVol === null) {
