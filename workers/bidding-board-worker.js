@@ -598,6 +598,8 @@ async function runEmotion(env, source, sharedFull) {
     amountDiff,
     missingFields,
     availableFields: fields,
+    fiveDaysCount: fiveDays.length,
+    fiveDaysPreview: fiveDays.map(function (d) { return { date: d._date, limitUp: d.limitUp }; }),
     writeError
   };
 }
