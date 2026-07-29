@@ -54,24 +54,32 @@ create index if not exists idx_market_metrics_scope_date on market_metrics(scope
 
 -- 1.5 热门股票主列表（正式列表成员，无 in_watchlist 列，每行天然是正式成员）
 -- 先迁移旧 hot_stocks 表中可能存在的 in_watchlist=false 影子记录到 market_metrics(scope='hot')
--- （兼容旧表结构，幂等执行；market_metrics 已创建，不会报 relation does not exist）
+-- 使用 EXECUTE 动态 SQL + 表存在性校验，避免 PL/pgSQL 编译期报 relation does not exist
+-- （兼容旧表结构，幂等执行）
 do $$
 begin
+  -- 若 market_metrics 尚未创建（例如用户只执行了脚本片段），直接跳过迁移
+  if to_regclass('public.market_metrics') is null then
+    return;
+  end if;
+
   if exists (
     select 1 from information_schema.columns
     where table_schema = 'public' and table_name = 'hot_stocks' and column_name = 'in_watchlist'
   ) then
-    insert into market_metrics (date, stock, code, volume, yest_volume, change_pct, scope, source, updated_at, updated_by)
-    select date, stock, code, volume, yest_volume, change_pct, 'hot', 'sql_migrate_shadow', now(), 'sql_migrate_shadow'
-    from hot_stocks
-    where in_watchlist = false
-      and not exists (
-        select 1 from market_metrics mm
-        where mm.date = hot_stocks.date and mm.stock = hot_stocks.stock and mm.scope = 'hot'
-      );
+    execute $mig$
+      insert into market_metrics (date, stock, code, volume, yest_volume, change_pct, scope, source, updated_at, updated_by)
+      select date, stock, code, volume, yest_volume, change_pct, 'hot', 'sql_migrate_shadow', now(), 'sql_migrate_shadow'
+      from hot_stocks
+      where in_watchlist = false
+        and not exists (
+          select 1 from market_metrics mm
+          where mm.date = hot_stocks.date and mm.stock = hot_stocks.stock and mm.scope = 'hot'
+        )
+    $mig$;
 
-    delete from hot_stocks where in_watchlist = false;
-    alter table hot_stocks drop column if exists in_watchlist;
+    execute $del$ delete from hot_stocks where in_watchlist = false $del$;
+    execute $alter$ alter table hot_stocks drop column if exists in_watchlist $alter$;
   end if;
 end $$;
 
