@@ -11883,7 +11883,7 @@
                         } catch (e) {}
                         const d = [
                             { name: '最近多板%' }, { name: '板块ETF(48)' }, { name: '昨日资金前十' },
-                            { name: '大盘ETF' }, { name: '大盘（%）' }, { name: '账号溢价' }
+                            { name: '大盘ETF' }, { name: '大盘（%）' }, { name: '9点25分封单家数' }, { name: '账号溢价' }
                         ];
                         try { localStorage.setItem('biddingDefaultTemplate_v41', JSON.stringify(d)); } catch (e) {}
                         return d;
@@ -26906,6 +26906,7 @@
                 { name: '昨日资金前十' },
                 { name: '大盘ETF' },
                 { name: '大盘（%）' },
+                { name: '9点25分封单家数' },
                 { name: '账号溢价' }
             ];
         }
@@ -27463,6 +27464,8 @@
                     rowFormat = 'percent'; // 带%的项目：数字加%
                 } else if (nameDisplay === '账号溢价') {
                     rowFormat = 'yuan'; // 账号溢价：数字加"元"
+                } else if (nameDisplay === '9点25分封单家数') {
+                    rowFormat = 'jia'; // 封单家数：数字加"家"
                 } else if (nameDisplay === '大盘ETF') {
                     rowFormat = 'percent'; // 大盘ETF是4只宽基的平均涨幅，带%显示（2026-07 修复：原先etf格式不带%）
                 }
@@ -27478,6 +27481,8 @@
                         return val + '%';
                     } else if (rowFormat === 'yuan') {
                         return val + '元';
+                    } else if (rowFormat === 'jia') {
+                        return val + '家';
                     } else if (rowFormat === 'etf') {
                         return val; // Fix Bug3: ETF类直接显示数值，不加任何后缀
                     } else {
