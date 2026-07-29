@@ -50,15 +50,13 @@ create table if not exists market_metrics (
 comment on table market_metrics is '市场指标/影子数据：早盘竞价和热门股票共用，按 scope 区分来源，不进入任何主列表';
 
 -- 2.5 一次性迁移：把旧 auction_data 表数据拆分到 auction_watchlist 与 market_metrics(scope='auction')
--- 旧 auction_data 列结构可能不齐（可能没有 source / obs_auto_added），先查 information_schema
--- 动态拼接 SQL，避免引用不存在的列。
+-- 旧 auction_data 列结构可能不齐，这里只引用它一定存在的列（date,stock,code,volume,yest_volume,
+-- note,change_pct,topics,in_watchlist,selected,bought,sold,fixed）；source / obs_auto_added 直接给
+-- 默认值，避免 42703 列不存在错误。用 EXECUTE + to_regclass 避免编译期 relation 错误。
 do $$
 declare
   _auction_data_exists boolean := false;
   _watchlist_count int := 0;
-  _has_source boolean := false;
-  _has_obs_auto_added boolean := false;
-  _sql text;
 begin
   if to_regclass('public.auction_data') is not null then
     _auction_data_exists := true;
@@ -68,25 +66,12 @@ begin
     select count(*) into _watchlist_count from auction_watchlist;
   end if;
 
-  if _auction_data_exists then
-    select exists (
-      select 1 from information_schema.columns
-      where table_schema = 'public' and table_name = 'auction_data' and column_name = 'source'
-    ) into _has_source;
-
-    select exists (
-      select 1 from information_schema.columns
-      where table_schema = 'public' and table_name = 'auction_data' and column_name = 'obs_auto_added'
-    ) into _has_obs_auto_added;
-  end if;
-
   -- 只有旧表存在且新表为空时才迁移，避免重复执行或覆盖新数据
   if _auction_data_exists and _watchlist_count = 0 then
-    _sql := format($fmt$
+    execute $mig_wl$
       insert into auction_watchlist (date, stock, code, volume, yest_volume, note, change_pct, topics, source, obs_auto_added, selected, bought, sold, fixed, updated_at, updated_by)
       select date, stock, code, volume, yest_volume, note, change_pct, topics,
-             %1$s,
-             %2$s,
+             'manual', false,
              coalesce(selected, false), coalesce(bought, false), coalesce(sold, false), coalesce(fixed, false),
              now(), 'sql_migrate'
       from auction_data
@@ -95,15 +80,12 @@ begin
           select 1 from auction_watchlist aw
           where aw.date = auction_data.date and aw.stock = auction_data.stock
         )
-    $fmt$,
-    case when _has_source then 'coalesce(source, ''manual'')' else '''manual''' end,
-    case when _has_obs_auto_added then 'coalesce(obs_auto_added, false)' else 'false' end);
-    execute _sql;
+    $mig_wl$;
 
-    _sql := format($fmt$
+    execute $mig_mm$
       insert into market_metrics (date, stock, code, volume, yest_volume, change_pct, scope, source, updated_at, updated_by)
       select date, stock, code, volume, yest_volume, change_pct, 'auction',
-             %1$s,
+             'manual',
              now(), 'sql_migrate'
       from auction_data
       where (in_watchlist = false or in_watchlist is null)
@@ -111,9 +93,7 @@ begin
           select 1 from market_metrics mm
           where mm.date = auction_data.date and mm.stock = auction_data.stock and mm.scope = 'auction'
         )
-    $fmt$,
-    case when _has_source then 'coalesce(source, ''manual'')' else '''manual''' end);
-    execute _sql;
+    $mig_mm$;
 
     raise notice '已把旧 auction_data 拆分到 auction_watchlist / market_metrics(scope=auction)';
   end if;
@@ -139,7 +119,7 @@ begin
   ) then
     execute $mig$
       insert into market_metrics (date, stock, code, volume, yest_volume, change_pct, scope, source, updated_at, updated_by)
-      select date, stock, code, volume, yest_volume, change_pct, 'hot', 'sql_migrate_shadow', now(), 'sql_migrate_shadow'
+      select date, stock, coalesce(code, ''), volume, yest_volume, change_pct, 'hot', 'sql_migrate_shadow', now(), 'sql_migrate_shadow'
       from hot_stocks
       where in_watchlist = false
         and not exists (
