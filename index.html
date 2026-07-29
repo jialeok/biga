@@ -12300,13 +12300,33 @@
         // 一次性迁移：从旧 auction_data 表读取全部数据，按 in_watchlist 拆到
         // auction_watchlist 与 market_metrics(scope='auction')，并在 localStorage 标记已迁移。
         async function migrateAuctionDataToNewTables() {
-            if (localStorage.getItem('_auction_data_migrated_to_new_tables') === '1') {
+            const sb = getSupabase();
+            const alreadyMigrated = localStorage.getItem('_auction_data_migrated_to_new_tables') === '1';
+
+            // 兜底：即使标记已存在，如果 auction_watchlist 为空而 auction_data 仍有数据，说明 SQL/前次迁移未跑完，强制重迁
+            let needForceMigrate = false;
+            if (alreadyMigrated) {
+                try {
+                    const { count: wlCount, error: wlErr } = await sb.from('auction_watchlist')
+                        .select('*', { count: 'exact', head: true });
+                    const { count: oldCount, error: oldErr } = await sb.from('auction_data')
+                        .select('*', { count: 'exact', head: true });
+                    if (!wlErr && !oldErr && (wlCount || 0) === 0 && (oldCount || 0) > 0) {
+                        needForceMigrate = true;
+                        console.warn('[迁移] 标记已存在但 auction_watchlist 为空、auction_data 仍有数据，强制重新迁移');
+                        localStorage.removeItem('_auction_data_migrated_to_new_tables');
+                    }
+                } catch (e) {
+                    // 忽略兜底检查错误，继续走正常逻辑
+                }
+            }
+
+            if (alreadyMigrated && !needForceMigrate) {
                 _auctionTableAvailable = true;
                 _marketMetricsTableAvailable = true;
                 return;
             }
             try {
-                const sb = getSupabase();
                 const allRows = [];
                 let offset = 0;
                 const pageSize = 1000;

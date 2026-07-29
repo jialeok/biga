@@ -49,6 +49,49 @@ create table if not exists market_metrics (
 
 comment on table market_metrics is '市场指标/影子数据：早盘竞价和热门股票共用，按 scope 区分来源，不进入任何主列表';
 
+-- 2.5 一次性迁移：把旧 auction_data 表数据拆分到 auction_watchlist 与 market_metrics(scope='auction')
+-- 使用 EXECUTE + 表存在性校验，避免编译期 relation 错误；且仅在 auction_watchlist 为空时执行，幂等。
+do $$
+declare
+  _auction_data_exists boolean := false;
+  _watchlist_count int := 0;
+begin
+  if to_regclass('public.auction_data') is not null then
+    _auction_data_exists := true;
+  end if;
+
+  if to_regclass('public.auction_watchlist') is not null then
+    select count(*) into _watchlist_count from auction_watchlist;
+  end if;
+
+  -- 只有旧表存在且新表为空时才迁移，避免重复执行或覆盖新数据
+  if _auction_data_exists and _watchlist_count = 0 then
+    execute $mig_wl$
+      insert into auction_watchlist (date, stock, code, volume, yest_volume, note, change_pct, topics, source, obs_auto_added, selected, bought, sold, fixed, updated_at, updated_by)
+      select date, stock, code, volume, yest_volume, note, change_pct, topics, coalesce(source, 'manual'), coalesce(obs_auto_added, false), coalesce(selected, false), coalesce(bought, false), coalesce(sold, false), coalesce(fixed, false), now(), 'sql_migrate'
+      from auction_data
+      where in_watchlist = true
+        and not exists (
+          select 1 from auction_watchlist aw
+          where aw.date = auction_data.date and aw.stock = auction_data.stock
+        )
+    $mig_wl$;
+
+    execute $mig_mm$
+      insert into market_metrics (date, stock, code, volume, yest_volume, change_pct, scope, source, updated_at, updated_by)
+      select date, stock, code, volume, yest_volume, change_pct, 'auction', coalesce(source, 'manual'), now(), 'sql_migrate'
+      from auction_data
+      where (in_watchlist = false or in_watchlist is null)
+        and not exists (
+          select 1 from market_metrics mm
+          where mm.date = auction_data.date and mm.stock = auction_data.stock and mm.scope = 'auction'
+        )
+    $mig_mm$;
+
+    raise notice '已把旧 auction_data 拆分到 auction_watchlist / market_metrics(scope=auction)';
+  end if;
+end $$;
+
 -- 3. 辅助索引：按 scope+date 快速查询某天的全部指标
 create index if not exists idx_market_metrics_scope_date on market_metrics(scope, date);
 
