@@ -479,6 +479,33 @@
             color: #b45309;
         }
 
+        .emotion-refresh-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            margin-left: 4px;
+            color: #d97706;
+            cursor: pointer;
+            border-radius: 50%;
+            transition: background 0.15s, transform 0.15s;
+            vertical-align: middle;
+        }
+
+        .emotion-refresh-btn:hover {
+            background: rgba(217, 119, 6, 0.12);
+        }
+
+        .emotion-refresh-btn.refreshing svg {
+            animation: emotionRefreshSpin 0.8s linear infinite;
+        }
+
+        @keyframes emotionRefreshSpin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
         .emotion-row {
             border-bottom: 1px solid #f1f5f9;
         }
@@ -27764,6 +27791,10 @@
         let _emotionTableAvailable = false;
         let _emotionExpandedRows = new Set(); // 已展开趋势图的行 key
 
+        // 情绪看板预测量能刷新：需要指向你的 Cloudflare Worker 域名
+        // 例如：https://bidding-board-worker.your-account.workers.dev
+        const EMOTION_WORKER_BASE = 'https://bidding-board-worker.<你的子域>.workers.dev';
+
         const EMOTION_ROW_CONFIG = [
             { key: 'amountDiff', title: '昨日成交额环比差值', unit: '亿', hasTrend: true, field: 'amountDiff' },
             { key: 'onceLimit', title: '昨日一字板家数', unit: '家', hasTrend: true, field: 'onceLimit' },
@@ -27843,6 +27874,53 @@
             return renderMiniTrendSvg(points, '#f59e0b', { percent: !!isPercent });
         }
 
+        // 情绪看板：仅刷新「预测量能」字段
+        async function refreshEmotionPredictVol(event) {
+            if (event) event.stopPropagation();
+            if (!currentDate) return;
+            const btn = document.getElementById('emotionRefreshBtn');
+            if (btn) btn.classList.add('refreshing');
+            try {
+                const url = EMOTION_WORKER_BASE.replace(/\/$/, '') + '/refresh-emotion';
+                const resp = await fetch(url, { method: 'POST' });
+                const result = await resp.json();
+                if (!result.ok) {
+                    throw new Error(result.error || '刷新失败');
+                }
+                // 更新缓存中的 predictVol
+                if (_emotionDataCache && _emotionDataCache.date === currentDate && _emotionDataCache.data) {
+                    _emotionDataCache.data.metrics = _emotionDataCache.data.metrics || {};
+                    _emotionDataCache.data.metrics.predictVol = result.predictVol;
+                    _emotionDataCache.data.updated_at = new Date().toISOString();
+                }
+                // 仅重渲染顶部量能行，不改动其它行
+                renderEmotionVolumeLine(_emotionDataCache ? _emotionDataCache.data : null);
+            } catch (e) {
+                console.error('[EMOTION-REFRESH] 刷新预测量能失败:', e.message);
+                alert('刷新预测量能失败：' + e.message);
+            } finally {
+                if (btn) btn.classList.remove('refreshing');
+            }
+        }
+
+        function renderEmotionVolumeLine(data) {
+            const volumeLineEl = document.getElementById('emotionVolumeLine');
+            if (!volumeLineEl) return;
+            const metrics = (data && data.metrics) || {};
+            const predictVol = metrics.predictVol;
+            const yesterdayAmount = metrics.amount;
+            const predictYi = predictVol !== null && predictVol !== undefined ? yuanToYi(predictVol) : null;
+            const yestYi = yesterdayAmount !== null && yesterdayAmount !== undefined ? yuanToYi(yesterdayAmount) : null;
+            const volParts = [];
+            if (predictYi !== null) {
+                volParts.push('<span>预测 <span class="emv-val">' + predictYi + '亿</span><span class="emotion-refresh-btn" id="emotionRefreshBtn" onclick="refreshEmotionPredictVol(event)" title="刷新预测量能"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg></span></span>');
+            }
+            if (yestYi !== null) volParts.push('<span>昨日 <span class="emv-val">' + yestYi + '亿</span></span>');
+            volumeLineEl.innerHTML = volParts.length > 0
+                ? volParts.join('<span style="color:#d1d5db;">/</span>')
+                : '<span>量能数据未抓取</span>';
+        }
+
         async function renderEmotionBoard() {
             const data = await loadEmotionData(currentDate);
             const summaryEl = document.getElementById('emotionSummary');
@@ -27862,21 +27940,8 @@
             if (lb !== null && !isNaN(lb)) summaryParts.push('最高 ' + Math.round(lb) + '板');
             summaryEl.textContent = summaryParts.length > 0 ? summaryParts.join(' / ') : '暂无数据';
 
-            // 量能行：当天预测量能 / 昨日成交额（三市总成交额）
-            // 注：metrics.predictVol 为今日 am_pred，metrics.amount 为昨日 am
-            const predictVol = metrics.predictVol;
-            const yesterdayAmount = metrics.amount;
-            const predictYi = predictVol !== null && predictVol !== undefined ? yuanToYi(predictVol) : null;
-            const yestYi = yesterdayAmount !== null && yesterdayAmount !== undefined ? yuanToYi(yesterdayAmount) : null;
-            const volParts = [];
-            if (predictYi !== null) volParts.push('预测 ' + predictYi + '亿');
-            if (yestYi !== null) volParts.push('昨日 ' + yestYi + '亿');
-            volumeLineEl.innerHTML = volParts.length > 0
-                ? volParts.map(function (s) {
-                    const kv = s.split(' ');
-                    return '<span>' + kv[0] + ' <span class="emv-val">' + kv[1] + '</span></span>';
-                }).join('<span style="color:#d1d5db;">/</span>')
-                : '<span>量能数据未抓取</span>';
+            // 量能行：当天预测量能 / 昨日成交额（三市总成交额），含刷新按钮
+            renderEmotionVolumeLine(data);
 
             // 列表行
             let html = '';

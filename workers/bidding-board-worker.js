@@ -532,7 +532,7 @@ async function runEmotion(env, source, sharedFull) {
   }
   metrics.amountDiff = amountDiff !== null ? Number(amountDiff.toFixed(2)) : null;
 
-  // 组装五日数据（取最近5条，日期升序）
+  // 组装五日数据（取最近5条，按日期升序）
   const fiveDays = items.slice(Math.max(0, items.length - 5)).map(function (item) {
     const row = {};
     for (const key of Object.keys(CONFIG.EMOTION_FIELDS)) {
@@ -545,6 +545,9 @@ async function runEmotion(env, source, sharedFull) {
       row._date = '';
     }
     return row;
+  }).sort(function (a, b) {
+    if (!a._date || !b._date) return 0;
+    return a._date.replace(/-/g, '') - b._date.replace(/-/g, '');
   });
 
   // 写入 emotion_data 表
@@ -595,6 +598,88 @@ async function runEmotion(env, source, sharedFull) {
     amountDiff,
     missingFields,
     availableFields: fields,
+    writeError
+  };
+}
+
+// 独立刷新情绪看板的「预测量能」字段：只调 NumCat 一次，只更新 metrics.predictVol。
+async function refreshEmotionPredictVol(env, source) {
+  const date = beijingToday();
+  const logBase = { run_date: date, time_point: 't0926', source: source || 'http', job: 'emotion-refresh' };
+
+  let full;
+  try {
+    full = await fetchNumCatEmotionFull(env);
+  } catch (e) {
+    await writeLog(env, Object.assign(logBase, { ok: false, detail: { error: e.message } }));
+    return { ok: false, error: e.message };
+  }
+
+  const fields = full.fields;
+  const items = full.items;
+
+  // 定位今日行
+  let todayIdx = items.length - 1;
+  const dateField = ['tradedate', 'trade_date', 'trading_day', 'date'].find(name => fields.indexOf(name) >= 0);
+  if (dateField) {
+    const idx = fields.indexOf(dateField);
+    const todayCompact = beijingTodayCompact();
+    const todayIso = beijingToday();
+    const match = items.findIndex(it => {
+      const v = String(it[idx] || '').replace(/-/g, '');
+      return v === todayCompact || v === todayIso;
+    });
+    if (match >= 0) todayIdx = match;
+  }
+
+  const predictVol = pickEmotionValue(fields, items[todayIdx], CONFIG.EMOTION_FIELDS.predictVol);
+  if (predictVol === null) {
+    await writeLog(env, Object.assign(logBase, { ok: false, detail: { error: '未找到 am_pred 字段' } }));
+    return { ok: false, error: 'NumCat 返回中未找到 am_pred 预测量能字段' };
+  }
+
+  // 读取当天已有记录，只更新 predictVol
+  const readUrl = CONFIG.SUPABASE_URL + '/rest/v1/' + CONFIG.EMOTION_TABLE + '?date=eq.' + encodeURIComponent(date) + '&select=metrics';
+  let metrics = {};
+  try {
+    const readResp = await fetch(readUrl, { headers: sbHeaders(env) });
+    if (readResp.ok) {
+      const rows = await readResp.json();
+      if (rows && rows[0] && rows[0].metrics) metrics = rows[0].metrics;
+    }
+  } catch (e) {
+    console.warn('读取 emotion_data 失败:', e.message);
+  }
+  metrics.predictVol = predictVol;
+
+  const updateUrl = CONFIG.SUPABASE_URL + '/rest/v1/' + CONFIG.EMOTION_TABLE + '?date=eq.' + encodeURIComponent(date);
+  let writeError = null;
+  try {
+    const resp = await fetch(updateUrl, {
+      method: 'POST',
+      headers: Object.assign(sbHeaders(env), {
+        'Prefer': 'resolution=merge-duplicates, return=minimal'
+      }),
+      body: JSON.stringify({ date: date, metrics: metrics, updated_at: new Date().toISOString() })
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error('HTTP ' + resp.status + ': ' + text.slice(0, 300));
+    }
+  } catch (e) {
+    writeError = e.message;
+  }
+
+  await writeLog(env, Object.assign(logBase, {
+    ok: !writeError,
+    detail: { todayIdx, predictVol, predictYi: predictVol / 1e8, writeError }
+  }));
+
+  return {
+    ok: !writeError,
+    date,
+    predictVol,
+    predictYi: predictVol / 1e8,
     writeError
   };
 }
@@ -785,7 +870,25 @@ function autoPoint() {
   return null;
 }
 
-// ══════════════════════════ 入口 ══════════════════════════
+// 简易 IP 频率限制（按 Worker 进程内存，足够防止误刷/滥用）
+const REFRESH_RATE_LIMIT = new Map();
+function checkRefreshRateLimit(ip) {
+  const now = Date.now();
+  const windowMs = 60 * 1000; // 1 分钟窗口
+  const maxRequests = 10;     // 每 IP 每分钟最多 10 次
+  const record = REFRESH_RATE_LIMIT.get(ip);
+  if (!record || now > record.resetAt) {
+    REFRESH_RATE_LIMIT.set(ip, { count: 1, resetAt: now + windowMs });
+    return { ok: true };
+  }
+  if (record.count >= maxRequests) {
+    return { ok: false, retryAfter: Math.ceil((record.resetAt - now) / 1000) };
+  }
+  record.count++;
+  return { ok: true };
+}
+
+// ══════════════════════════ 入口 ═══════════════════════════
 
 export default {
   async scheduled(event, env, ctx) {
@@ -819,6 +922,22 @@ export default {
       else if (point === 'close') result = await runClose(env, 'http');
       else result = await runBidding(env, point, 'http');
       return new Response(JSON.stringify(result, null, 2), { headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/refresh-emotion') {
+      // 公开端点：只允许刷新预测量能；按 IP 限流防止额度被刷爆。
+      const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const limit = checkRefreshRateLimit(clientIp);
+      if (!limit.ok) {
+        return new Response(JSON.stringify({ ok: false, error: '刷新太频繁，请 ' + limit.retryAfter + ' 秒后再试' }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json', 'Retry-After': String(limit.retryAfter) }
+        });
+      }
+      const result = await refreshEmotionPredictVol(env, 'http');
+      return new Response(JSON.stringify(result, null, 2), {
+        status: result.ok ? 200 : 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
     return new Response('market-automation-worker', { status: 200 });
   },
