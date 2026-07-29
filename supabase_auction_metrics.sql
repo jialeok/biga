@@ -26,7 +26,52 @@ create table if not exists auction_watchlist (
   primary key (date, stock)
 );
 
+-- 1.5 热门股票主列表（正式列表成员，无 in_watchlist 列，每行天然是正式成员）
+-- 先迁移旧 hot_stocks 表中可能存在的 in_watchlist=false 影子记录到 market_metrics(scope='hot')
+-- （兼容旧表结构，幂等执行）
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'hot_stocks' and column_name = 'in_watchlist'
+  ) then
+    insert into market_metrics (date, stock, code, volume, yest_volume, change_pct, scope, source, updated_at, updated_by)
+    select date, stock, code, volume, yest_volume, change_pct, 'hot', 'sql_migrate_shadow', now(), 'sql_migrate_shadow'
+    from hot_stocks
+    where in_watchlist = false
+      and not exists (
+        select 1 from market_metrics mm
+        where mm.date = hot_stocks.date and mm.stock = hot_stocks.stock and mm.scope = 'hot'
+      );
+
+    delete from hot_stocks where in_watchlist = false;
+    alter table hot_stocks drop column if exists in_watchlist;
+  end if;
+end $$;
+
+create table if not exists hot_stocks (
+  date text not null,
+  stock text not null,
+  code text,
+  volume text,
+  yest_volume text,
+  note text,
+  change_pct text,
+  topics text,
+  source text default 'manual',           -- manual | worker | observation | holding | import
+  obs_auto_added boolean default false,   -- 观察组自动继承标记
+  selected boolean default false,         -- 已废弃，仅兼容旧数据
+  bought boolean default false,           -- 已废弃，仅兼容旧数据
+  sold boolean default false,             -- 已废弃，仅兼容旧数据
+  fixed boolean default false,            -- 已废弃，仅兼容旧数据
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  updated_by text,
+  primary key (date, stock)
+);
+
 comment on table auction_watchlist is '早盘竞价主列表：只存当天正式展示的股票，无 in_watchlist 字段（表中每一行天然是正式成员）';
+comment on table hot_stocks is '热门股票主列表：只存当天正式展示的股票，无 in_watchlist 字段（表中每一行天然是正式成员）';
 
 -- 2. 市场指标/影子数据（早盘竞价 + 热门股票共用）
 create table if not exists market_metrics (
@@ -53,9 +98,13 @@ create index if not exists idx_market_metrics_scope_date on market_metrics(scope
 
 -- 4. 行级安全（RLS）：与现有 bidding_data/auction_data 保持一致，anon 全开放
 alter table auction_watchlist enable row level security;
+alter table hot_stocks enable row level security;
 alter table market_metrics enable row level security;
 
 create policy "allow_all_auction_watchlist" on auction_watchlist
+  for all to anon using (true) with check (true);
+
+create policy "allow_all_hot_stocks" on hot_stocks
   for all to anon using (true) with check (true);
 
 create policy "allow_all_market_metrics" on market_metrics
@@ -83,6 +132,12 @@ begin
       before update on market_metrics
       for each row execute function public.set_updated_at();
   end if;
+
+  if not exists (select 1 from pg_trigger where tgname = 'trg_hot_stocks_set_updated_at') then
+    create trigger trg_hot_stocks_set_updated_at
+      before update on hot_stocks
+      for each row execute function public.set_updated_at();
+  end if;
 end $$;
 
 -- 6. 启用 Realtime（供多端同步）
@@ -101,5 +156,8 @@ begin
   end if;
   if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'market_metrics') then
     alter publication supabase_realtime add table market_metrics;
+  end if;
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'hot_stocks') then
+    alter publication supabase_realtime add table hot_stocks;
   end if;
 end $$;
