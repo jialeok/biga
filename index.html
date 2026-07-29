@@ -27791,9 +27791,8 @@
         let _emotionTableAvailable = false;
         let _emotionExpandedRows = new Set(); // 已展开趋势图的行 key
 
-        // 情绪看板预测量能刷新：需要指向你的 Cloudflare Worker 域名
-        // 例如：https://bidding-board-worker.your-account.workers.dev
-        const EMOTION_WORKER_BASE = 'https://bidding-board-worker.<你的子域>.workers.dev';
+        // 情绪看板预测量能刷新：指向 Cloudflare Worker 域名
+        const EMOTION_WORKER_BASE = 'https://bidding-board-worker.834696737hgl.workers.dev';
 
         const EMOTION_ROW_CONFIG = [
             { key: 'amountDiff', title: '昨日成交额环比差值', unit: '亿', hasTrend: true, field: 'amountDiff' },
