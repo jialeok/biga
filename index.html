@@ -7664,7 +7664,7 @@
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #f97316, #ea580c);" onclick="clearAllAuctionText()">清除文字</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #6b7280, #4b5563);" onclick="clearAllAuctionNotes()">清除注释</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #7f1d1d, #991b1b);" onclick="clearAllAuctionRows()">清空所有行</button>
-                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #0d9488, #0f766e);" onclick="repairAuctionInWatchlistForDate()">🔧 恢复本日数据（不改数值，只把当天所有记录重新标记为正式列表）</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #0d9488, #0f766e);" onclick="repairAuctionInWatchlistForDate()">🔧 恢复本日数据（不改数值，仅修复 in_watchlist 缺失的记录，不碰影子记录）</button>
             </form>
         </div>
     </div>
@@ -10957,19 +10957,19 @@
         }
 
         // ============================================================
-        // 一次性数据恢复工具（2026-07-25 新增）：把某一天被整批误降级为影子记录
-        // （in_watchlist=false）的正式列表恢复回来。只翻这一个状态位，绝不碰
-        // volume/yestVolume/note/topics 等任何业务字段，也不新增/删除任何股票行，
-        // 是这类"数据还在、只是被隐藏"问题里风险最低的修复方式。
+        // 一次性数据恢复工具（2026-07-25 新增，2026-07-29 阶段八加固）：
+        // 仅修复 in_watchlist 字段缺失（undefined/null）的正式列表行，显式 false 的
+        // 影子记录保持原样，避免"恢复"操作把历史日期的影子记录批量提升为正式成员。
+        // 只翻这一个状态位，绝不碰 volume/yestVolume/note/topics 等任何业务字段，
+        // 也不新增/删除任何股票行。
         // 用途：配合按钮"恢复本日数据"手动触发，日期固定为 currentDate（点击那一刻
-        // 页面正在看的那一天），恢复对象为该日期云端 auction_data 表里现存的全部行
-        // （不区分之前是 true 还是 false，统一置为 true——因为触发这个按钮，前提就是
-        // 用户已经确认这一天的记录本该全部是正式列表成员）。
+        // 页面正在看的那一天），恢复对象为该日期云端 auction_data 表里 in_watchlist
+        // 缺失的记录；若记录已明确是影子记录(false)，不会被修改。
         // ============================================================
         async function repairAuctionInWatchlistForDate(dateArg) {
             const date = dateArg || currentDate;
             if (!date) { alert('无法确定要恢复的日期'); return; }
-            if (!confirm('即将把 ' + date + ' 这一天云端保存的全部股票记录重新标记为正式列表（不改数值），确认执行吗？')) return;
+            if (!confirm('即将把 ' + date + ' 这一天 in_watchlist 字段缺失的股票重新标记为正式列表（不改数值、不碰影子记录），确认执行吗？')) return;
 
             const sb = getSupabase();
             try {
@@ -10985,26 +10985,36 @@
                 }
 
                 const alreadyTrueCount = cloudRows.filter(function(r) { return r.in_watchlist === true; }).length;
-                const toFixCount = cloudRows.length - alreadyTrueCount;
+                const toFixCloudRows = cloudRows.filter(function(r) { return r && r.in_watchlist === null; });
                 _dbgLog('[REPAIR] date=' + date + ' 云端共' + cloudRows.length + '条，已是正式列表' +
-                    alreadyTrueCount + '条，本次恢复' + toFixCount + '条：' +
-                    cloudRows.filter(function(r) { return r.in_watchlist !== true; })
-                        .map(function(r) { return r.stock; }).join('、'));
+                    alreadyTrueCount + '条，待修复' + toFixCloudRows.length + '条：' +
+                    toFixCloudRows.map(function(r) { return r.stock; }).join('、'));
 
                 const now = new Date().toISOString();
-                const { error: updErr } = await sb.from('auction_data')
-                    .update({ in_watchlist: true, updated_at: now, updated_by: 'main-repair' })
-                    .eq('date', date);
-                if (updErr) throw updErr;
+                if (toFixCloudRows.length > 0) {
+                    const { error: updErr } = await sb.from('auction_data')
+                        .update({ in_watchlist: true, updated_at: now, updated_by: 'main-repair' })
+                        .eq('date', date)
+                        .is('in_watchlist', null);
+                    if (updErr) throw updErr;
+                }
 
                 // 同步本地内存缓存，避免还要再等一次云端拉取才能看到结果
+                // 阶段八 影子记录污染修复：只修复 in_watchlist 缺失(undefined)的行，
+                // 显式 false 的影子记录保持原样。
                 const auctionData = getAuctionData();
                 const localRows = auctionData[date] || [];
-                localRows.forEach(function(r) { if (r) r.in_watchlist = true; });
+                let repairedCount = 0;
+                localRows.forEach(function(r) {
+                    if (r && r.in_watchlist === undefined) {
+                        r.in_watchlist = true;
+                        repairedCount++;
+                    }
+                });
                 setAuctionDateData(date, localRows, 'repairAuctionInWatchlistForDate');
 
-                _dbgLog('[REPAIR] date=' + date + ' 恢复完成，共' + cloudRows.length + '条已全部置为 in_watchlist=true');
-                alert('✅ 已恢复 ' + date + ' 共 ' + cloudRows.length + ' 条记录为正式列表');
+                _dbgLog('[REPAIR] date=' + date + ' 恢复完成，显式正式记录' + alreadyTrueCount + '条，修复缺失字段' + repairedCount + '条');
+                alert('✅ 已恢复 ' + date + '：' + alreadyTrueCount + ' 条已是正式列表，' + repairedCount + ' 条缺失字段已修复（影子记录未改动）');
 
                 if (date === currentDate) {
                     renderAuction();
@@ -11984,12 +11994,23 @@
         }
         function setAuctionDateData(date, newList, source) {
             if (!date || typeof date !== 'string') { _dbgLog('[AUCTION-GUARD] ⚠️ invalid date source=' + source); return; }
+            // 阶段八 影子记录污染修复：写入缓存前强制归一化 in_watchlist 字段。
+            // 任何缺失该字段的行都按影子记录(false)处理并打日志，避免写入路径漏填字段
+            // 导致后续 get 函数/同步把脏记录误判为正式成员。
+            var normalizedList = (newList || []).map(function(r) {
+                if (!r || !r.stock) return r;
+                if (r.in_watchlist === undefined || r.in_watchlist === null) {
+                    _dbgLog('[AUCTION-GUARD] ⚠️ date=' + date + ' source=' + source + ' 股票 "' + r.stock + '" 缺少 in_watchlist，已默认置为 false（影子记录）');
+                    return Object.assign({}, r, { in_watchlist: false });
+                }
+                return r;
+            });
             var before = (_auctionMemCache[date] || []).length;
-            _auctionMemCache[date] = newList || [];
+            _auctionMemCache[date] = normalizedList;
             var after = (_auctionMemCache[date] || []).length;
             _dbgLog('[AUCTION-GUARD] set date=' + date + ' before=' + before + ' after=' + after + ' source=' + source + _guardStack());
             if (auctionStore && date !== auctionStore.currentDate) {
-                try { _dbgLog('[AUCTION-GUARD] sample date=' + date + ' source=' + source + ' stocks=' + (newList||[]).slice(0,3).map(function(r){return r&&r.stock||'?';}).join(',')); } catch(e){}
+                try { _dbgLog('[AUCTION-GUARD] sample date=' + date + ' source=' + source + ' stocks=' + (normalizedList||[]).slice(0,3).map(function(r){return r&&r.stock||'?';}).join(',')); } catch(e){}
             }
             _guardAssertDate(date, source);
         }
@@ -12019,8 +12040,20 @@
             var list = _auctionMemCache[date];
             (rows || []).forEach(function(row) {
                 if (!row || !row.stock) return;
-                var idx = list.findIndex(function(r) { return r.stock === row.stock; });
-                if (idx >= 0) list[idx] = row; else list.push(row);
+                var idx = list.findIndex(function(r) { return r && r.stock === row.stock; });
+                // 阶段八 影子记录污染修复：合并时禁止用缺失 in_watchlist 的新对象覆盖旧行，
+                // 否则会把正式成员/影子记录的身份位抹掉，造成脏数据。
+                var normalizedRow = row;
+                if (row.in_watchlist === undefined || row.in_watchlist === null) {
+                    if (idx >= 0 && list[idx] && list[idx].in_watchlist !== undefined) {
+                        normalizedRow = Object.assign({}, row, { in_watchlist: list[idx].in_watchlist });
+                        _dbgLog('[AUCTION-GUARD] ⚠️ date=' + date + ' source=' + source + ' merge "' + row.stock + '" 缺少 in_watchlist，已继承旧值=' + list[idx].in_watchlist);
+                    } else {
+                        normalizedRow = Object.assign({}, row, { in_watchlist: false });
+                        _dbgLog('[AUCTION-GUARD] ⚠️ date=' + date + ' source=' + source + ' merge "' + row.stock + '" 缺少 in_watchlist，已默认置为 false（影子记录）');
+                    }
+                }
+                if (idx >= 0) list[idx] = normalizedRow; else list.push(normalizedRow);
             });
             var after = list.length;
             _dbgLog('[AUCTION-GUARD] merge date=' + date + ' before=' + before + ' after=' + after + ' source=' + source + _guardStack());
@@ -12522,6 +12555,11 @@
                 // 备份时这一天本来就没有数据，撤回即恢复为"没有"
                 deleteAuctionDateData(backupDate, 'restore');
             } else {
+                // 阶段八 影子记录污染修复：备份恢复的数据视为用户当时的正式列表；
+                // 仅对确实缺失 in_watchlist 的旧备份补 true，显式 false 保留。
+                if (Array.isArray(backupDayData)) {
+                    backupDayData.forEach(function(r) { if (r && r.stock && r.in_watchlist === undefined) r.in_watchlist = true; });
+                }
                 setAuctionDateData(backupDate, backupDayData, 'restore');
                 // 把这一天的所有数据字段 patch 到云端（camelCase → snake_case）
                 const scMap = (allData && allData.stockCodeMap) || {};
@@ -12907,11 +12945,13 @@
         // 这样即使未来某个写入路径又漏填了这个字段，也不会造成数据"凭空消失"。
         function getTodayAuction() {
             const list = getAuctionData()[currentDate] || [];
-            // 自愈：字段缺失的行视为正式列表成员，就地补齐，避免下次又被判定为"脏数据"
+            // 阶段八 影子记录污染修复：get 函数只读、不修改。字段缺失(undefined)
+            // 的行不再被就地"自愈"为正式成员——那种做法会把写入路径漏填字段的 bug
+            // 造成的影子/脏记录直接提升为可见股票，正是历史日期反复被污染的原因之一。
+            // 缺失行会被严格过滤掉；如确为合法正式成员，应由写入路径显式设置 in_watchlist=true。
             const undefinedRows = list.filter(function(r) { return r && r.stock && r.in_watchlist === undefined; });
             if (undefinedRows.length > 0) {
-                undefinedRows.forEach(function(r) { r.in_watchlist = true; });
-                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 in_watchlist 字段缺失的行：' + undefinedRows.length + ' 条（已自动修复为正式列表成员并显示）');
+                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 ' + undefinedRows.length + ' 条 in_watchlist 字段缺失的行，已严格过滤（不自动修复）：' + undefinedRows.map(function(r){return r.stock;}).join('、'));
             }
             return list.filter(function(r) { return r && r.in_watchlist === true; });
         }
@@ -12929,12 +12969,11 @@
                 return list.filter(function(r) { return r && r.in_watchlist !== false; });
             }
             // auction 分组：严格判断，只保留 in_watchlist === true 的正式列表成员
-            // 阶段七修复：undefined 只可能是写入路径漏填字段的 bug（真正的影子记录永远显式
-            // 置 false），就地自愈补成 true 一并放行，避免拉取成功却整批"凭空消失"。
+            // 阶段八 影子记录污染修复：与 getTodayAuction 保持一致，缺失(undefined)行
+            // 不再被就地提升为正式成员，避免污染主列表；仅记录诊断日志。
             const undefinedRows = list.filter(function(r) { return r && r.stock && r.in_watchlist === undefined; });
             if (undefinedRows.length > 0) {
-                undefinedRows.forEach(function(r) { r.in_watchlist = true; });
-                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 in_watchlist 字段缺失的行：' + undefinedRows.length + ' 条（已自动修复为正式列表成员并显示）');
+                _dbgLog('[AUCTION-DEBUG] ⚠️ currentDate=' + currentDate + ' 存在 ' + undefinedRows.length + ' 条 in_watchlist 字段缺失的行，已严格过滤（不自动修复）：' + undefinedRows.map(function(r){return r.stock;}).join('、'));
             }
             const result = list.filter(function(r) { return r && r.in_watchlist === true; });
             // [DEBUG-VUE-FIX 2026-07-25] 暴露"后台有导入记录、前台不显示"这类问题的
@@ -14545,7 +14584,10 @@
                         ...dataItem,
                         note: historyTopics,
                         changePct: dataItem.changePct || parsedHist.changePct,
-                        topics: dataItem.topics || parsedHist.topics
+                        topics: dataItem.topics || parsedHist.topics,
+                        // 阶段八 影子记录污染修复：粘贴导入的新股票必须显式标记为正式成员，
+                        // 避免 undefined 被 setAuctionDateData 归一化为 false 后从列表消失。
+                        in_watchlist: true
                     });
                     fullDataCount++;
                 }
@@ -14634,7 +14676,9 @@
                         note: buildNoteFromFields(finalChangePct, finalTopics),
                         changePct: finalChangePct,
                         topics: finalTopics,
-                        selected: false
+                        selected: false,
+                        // 阶段八 影子记录污染修复：粘贴导入的新股票必须显式标记为正式成员。
+                        in_watchlist: true
                     });
                     noteNewCount++;
                 }
@@ -14905,7 +14949,7 @@
                 let existingIndex = targetList.findIndex(item => item.stock && item.stock.trim() === stock);
                 let isNewRecord = false;
                 if (existingIndex < 0) {
-                    targetList.push({ stock, volume: '', yestVolume: '', note: '', changePct: '', topics: '', selected: false, bought: false, sold: false, fixed: false });
+                    targetList.push({ stock, volume: '', yestVolume: '', note: '', changePct: '', topics: '', selected: false, bought: false, sold: false, fixed: false, in_watchlist: true });
                     existingIndex = targetList.length - 1;
                     isNewRecord = true;
                 }
@@ -14944,7 +14988,8 @@
                         didFill = true;
                     }
                     if (didFill) {
-                        targetList[existingIndex] = { ...item };
+                        // 阶段八 影子记录污染修复：展开时显式保留 in_watchlist=true，避免展开对象丢失该字段。
+                        targetList[existingIndex] = { ...item, in_watchlist: item.in_watchlist === undefined ? true : item.in_watchlist };
                         historyPatches.push(patch);
                         if (isNewRecord) addedCount++;
                     } else if (isNewRecord) {
@@ -14963,7 +15008,8 @@
                     const item = targetList[existingIndex];
                     const existingFieldValue = item[twoColField];
                     const isEmpty = getNumericVolume(existingFieldValue) === null;
-                    targetList[existingIndex] = { ...item, [twoColField]: parsedValue };
+                    // 阶段八 影子记录污染修复：展开时显式保留 in_watchlist=true。
+                    targetList[existingIndex] = { ...item, [twoColField]: parsedValue, in_watchlist: item.in_watchlist === undefined ? true : item.in_watchlist };
                     historyPatches.push({ stock: stock, [twoColPatchKey]: parsedValue });
                     if (isEmpty) { filledCount++; } else { overwritedCount++; }
                     if (isNewRecord) addedCount++;
@@ -38254,7 +38300,11 @@
                         clearAllAuctionDates('handleFileImport');
                         const importedAuctionData = imported.auction || {};
                         Object.keys(importedAuctionData).forEach(function(d) {
-                            setAuctionDateData(d, importedAuctionData[d], 'handleFileImport');
+                            const rows = importedAuctionData[d] || [];
+                            // 阶段八 影子记录污染修复：文件导入的数据默认视为用户想恢复的正式列表；
+                            // 仅对确实缺失 in_watchlist 的旧数据补 true，显式 false 的影子记录保留。
+                            rows.forEach(function(r) { if (r && r.stock && r.in_watchlist === undefined) r.in_watchlist = true; });
+                            setAuctionDateData(d, rows, 'handleFileImport');
                         });
                         // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles
                         // 导入数据写入独立内存缓存，避免 allData 与缓存断开引用
@@ -38513,7 +38563,11 @@
                     missingDates.forEach(date => {
                         // 阶段四 Bug 3 修复：直接写 _auctionMemCache（即 allData.auction），
                         // 并走 patchAuctionFieldBatch 把数据字段同步到云端
-                        setAuctionDateData(date, importedAuction[date], 'handleFileImport');
+                        const rows = Array.isArray(importedAuction[date]) ? importedAuction[date] : [];
+                        // 阶段八 影子记录污染修复：补全缺失日期的旧备份数据默认视为正式列表；
+                        // 仅对确实缺失 in_watchlist 的旧数据补 true，显式 false 保留。
+                        rows.forEach(function(r) { if (r && r.stock && r.in_watchlist === undefined) r.in_watchlist = true; });
+                        setAuctionDateData(date, rows, 'handleFileImport');
                         // 用户主动确认了"补全缺失日期"操作，标记这些日期为脏，
                         // 允许下次推送时用补全后的本地数据覆盖云端（云端该日期本来就是空的）
                         markAuctionDirty(date);
