@@ -27721,7 +27721,7 @@
         let _emotionExpandedRows = new Set(); // 已展开趋势图的行 key
 
         const EMOTION_ROW_CONFIG = [
-            { key: 'amountDiff', title: '昨日成交额环比差值', unit: '亿', hasTrend: true, field: 'amount' },
+            { key: 'amountDiff', title: '昨日成交额环比差值', unit: '亿', hasTrend: true, field: 'amountDiff' },
             { key: 'onceLimit', title: '昨日一字板家数', unit: '家', hasTrend: true, field: 'onceLimit' },
             { key: 'highestLb', title: '昨日最高连板天数', unit: '天', hasTrend: true, field: 'highestLb' },
             { key: 'limitUp', title: '昨日涨停家数', unit: '家', hasTrend: true, field: 'limitUp' },
@@ -27793,7 +27793,7 @@
             if (!Array.isArray(fiveDays) || fiveDays.length === 0) return '<div style="font-size:11px;color:#94a3b8;padding:6px;">暂无趋势数据</div>';
             const points = fiveDays.map(function (d) {
                 let v = d[field];
-                if (field === 'amount' && v !== null && v !== undefined) v = yuanToYi(v);
+                if ((field === 'amount' || field === 'amountDiff') && v !== null && v !== undefined) v = yuanToYi(v);
                 return { date: d._date || '', value: (v === null || v === undefined || isNaN(v)) ? null : Number(v) };
             });
             return renderMiniTrendSvg(points, '#f59e0b', { percent: !!isPercent });
@@ -27819,10 +27819,9 @@
             summaryEl.textContent = summaryParts.length > 0 ? summaryParts.join(' / ') : '暂无数据';
 
             // 量能行：当天预测量能 / 昨日成交额（三市总成交额）
+            // 注：metrics.predictVol 为今日 am_pred，metrics.amount 为昨日 am
             const predictVol = metrics.predictVol;
-            const yesterdayAmount = (Array.isArray(fiveDays) && fiveDays.length >= 2)
-                ? fiveDays[fiveDays.length - 2].amount
-                : null;
+            const yesterdayAmount = metrics.amount;
             const predictYi = predictVol !== null && predictVol !== undefined ? yuanToYi(predictVol) : null;
             const yestYi = yesterdayAmount !== null && yesterdayAmount !== undefined ? yuanToYi(yesterdayAmount) : null;
             const volParts = [];

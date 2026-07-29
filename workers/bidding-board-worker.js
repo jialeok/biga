@@ -5,8 +5,8 @@
  *   1. 9:15  (UTC 01:15) → 抓竞价变化 5 行，写入 time915
  *   2. 9:20  (UTC 01:20) → 抓竞价变化 5 行，写入 time920
  *   3. 9:25  (UTC 01:25) → 抓竞价变化 5 行 + 猫爪封单家数，写入 time930
- *   4. 9:26  (UTC 01:26) → 二次抓取「最近多板%」，保留 9:25 首次值实现叠加效果
- *   5. 16:00 (UTC 08:00) → 抓记忘看板昨收盘涨跌家数 + 竞价收盘 + 情绪看板
+ *   4. 9:26  (UTC 01:26) → 二次抓取「最近多板%」+ 情绪看板（早盘参考）
+ *   5. 16:00 (UTC 08:00) → 抓记忘看板昨收盘涨跌家数 + 竞价收盘
  *
  * 手动触发：GET /fetch?token=<FETCH_TOKEN>&point=t0915|t0920|t0925|t0926|close|jiwang|auto
  *
@@ -84,22 +84,23 @@ const CONFIG = {
   ],
 
   // NumCat 情绪周期接口（封单家数来源 + 情绪看板数据来源）
+  // 字段含义见：https://numcat.net/api-docs?scope=stock#tag/%E5%B8%82%E5%9C%BA%E7%BB%9F%E8%AE%A1/POST/api/reference-proxy/market/emoindic-daily
   NUMCAT_URL: 'https://numcat.net/api/reference-proxy/market/emoindic-daily',
   NUMCAT_APINAME: 'emoindic_daily',
-  SEAL_FIELD: 's3',
+  SEAL_FIELD: 'owfd_0925_count',
 
   // 情绪看板：字段映射（NumCat 情绪周期接口字段名 → 内部指标名）
-  // 由于接口文档未公开字段含义，此处配置多个候选字段名，按顺序匹配第一个存在的。
-  // 如首次运行时日志提示可用字段，可据此调整下面的候选名。
+  // 按顺序匹配第一个存在的字段；情绪指标统一取【昨日】数据，预测量能取【今日】am_pred。
   EMOTION_FIELDS: {
-    amount:        ['amount', 's_amount', 'total_amount', 's7', 's_amt'],           // 成交额（元）
-    predictVol:    ['predict_vol', 'predict_volume', 's_pv', 's8'],                  // 预测量能（元）
-    limitUp:       ['limit_up', 'zhangting', 'zt_count', 's1', 's4'],                // 涨停家数
-    limitDown:     ['limit_down', 'dieting', 'dt_count', 's5'],                      // 跌停家数
-    onceLimit:     ['once_limit', 'yiziban', 'yzb_count', 's9'],                     // 一字板家数
-    highestLb:     ['highest_lb', 'max_lb', 'highest_limit', 's10'],                 // 最高连板天数
-    zhaban:        ['zhaban', 'bomb', 'zhb_count', 's11'],                           // 炸板家数
-    zhabanRate:    ['zhaban_rate', 'bomb_rate', 'zhb_rate', 's12'],                  // 炸板率
+    amount:        ['am', 'amount', 's_amount', 'total_amount', 's7', 's_amt'],           // 成交额（元）
+    predictVol:    ['am_pred', 'am_prednumber', 'predict_vol', 'predict_volume', 's_pv'], // 预测量能（元）
+    amountDiff:    ['am_diff', 'amount_diff'],                                             // 成交额环比差值（元）
+    limitUp:       ['u5', 'limit_up', 'zhangting', 'zt_count', 's1', 's4'],                // 涨停家数
+    limitDown:     ['d3', 'limit_down', 'dieting', 'dt_count', 's5'],                      // 跌停家数
+    onceLimit:     ['u6', 'once_limit', 'yiziban', 'yzb_count', 's9'],                     // 一字板家数
+    highestLb:     ['l17', 'highest_lb', 'max_lb', 'highest_limit', 's10'],                // 最高连板天数
+    zhaban:        ['u12', 'zhaban', 'bomb', 'zhb_count', 's11'],                          // 炸板家数
+    zhabanRate:    ['fp108', 'zhaban_rate', 'bomb_rate', 'zhb_rate', 's12'],               // 炸板率（%）
   },
 
   // 记忘看板配置
@@ -168,7 +169,7 @@ async function isTradingDay(env) {
 }
 
 // ══════════════════════════ NumCat 情绪周期接口（通用）══════════════════════════
-// 一次性拉取完整数据，供 s2/s6（记忘看板）、s3（封单家数）、情绪看板共用，节省额度。
+// 一次性拉取完整数据，供 s2/s6（记忘看板）、owfd_0925_count（封单家数）、情绪看板共用，节省额度。
 
 async function fetchNumCatEmotionFull(env) {
   const resp = await fetch(CONFIG.NUMCAT_URL, {
@@ -192,18 +193,7 @@ async function fetchNumCatEmotionFull(env) {
 
 async function numcatEmoindic(env) {
   const { fields, items } = await fetchNumCatEmotionFull(env);
-  let latest = items[items.length - 1];
-  const dateField = ['trade_date', 'trading_day', 'date', 'tradedate'].find(name => fields.indexOf(name) >= 0);
-  if (dateField) {
-    const idx = fields.indexOf(dateField);
-    const todayCompact = beijingTodayCompact();
-    const todayIso = beijingToday();
-    const match = items.find(it => {
-      const v = String(it[idx] || '').replace(/-/g, '');
-      return v === todayCompact || v === todayIso;
-    });
-    if (match) latest = match;
-  }
+  let latest = findTodayItem(fields, items);
   const sealIdx = fields.indexOf(CONFIG.SEAL_FIELD);
   if (sealIdx < 0) {
     throw new Error('NumCat 情绪周期接口缺少字段 "' + CONFIG.SEAL_FIELD + '"，可用字段: ' + fields.join(', '));
@@ -482,7 +472,7 @@ async function updateJiwangShouguJieguo(env, date, stats) {
 
 async function runEmotion(env, source, sharedFull) {
   const date = beijingToday();
-  const logBase = { run_date: date, time_point: 'close', source: source || 'cron', job: 'emotion' };
+  const logBase = { run_date: date, time_point: 't0926', source: source || 'cron', job: 'emotion' };
 
   if (!(await isTradingDay(env))) {
     await writeLog(env, Object.assign(logBase, { ok: false, detail: { skipped: '非交易日' } }));
@@ -500,9 +490,9 @@ async function runEmotion(env, source, sharedFull) {
   const fields = full.fields;
   const items = full.items;
 
-  // 取今日对应行
+  // 定位今日行与昨日行：情绪指标取昨日收盘数据，预测量能取今日实时快照
   let todayIdx = items.length - 1;
-  const dateField = ['trade_date', 'trading_day', 'date', 'tradedate'].find(name => fields.indexOf(name) >= 0);
+  const dateField = ['tradedate', 'trade_date', 'trading_day', 'date'].find(name => fields.indexOf(name) >= 0);
   if (dateField) {
     const idx = fields.indexOf(dateField);
     const todayCompact = beijingTodayCompact();
@@ -513,25 +503,31 @@ async function runEmotion(env, source, sharedFull) {
     });
     if (match >= 0) todayIdx = match;
   }
+  const yesterdayIdx = todayIdx > 0 ? todayIdx - 1 : todayIdx;
   const todayItem = items[todayIdx];
+  const yesterdayItem = items[yesterdayIdx];
 
-  // 提取指标
+  // 提取指标：predictVol 取今日，其余取昨日
   const metrics = {};
   const missingFields = [];
   for (const key of Object.keys(CONFIG.EMOTION_FIELDS)) {
-    const val = pickEmotionValue(fields, todayItem, CONFIG.EMOTION_FIELDS[key]);
+    const item = key === 'predictVol' ? todayItem : yesterdayItem;
+    const val = pickEmotionValue(fields, item, CONFIG.EMOTION_FIELDS[key]);
     metrics[key] = val;
     if (val === null) missingFields.push(key + '(' + CONFIG.EMOTION_FIELDS[key].join('/') + ')');
   }
 
-  // 计算昨日成交额环比差值（亿）：需要 amount 连续两天都有值
+  // 昨日成交额环比差值（亿）：优先用昨日行的 am_diff，否则用昨日-前日计算
   let amountDiff = null;
-  if (todayIdx > 0) {
-    const prevItem = items[todayIdx - 1];
-    const todayAmount = pickEmotionValue(fields, todayItem, CONFIG.EMOTION_FIELDS.amount);
+  const rawAmDiff = pickEmotionValue(fields, yesterdayItem, CONFIG.EMOTION_FIELDS.amountDiff);
+  if (rawAmDiff !== null) {
+    amountDiff = rawAmDiff / 1e8;
+  } else if (yesterdayIdx > 0) {
+    const prevItem = items[yesterdayIdx - 1];
+    const yestAmount = pickEmotionValue(fields, yesterdayItem, CONFIG.EMOTION_FIELDS.amount);
     const prevAmount = pickEmotionValue(fields, prevItem, CONFIG.EMOTION_FIELDS.amount);
-    if (todayAmount !== null && prevAmount !== null) {
-      amountDiff = (todayAmount - prevAmount) / 1e8; // 元 → 亿
+    if (yestAmount !== null && prevAmount !== null) {
+      amountDiff = (yestAmount - prevAmount) / 1e8;
     }
   }
   metrics.amountDiff = amountDiff !== null ? Number(amountDiff.toFixed(2)) : null;
@@ -542,7 +538,6 @@ async function runEmotion(env, source, sharedFull) {
     for (const key of Object.keys(CONFIG.EMOTION_FIELDS)) {
       row[key] = pickEmotionValue(fields, item, CONFIG.EMOTION_FIELDS[key]);
     }
-    // 日期
     if (dateField) {
       const dIdx = fields.indexOf(dateField);
       row._date = normalizeDate(item[dIdx]);
@@ -582,6 +577,8 @@ async function runEmotion(env, source, sharedFull) {
   await writeLog(env, Object.assign(logBase, {
     ok: !writeError,
     detail: {
+      todayIdx,
+      yesterdayIdx,
       metrics,
       amountDiff,
       missingFields,
@@ -712,6 +709,19 @@ async function runDuobanSecond(env, source) {
   return { ok, date, point: 't0926', written: duobanResult.value !== null ? [row] : [], row: duobanResult, writeError };
 }
 
+async function runDuobanAndEmotion(env, source) {
+  const [duobanResult, emotionResult] = await Promise.allSettled([
+    runDuobanSecond(env, source),
+    runEmotion(env, source)
+  ]);
+  return {
+    ok: (duobanResult.status === 'fulfilled' && duobanResult.value.ok) &&
+        (emotionResult.status === 'fulfilled' && emotionResult.value.ok),
+    duoban: duobanResult.status === 'fulfilled' ? duobanResult.value : { ok: false, error: duobanResult.reason?.message },
+    emotion: emotionResult.status === 'fulfilled' ? emotionResult.value : { ok: false, error: emotionResult.reason?.message }
+  };
+}
+
 async function runJiwang(env, source, sharedFull) {
   const date = beijingToday();
   const logBase = { run_date: date, time_point: 'close', source: source || 'cron', job: 'jiwang' };
@@ -736,7 +746,7 @@ async function runJiwang(env, source, sharedFull) {
 }
 
 async function runClose(env, source) {
-  // 记忘看板 + 情绪看板都依赖 NumCat 情绪周期接口，合并到一次调用以节省每日 10 次的额度。
+  // 记忘看板依赖 NumCat 情绪周期接口；情绪看板已改到 9:26 抓取，此处不再调用。
   let sharedFull = null;
   let sharedFullError = null;
   try {
@@ -745,27 +755,21 @@ async function runClose(env, source) {
     sharedFullError = e.message;
   }
 
-  // NumCat 接口失败时，记忘/情绪两项直接复用该错误，避免额外消耗调用额度。
+  // NumCat 接口失败时，记忘看板直接复用该错误，避免额外消耗调用额度。
   const jiwangPromise = sharedFull
     ? runJiwang(env, source, sharedFull)
     : Promise.resolve({ ok: false, error: 'NumCat 共享接口失败: ' + sharedFullError });
-  const emotionPromise = sharedFull
-    ? runEmotion(env, source, sharedFull)
-    : Promise.resolve({ ok: false, error: 'NumCat 共享接口失败: ' + sharedFullError });
 
-  const [jiwangResult, biddingResult, emotionResult] = await Promise.allSettled([
+  const [jiwangResult, biddingResult] = await Promise.allSettled([
     jiwangPromise,
-    runBidding(env, 'close', source),
-    emotionPromise
+    runBidding(env, 'close', source)
   ]);
 
   return {
     ok: (jiwangResult.status === 'fulfilled' && jiwangResult.value.ok) &&
-        (biddingResult.status === 'fulfilled' && biddingResult.value.ok) &&
-        (emotionResult.status === 'fulfilled' && emotionResult.value.ok),
+        (biddingResult.status === 'fulfilled' && biddingResult.value.ok),
     jiwang: jiwangResult.status === 'fulfilled' ? jiwangResult.value : { ok: false, error: jiwangResult.reason?.message },
     bidding: biddingResult.status === 'fulfilled' ? biddingResult.value : { ok: false, error: biddingResult.reason?.message },
-    emotion: emotionResult.status === 'fulfilled' ? emotionResult.value : { ok: false, error: emotionResult.reason?.message },
     sharedFullError
   };
 }
@@ -786,7 +790,7 @@ function autoPoint() {
 export default {
   async scheduled(event, env, ctx) {
     const point = CRON_TO_POINT[event.cron];
-    if (point === 't0926') ctx.waitUntil(runDuobanSecond(env, 'cron'));
+    if (point === 't0926') ctx.waitUntil(runDuobanAndEmotion(env, 'cron'));
     else if (point === 'close') ctx.waitUntil(runClose(env, 'cron'));
     else ctx.waitUntil(runBidding(env, point, 'cron'));
   },
@@ -811,7 +815,7 @@ export default {
         return new Response(JSON.stringify({ ok: false, error: 'point 必须是 t0915|t0920|t0925|t0926|close|jiwang|auto' }), { headers: { 'Content-Type': 'application/json' } });
       }
       let result;
-      if (point === 't0926') result = await runDuobanSecond(env, 'http');
+      if (point === 't0926') result = await runDuobanAndEmotion(env, 'http');
       else if (point === 'close') result = await runClose(env, 'http');
       else result = await runBidding(env, point, 'http');
       return new Response(JSON.stringify(result, null, 2), { headers: { 'Content-Type': 'application/json' } });
