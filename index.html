@@ -9552,6 +9552,8 @@
             for (let di = 0; di < dates.length; di++) {
                 var date = dates[di];
                 var rows = biddingData[date].filter(function(r) { return r && r.name; }).map(function(item) {
+                    // 迁移旧本地数据时清理：封单家数的收盘列不应有值
+                    sanitizeBiddingRow(item);
                     var row = {
                         date: date,
                         name: item.name,
@@ -27158,9 +27160,13 @@
                     }
                 });
                 rows.splice(oldIdx, 1);
+                // 迁移后清理：封单家数的收盘列不应有值
+                sanitizeBiddingRow(newRow);
             } else {
                 // 只有旧名：直接改名
                 oldRow.name = NEW_NAME;
+                // 改名后清理：封单家数的收盘列不应有值
+                sanitizeBiddingRow(oldRow);
             }
             return true;
         }
@@ -27182,6 +27188,9 @@
             if (migrated) {
                 _dbgLog('[BIDDING-TEMPLATE] ' + date + ' 已迁移旧行名 9点25分封单家数 -> 封单家数');
             }
+
+            // 安全网：清理现有行中可能残留的 封单家数 close 列脏数据
+            existing.forEach(function(r) { sanitizeBiddingRow(r); });
 
             // 同步修正 localStorage 中的默认模板（防止下次打开编辑表单时旧名又冒出来）
             const template = getDefaultBiddingTemplate();
