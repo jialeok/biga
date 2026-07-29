@@ -9252,6 +9252,16 @@
         }
 
         // ===== bidding_data 表操作（竞价变化看板独立表）=====
+
+        // 清理竞价变化行：封单家数只应出现在 9:25（time930）列，收盘列不应有值
+        function sanitizeBiddingRow(row) {
+            if (!row) return row;
+            if (row.name && row.name.trim() === '封单家数') {
+                row.close = '';
+            }
+            return row;
+        }
+
         // 从 bidding_data 表全量读取，返回 {date: [rows]}
         async function pullBiddingFromTable() {
             const sb = getSupabase();
@@ -9268,6 +9278,7 @@
                     if (!row || !row.date || !row.name) return;
                     // 兼容旧行名：'9点25分封单家数' -> '封单家数'
                     if (row.name.trim() === '9点25分封单家数') row.name = '封单家数';
+                    sanitizeBiddingRow(row);
                     if (!result[row.date]) result[row.date] = [];
                     var item = {
                         name: row.name,
@@ -9312,6 +9323,7 @@
             const rows = data.map(function(row) {
                 // 兼容旧行名：'9点25分封单家数' -> '封单家数'
                 if (row.name && row.name.trim() === '9点25分封单家数') row.name = '封单家数';
+                sanitizeBiddingRow(row);
                 var item = {
                     name: row.name,
                     time915: row.time915 || '',
@@ -9381,6 +9393,7 @@
                 if (biddingData.length === 0) return;
                 const now = new Date().toISOString();
                 const rows = biddingData.filter(function(r) { return r && r.name; }).map(function(item) {
+                    sanitizeBiddingRow(item);
                     var row = {
                         date: date,
                         name: item.name,
@@ -28515,6 +28528,7 @@
 
         // 竞价变化输入框实时更新
         function onBiddingInputChange(input) {
+            if (input) input.dataset.touched = 'true';
             updateAllChangeValues();
 
             // 检查是否是板块ETF的收盘值输入框
@@ -28791,7 +28805,14 @@
                     time920: time920Input ? time920Input.value.trim() : '',
                     time930: time930Input ? time930Input.value.trim() : '',
                     change:  changeInput  ? changeInput.value.trim()  : '',
-                    close:   closeInput   ? closeInput.value.trim()   : ''
+                    close:   closeInput   ? closeInput.value.trim()   : '',
+                    touched: {
+                        time915: time915Input && time915Input.dataset.touched === 'true',
+                        time920: time920Input && time920Input.dataset.touched === 'true',
+                        time930: time930Input && time930Input.dataset.touched === 'true',
+                        change:  changeInput  && changeInput.dataset.touched  === 'true',
+                        close:   closeInput   && closeInput.dataset.touched   === 'true'
+                    }
                 });
             }
 
@@ -28806,13 +28827,18 @@
                 if (!oldRow) {
                     oldRow = oldBiddingDataForMerge[i] || null;
                 }
-                if (!oldRow) return newRow;
+                if (!oldRow) {
+                    const { touched, ...rest } = newRow;
+                    return rest;
+                }
                 const merged = { ...newRow };
                 FIELDS_TO_MERGE.forEach(function(field) {
+                    if (merged.touched && merged.touched[field]) return;
                     if (merged[field] === '' && oldRow[field] !== undefined && oldRow[field] !== '') {
                         merged[field] = oldRow[field];
                     }
                 });
+                delete merged.touched;
                 return merged;
             });
 
@@ -28849,6 +28875,15 @@
                 const change = changeInput ? changeInput.value.trim() : '';
                 const close = closeInput ? closeInput.value.trim() : '';
 
+                // 记录用户是否编辑过该字段；编辑过的字段（即使清空）应被保留，不应被旧值合并覆盖
+                const touched = {
+                    time915: time915Input && time915Input.dataset.touched === 'true',
+                    time920: time920Input && time920Input.dataset.touched === 'true',
+                    time930: time930Input && time930Input.dataset.touched === 'true',
+                    change: changeInput && changeInput.dataset.touched === 'true',
+                    close: closeInput && closeInput.dataset.touched === 'true',
+                };
+
                 // 保留所有行（包括名称为空的行），否则历史数据会被当前模板覆盖
                 rawRows.push({
                     name,
@@ -28856,13 +28891,15 @@
                     time920,
                     time930,
                     change,
-                    close
+                    close,
+                    touched
                 });
             }
 
             // 合并式保存：本次表单中某字段为空，不代表用户想清空它，很可能只是这个时段
             // （比如9:20保存时，9:25/收盘列本来就还没到时间填）尚未填写。
             // 因此与旧数据逐字段合并——只有本次提交了非空值才覆盖旧值，本次为空则保留旧值。
+            // 例外：用户本次显式编辑过并清空的字段（input dataset.touched='true'）不再被旧值回填。
             // 行的匹配优先按 name（同名视为同一行），找不到旧行或 name 为空时按 index 兜底对齐。
             const oldBiddingDataForMerge = getTodayBidding() || [];
             const FIELDS_TO_MERGE = ['time915', 'time920', 'time930', 'change', 'close'];
@@ -28874,13 +28911,19 @@
                 if (!oldRow) {
                     oldRow = oldBiddingDataForMerge[i] || null;
                 }
-                if (!oldRow) return newRow;
+                if (!oldRow) {
+                    const { touched, ...rest } = newRow;
+                    return rest;
+                }
                 const merged = { ...newRow };
                 FIELDS_TO_MERGE.forEach(function(field) {
+                    // 用户编辑过该字段：即使清空也要生效，不再用旧值回填
+                    if (merged.touched && merged.touched[field]) return;
                     if (merged[field] === '' && oldRow[field] !== undefined && oldRow[field] !== '') {
                         merged[field] = oldRow[field];
                     }
                 });
+                delete merged.touched;
                 return merged;
             });
 
