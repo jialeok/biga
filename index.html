@@ -9239,6 +9239,8 @@
                 if (!data || data.length === 0) break;
                 data.forEach(function(row) {
                     if (!row || !row.date || !row.name) return;
+                    // 兼容旧行名：'9点25分封单家数' -> '封单家数'
+                    if (row.name.trim() === '9点25分封单家数') row.name = '封单家数';
                     if (!result[row.date]) result[row.date] = [];
                     var item = {
                         name: row.name,
@@ -9281,6 +9283,8 @@
             if (error) throw error;
             if (!data || data.length === 0) return;
             const rows = data.map(function(row) {
+                // 兼容旧行名：'9点25分封单家数' -> '封单家数'
+                if (row.name && row.name.trim() === '9点25分封单家数') row.name = '封单家数';
                 var item = {
                     name: row.name,
                     time915: row.time915 || '',
@@ -12049,7 +12053,7 @@
                         } catch (e) {}
                         const d = [
                             { name: '最近多板%' }, { name: '板块ETF(48)' }, { name: '昨日资金前十' },
-                            { name: '大盘ETF' }, { name: '大盘（%）' }, { name: '9点25分封单家数' }, { name: '账号溢价' }
+                            { name: '大盘ETF' }, { name: '大盘（%）' }, { name: '封单家数' }, { name: '账号溢价' }
                         ];
                         try { localStorage.setItem('biddingDefaultTemplate_v41', JSON.stringify(d)); } catch (e) {}
                         return d;
@@ -27072,7 +27076,7 @@
                 { name: '昨日资金前十' },
                 { name: '大盘ETF' },
                 { name: '大盘（%）' },
-                { name: '9点25分封单家数' },
+                { name: '封单家数' },
                 { name: '账号溢价' }
             ];
         }
@@ -27095,6 +27099,32 @@
             }));
         }
 
+        // 封单家数行名已统一为 '封单家数'，旧数据中的 '9点25分封单家数' 需要迁移。
+        // 返回是否发生过迁移。
+        function migrateSealRowName(rows) {
+            if (!Array.isArray(rows)) return false;
+            const OLD_NAME = '9点25分封单家数';
+            const NEW_NAME = '封单家数';
+            const oldIdx = rows.findIndex(function(r) { return ((r && r.name) || '').trim() === OLD_NAME; });
+            if (oldIdx < 0) return false;
+            const newIdx = rows.findIndex(function(r) { return ((r && r.name) || '').trim() === NEW_NAME; });
+            const oldRow = rows[oldIdx];
+            if (newIdx >= 0) {
+                // 新旧名同时存在：把旧行的非空字段合并到新行
+                const newRow = rows[newIdx];
+                ['time915', 'time920', 'time930', 'change', 'close'].forEach(function(field) {
+                    if ((oldRow[field] || '').toString().trim() !== '' && (newRow[field] || '').toString().trim() === '') {
+                        newRow[field] = oldRow[field];
+                    }
+                });
+                rows.splice(oldIdx, 1);
+            } else {
+                // 只有旧名：直接改名
+                oldRow.name = NEW_NAME;
+            }
+            return true;
+        }
+
         // 确保某日期包含所有默认模板行（如 账号溢价），避免手动/抓取后特殊行丢失
         function ensureBiddingTemplateRows(date) {
             if (!date) return;
@@ -27106,7 +27136,21 @@
                 _dbgLog('[BIDDING-TEMPLATE] ' + date + ' 无数据，已初始化默认模板行');
                 return;
             }
+
+            // 迁移旧行名：'9点25分封单家数' -> '封单家数'
+            const migrated = migrateSealRowName(existing);
+            if (migrated) {
+                _dbgLog('[BIDDING-TEMPLATE] ' + date + ' 已迁移旧行名 9点25分封单家数 -> 封单家数');
+            }
+
+            // 同步修正 localStorage 中的默认模板（防止下次打开编辑表单时旧名又冒出来）
             const template = getDefaultBiddingTemplate();
+            const tplDirty = migrateSealRowName(template);
+            if (tplDirty) {
+                saveDefaultBiddingTemplate(template);
+                _dbgLog('[BIDDING-TEMPLATE] 默认模板已迁移旧行名 9点25分封单家数 -> 封单家数');
+            }
+
             const existingNames = new Set(existing.map(r => ((r && r.name) || '').trim()));
             let added = 0;
             template.forEach(function(t) {
@@ -27123,7 +27167,7 @@
                     added++;
                 }
             });
-            if (added > 0) {
+            if (added > 0 || migrated || tplDirty) {
                 _dbgLog('[BIDDING-TEMPLATE] ' + date + ' 补回 ' + added + ' 个缺失模板行');
                 // 该日期已有云端数据但缺失模板行时，把补回的行同步到云端，
                 // 防止下次云端拉取又把它们“覆盖掉”。
@@ -27630,7 +27674,7 @@
                     rowFormat = 'percent'; // 带%的项目：数字加%
                 } else if (nameDisplay === '账号溢价') {
                     rowFormat = 'yuan'; // 账号溢价：数字加"元"
-                } else if (nameDisplay === '9点25分封单家数') {
+                } else if (nameDisplay === '封单家数' || nameDisplay === '9点25分封单家数') {
                     rowFormat = 'jia'; // 封单家数：数字加"家"
                 } else if (nameDisplay === '大盘ETF') {
                     rowFormat = 'percent'; // 大盘ETF是4只宽基的平均涨幅，带%显示（2026-07 修复：原先etf格式不带%）

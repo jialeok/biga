@@ -25,7 +25,7 @@ const CONFIG = {
   ROW_TOP10: '昨日资金前十',
   ROW_BIG_ETF: '大盘ETF',
   ROW_MAIN_INDEX: '大盘（%）',
-  ROW_SEAL: '9点25分封单家数',
+  ROW_SEAL: '封单家数',
 
   LADDER_INDEX: '883410.TI',
   TOP10_INDEX: '883901.TI',
