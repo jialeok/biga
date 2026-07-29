@@ -218,6 +218,29 @@ function pickEmotionValue(fields, item, candidates) {
   return null;
 }
 
+// 定位日期字段名
+function findDateField(fields) {
+  return ['tradedate', 'trade_date', 'trading_day', 'date'].find(name => fields.indexOf(name) >= 0);
+}
+
+// 把接口返回的 items 按日期升序排列（NumCat 可能降序返回，统一处理）
+function sortItemsByDate(fields, items) {
+  const dateField = findDateField(fields);
+  if (!dateField) return items.slice();
+  const idx = fields.indexOf(dateField);
+  return items.slice().sort(function (a, b) {
+    const da = String(a[idx] || '').replace(/-/g, '');
+    const db = String(b[idx] || '').replace(/-/g, '');
+    return Number(da) - Number(db);
+  });
+}
+
+// 取接口返回中最晚日期那一行的索引（已升序排列后即为最后一行）
+function findLatestItemIndex(fields, items) {
+  const sorted = sortItemsByDate(fields, items);
+  return { sorted, index: sorted.length - 1 };
+}
+
 // ══════════════════════════ 竞价变化计算 ══════════════════════════
 
 async function getConstituentThscodes(env, indexThscode) {
@@ -400,16 +423,8 @@ async function writeLog(env, entry) {
 // ══════════════════════════ 记忘看板逻辑 ══════════════════════════
 
 function findTodayItem(fields, items) {
-  const dateField = ['trade_date', 'trading_day', 'date', 'tradedate'].find(name => fields.indexOf(name) >= 0);
-  if (!dateField) return items[items.length - 1];
-  const idx = fields.indexOf(dateField);
-  const todayIso = beijingToday();
-  const todayCompact = beijingTodayCompact();
-  const match = items.find(it => {
-    const v = String(it[idx] || '').replace(/-/g, '');
-    return v === todayIso || v === todayCompact;
-  });
-  return match || items[items.length - 1];
+  const sorted = sortItemsByDate(fields, items);
+  return sorted[sorted.length - 1];
 }
 
 function buildJiwangStats(fields, items) {
@@ -493,21 +508,14 @@ async function runEmotion(env, source, sharedFull) {
   }
 
   const fields = full.fields;
-  const items = full.items;
+  const dateField = findDateField(fields);
+
+  // 接口返回可能按日期降序，先统一升序排列
+  const items = sortItemsByDate(fields, full.items);
 
   // 定位今日行与昨日行：情绪指标取昨日收盘数据，预测量能取今日实时快照
-  let todayIdx = items.length - 1;
-  const dateField = ['tradedate', 'trade_date', 'trading_day', 'date'].find(name => fields.indexOf(name) >= 0);
-  if (dateField) {
-    const idx = fields.indexOf(dateField);
-    const todayCompact = beijingTodayCompact();
-    const todayIso = beijingToday();
-    const match = items.findIndex(it => {
-      const v = String(it[idx] || '').replace(/-/g, '');
-      return v === todayCompact || v === todayIso;
-    });
-    if (match >= 0) todayIdx = match;
-  }
+  // 以接口返回的最晚日期作为「今日」行（若市场未开盘，则可能是昨日收盘价快照）
+  const todayIdx = items.length - 1;
   const yesterdayIdx = todayIdx > 0 ? todayIdx - 1 : todayIdx;
   const todayItem = items[todayIdx];
   const yesterdayItem = items[yesterdayIdx];
@@ -537,8 +545,8 @@ async function runEmotion(env, source, sharedFull) {
   }
   metrics.amountDiff = amountDiff !== null ? Number(amountDiff.toFixed(2)) : null;
 
-  // 组装五日数据（取最近5条，按日期升序）
-  const fiveDays = items.slice(Math.max(0, items.length - 5)).map(function (item) {
+  // 组装五日数据：以昨日为终点，向前取最多 5 个交易日（不包含今日）
+  const fiveDays = items.slice(Math.max(0, yesterdayIdx - 4), yesterdayIdx + 1).map(function (item) {
     const row = {};
     for (const key of Object.keys(CONFIG.EMOTION_FIELDS)) {
       row[key] = pickEmotionValue(fields, item, CONFIG.EMOTION_FIELDS[key]);
@@ -550,9 +558,6 @@ async function runEmotion(env, source, sharedFull) {
       row._date = '';
     }
     return row;
-  }).sort(function (a, b) {
-    if (!a._date || !b._date) return 0;
-    return a._date.replace(/-/g, '') - b._date.replace(/-/g, '');
   });
 
   // 写入 emotion_data 表
@@ -603,6 +608,8 @@ async function runEmotion(env, source, sharedFull) {
     amountDiff,
     missingFields,
     availableFields: fields,
+    todayDate: todayItem && dateField ? normalizeDate(todayItem[fields.indexOf(dateField)]) : '',
+    yesterdayDate: yesterdayItem && dateField ? normalizeDate(yesterdayItem[fields.indexOf(dateField)]) : '',
     fiveDaysCount: fiveDays.length,
     fiveDaysPreview: fiveDays.map(function (d) { return { date: d._date, limitUp: d.limitUp }; }),
     writeError
@@ -623,21 +630,10 @@ async function refreshEmotionPredictVol(env, source) {
   }
 
   const fields = full.fields;
-  const items = full.items;
+  const items = sortItemsByDate(fields, full.items);
 
-  // 定位今日行
-  let todayIdx = items.length - 1;
-  const dateField = ['tradedate', 'trade_date', 'trading_day', 'date'].find(name => fields.indexOf(name) >= 0);
-  if (dateField) {
-    const idx = fields.indexOf(dateField);
-    const todayCompact = beijingTodayCompact();
-    const todayIso = beijingToday();
-    const match = items.findIndex(it => {
-      const v = String(it[idx] || '').replace(/-/g, '');
-      return v === todayCompact || v === todayIso;
-    });
-    if (match >= 0) todayIdx = match;
-  }
+  // 定位今日行：以接口返回的最晚日期那一行为准
+  const todayIdx = items.length - 1;
 
   const predictVol = pickEmotionValue(fields, items[todayIdx], CONFIG.EMOTION_FIELDS.predictVol);
   if (predictVol === null) {
