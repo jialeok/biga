@@ -26,9 +26,35 @@ create table if not exists auction_watchlist (
   primary key (date, stock)
 );
 
+comment on table auction_watchlist is '早盘竞价主列表：只存当天正式展示的股票，无 in_watchlist 字段（表中每一行天然是正式成员）';
+
+-- 2. 市场指标/影子数据（早盘竞价 + 热门股票共用）
+-- 必须先创建 market_metrics，后续 hot_stocks 兼容迁移才能向其中插入影子记录
+create table if not exists market_metrics (
+  date text not null,
+  stock text not null,
+  code text,
+  volume text,
+  yest_volume text,
+  change_pct text,
+  time930 text,
+  seal_count text,
+  scope text not null default 'auction',  -- 'auction' | 'hot'，区分属于哪个 tab
+  source text default 'manual',           -- ths_api | manual_fill | computed | worker
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  updated_by text,
+  primary key (date, stock, scope)
+);
+
+comment on table market_metrics is '市场指标/影子数据：早盘竞价和热门股票共用，按 scope 区分来源，不进入任何主列表';
+
+-- 3. 辅助索引：按 scope+date 快速查询某天的全部指标
+create index if not exists idx_market_metrics_scope_date on market_metrics(scope, date);
+
 -- 1.5 热门股票主列表（正式列表成员，无 in_watchlist 列，每行天然是正式成员）
 -- 先迁移旧 hot_stocks 表中可能存在的 in_watchlist=false 影子记录到 market_metrics(scope='hot')
--- （兼容旧表结构，幂等执行）
+-- （兼容旧表结构，幂等执行；market_metrics 已创建，不会报 relation does not exist）
 do $$
 begin
   if exists (
@@ -70,31 +96,7 @@ create table if not exists hot_stocks (
   primary key (date, stock)
 );
 
-comment on table auction_watchlist is '早盘竞价主列表：只存当天正式展示的股票，无 in_watchlist 字段（表中每一行天然是正式成员）';
 comment on table hot_stocks is '热门股票主列表：只存当天正式展示的股票，无 in_watchlist 字段（表中每一行天然是正式成员）';
-
--- 2. 市场指标/影子数据（早盘竞价 + 热门股票共用）
-create table if not exists market_metrics (
-  date text not null,
-  stock text not null,
-  code text,
-  volume text,
-  yest_volume text,
-  change_pct text,
-  time930 text,
-  seal_count text,
-  scope text not null default 'auction',  -- 'auction' | 'hot'，区分属于哪个 tab
-  source text default 'manual',           -- ths_api | manual_fill | computed | worker
-  created_at timestamptz default now(),
-  updated_at timestamptz default now(),
-  updated_by text,
-  primary key (date, stock, scope)
-);
-
-comment on table market_metrics is '市场指标/影子数据：早盘竞价和热门股票共用，按 scope 区分来源，不进入任何主列表';
-
--- 3. 辅助索引：按 scope+date 快速查询某天的全部指标
-create index if not exists idx_market_metrics_scope_date on market_metrics(scope, date);
 
 -- 4. 行级安全（RLS）：与现有 bidding_data/auction_data 保持一致，anon 全开放
 alter table auction_watchlist enable row level security;
