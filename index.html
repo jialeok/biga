@@ -7664,7 +7664,7 @@
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #f97316, #ea580c);" onclick="clearAllAuctionText()">清除文字</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #6b7280, #4b5563);" onclick="clearAllAuctionNotes()">清除注释</button>
                 <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #7f1d1d, #991b1b);" onclick="clearAllAuctionRows()">清空所有行</button>
-                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #0d9488, #0f766e);" onclick="repairAuctionInWatchlistForDate()">🔧 恢复本日数据（不改数值，仅修复 in_watchlist 缺失的记录，不碰影子记录）</button>
+                <button type="button" class="submit-btn" style="margin-top: 8px; background: linear-gradient(135deg, #0d9488, #0f766e);" onclick="repairAuctionInWatchlistForDate()">🔧 恢复本日数据（不改数值，仅修复云端 watchlist 中但本地显示异常的行，不碰影子记录）</button>
             </form>
         </div>
     </div>
@@ -8688,7 +8688,7 @@
         let _sessionToken = null;
         let _realtimeChannel = null;
         let _justPushed = false; // 刚推送完，忽略自己触发的 Realtime 通知
-        let _justPushedAuction = false; // 刚推送 auction_data，忽略自己触发的 Realtime 通知
+        let _justPushedAuction = false; // 刚推送 auction_watchlist / market_metrics，忽略自己触发的 Realtime 通知
         let _auctionRealtimeChannel = null;
         // ── 阶段二 D 新增：批量并发屏蔽窗口计数器 ─────────────────────────────
         // 旧实现里每个 push 函数各自 _justPushedAuction = true / setTimeout(false, 2000)，
@@ -8796,6 +8796,7 @@
         let _cloudTopicsCache = null; // 从 stock_topics 表加载的题材缓存 {stock: Set(topics)}
         let _biddingTableAvailable = false; // bidding_data 表是否可用
         let _biddingRealtimeChannel = null; // bidding_data 表的 Realtime 订阅
+        let _marketMetricsRealtimeChannel = null; // market_metrics 表的 Realtime 订阅
         let _justPushedBidding = false; // 刚推送 bidding_data，忽略自己触发的 Realtime 通知
         let _justPushedHighlights = false; // 刚推送 daily_highlights，忽略自己触发的 Realtime 通知（防自循环）
         let _justPushedHotHighlights = false; // 刚推送 hot_stocks_highlights，忽略自己触发的 Realtime 通知（防自循环）
@@ -8827,8 +8828,9 @@
         let _hotAuctionData = auctionStore ? auctionStore.hotAuctionData : {}; // Vue 化：持有 store 响应式代理；热门股票本地缓存 {date: [items]}，结构与 getAuctionData() 返回一致
         let _hotAuctionTableAvailable = false; // 运行时标记：hot_stocks 表是否可用
         let _hotAuctionRealtimeChannel = null; // hot_stocks 表的 Realtime 订阅
-        let _hotTrendsRealtimeChannel = null; // hot_stock_trends 表的 Realtime 订阅（原缺失声明，导致 stopHotTrendsRealtime 首次调用时 ReferenceError，打断 checkPassword() 后续流程）
-        let _hotTrendsTableAvailable = false; // 运行时标记：hot_stock_trends 表是否可用（原同样缺失声明，导致 clearAllHotRows/pushHotTrendsToCloud 等函数在表未就绪前读取时 ReferenceError 而中途崩溃）
+        let _hotTrendsRealtimeChannel = null; // hot_stock_trends 表的 Realtime 订阅（兼容旧表）
+        let _marketMetricsHotRealtimeChannel = null; // market_metrics(scope='hot') 表的 Realtime 订阅
+        let _hotTrendsTableAvailable = false; // 运行时标记：hot_stock_trends 表是否可用
         let _hotTrendsCache = {}; // hot_stock_trends 表本地缓存 {date: [items]}（原缺失声明）
         let _hotTrendsReloadTimer = null; // hot_stock_trends Realtime 收到变更后的防抖重载定时器（原缺失声明）
         let _justPushedHotTrends = false; // 标记刚推送过 hot_stock_trends，忽略自己触发的 Realtime 通知（原缺失声明，loadHotTrendsFromCloud 第一行就读取它，若在赋值前被调用会 ReferenceError）
@@ -8871,7 +8873,7 @@
         // 启动 Realtime 订阅：同时监听互踢 (session行) 和数据变更 (owner行)
         function startSessionPoll() {
             stopSessionPoll();
-            startAuctionRealtime(); // 同时启动 auction_data 表的 Realtime 订阅
+            startAuctionRealtime(); // 同时启动 auction_watchlist / market_metrics 表的 Realtime 订阅
             startStockTopicsRealtime(); // 同时启动 stock_topics 表的 Realtime 订阅（题材库）
             startBiddingRealtime(); // 同时启动 bidding_data 表的 Realtime 订阅（竞价变化看板）
             startJiwangRealtime(); // 同时启动 jiwang_data 表的 Realtime 订阅（记忘看板）
@@ -8936,10 +8938,10 @@
             stopHotTrendsRealtime();
         }
 
-        // ===== 早盘竞价tap：两张表（auction_data / daily_highlights）的
+        // ===== 早盘竞价tap：两张表（auction_watchlist / market_metrics / daily_highlights）的
         // Realtime 订阅共用同一个"统一防抖池"。
         // 背景：与 hot 分组同理（见下方 hot 分组的 _scheduleHotRealtimeReload 注释）——
-        // 抓取程序一次同步操作常常同时触发 auction_data 和 daily_highlights 两张表的变化，
+        // 抓取程序一次同步操作常常同时触发 auction_watchlist、market_metrics 和 daily_highlights 三张表的变化，
         // 若各自独立 800ms 防抖、各自独立调用 renderAuction()，会导致极短时间内（100~200ms）
         // 早盘竞价列表的 DOM 被连续整体重建 2 次。用户点击"序号"展开趋势图的瞬间，若恰好
         // 撞上这类连锁重渲染，点击目标节点可能已被替换或状态被下一轮渲染的自动展开覆盖，
@@ -8989,9 +8991,9 @@
             try {
                 const sb = getSupabase();
                 _auctionRealtimeChannel = sb
-                    .channel('auction_data_changes')
+                    .channel('auction_watchlist_changes')
                     .on('postgres_changes', {
-                        event: '*', schema: 'public', table: 'auction_data'
+                        event: '*', schema: 'public', table: 'auction_watchlist'
                     }, function(payload) {
                         if (_justPushedAuction) return; // 自己刚推的，忽略
                         const row = payload.new || payload.old;
@@ -8999,7 +9001,19 @@
                         _debounceAuctionRealtime(row.date);
                     })
                     .subscribe();
-                console.log('Auction Realtime 订阅已启动');
+                _marketMetricsRealtimeChannel = sb
+                    .channel('market_metrics_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'market_metrics'
+                    }, function(payload) {
+                        if (_justPushedAuction) return; // 自己刚推的，忽略
+                        const row = payload.new || payload.old;
+                        // 只处理 scope='auction' 的变更，避免 hot 分组趋势互相触发
+                        if (!row || !row.date || row.scope !== 'auction') return;
+                        _debounceAuctionRealtime(row.date);
+                    })
+                    .subscribe();
+                console.log('Auction Realtime 订阅已启动（auction_watchlist + market_metrics）');
             } catch (e) {
                 _dbgLog('[AUCTION-ERR] startAuctionRealtime 订阅失败 ' + (e && e.message || e));
             }
@@ -9009,6 +9023,10 @@
             if (_auctionRealtimeChannel) {
                 try { getSupabase().removeChannel(_auctionRealtimeChannel); } catch(e) {}
                 _auctionRealtimeChannel = null;
+            }
+            if (_marketMetricsRealtimeChannel) {
+                try { getSupabase().removeChannel(_marketMetricsRealtimeChannel); } catch(e) {}
+                _marketMetricsRealtimeChannel = null;
             }
         }
 
@@ -9025,51 +9043,97 @@
         function unlockAuctionDateForImport(date) { if (date) window._auctionImportLockedDates.delete(date); }
 
         // 拉取某日期的行情数据并合并到本地（只更新行情列，保留本地状态标记）
+        // 拆表后：同时读取 auction_watchlist 与 market_metrics(scope='auction')，合并后整段替换 _auctionMemCache[date]。
         async function pullAuctionMarketDataForDate(date, opts) {
-            if (!_auctionTableAvailable) return;
+            if (!_auctionTableAvailable && !_marketMetricsTableAvailable) return;
             if (window._auctionImportLockedDates && window._auctionImportLockedDates.has(date)) {
                 _dbgLog && _dbgLog('[AUCTION-PULL] ' + date + ' 正在导入中（锁定），跳过本次 Realtime 回拉，避免冲掉刚写入的数据');
                 return;
             }
             const sb = getSupabase();
-            const { data, error } = await sb.from('auction_data')
-                .select('stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed,updated_at,updated_by,obs_auto_added')
-                .eq('date', date);
-            if (error) throw error;
+            const cloudByStock = {};
+
+            // 1) 读取 auction_watchlist（正式列表成员）
+            try {
+                const { data, error } = await sb.from('auction_watchlist')
+                    .select('stock,code,volume,yest_volume,note,change_pct,topics,source,obs_auto_added,selected,bought,sold,fixed,updated_at,updated_by')
+                    .eq('date', date);
+                if (error) throw error;
+                (data || []).forEach(function(row) {
+                    const key = (row.stock || '').trim();
+                    if (!key) return;
+                    cloudByStock[key] = {
+                        stock: row.stock,
+                        code: row.code || '',
+                        volume: row.volume || '',
+                        yest_volume: row.yest_volume || '',
+                        yestVolume: row.yest_volume || '', // camelCase 别名，供渲染代码兼容
+                        note: row.note || '',
+                        change_pct: row.change_pct || '',
+                        changePct: row.change_pct || '', // camelCase 别名，供渲染代码兼容
+                        topics: row.topics || '',
+                        source: row.source || 'manual',
+                        obs_auto_added: row.obs_auto_added || false,
+                        obsAutoAdded: row.obs_auto_added || false,
+                        selected: row.selected || false,
+                        bought: row.bought || false,
+                        sold: row.sold || false,
+                        fixed: row.fixed || false,
+                        in_watchlist: true
+                    };
+                });
+                _auctionTableAvailable = true;
+            } catch (e) {
+                _auctionTableAvailable = false;
+            }
+
+            // 2) 读取 market_metrics(scope='auction')（影子记录/指标数据）
+            try {
+                const { data, error } = await sb.from('market_metrics')
+                    .select('stock,code,volume,yest_volume,change_pct,time930,seal_count,source')
+                    .eq('date', date)
+                    .eq('scope', 'auction');
+                if (error) throw error;
+                (data || []).forEach(function(row) {
+                    const key = (row.stock || '').trim();
+                    if (!key) return;
+                    if (cloudByStock[key]) {
+                        // 该股票同时在 watchlist 里：只补充 metrics 特有字段
+                        if (row.time930 !== undefined && row.time930 !== null && row.time930 !== '') cloudByStock[key].time930 = row.time930;
+                        if (row.seal_count !== undefined && row.seal_count !== null && row.seal_count !== '') cloudByStock[key].seal_count = row.seal_count;
+                        return;
+                    }
+                    cloudByStock[key] = {
+                        stock: row.stock,
+                        code: row.code || '',
+                        volume: row.volume || '',
+                        yest_volume: row.yest_volume || '',
+                        yestVolume: row.yest_volume || '', // camelCase 别名
+                        change_pct: row.change_pct || '',
+                        changePct: row.change_pct || '', // camelCase 别名
+                        time930: row.time930 || '',
+                        seal_count: row.seal_count || '',
+                        source: row.source || 'manual',
+                        in_watchlist: false
+                    };
+                });
+                _marketMetricsTableAvailable = true;
+            } catch (e) {
+                _marketMetricsTableAvailable = false;
+            }
+
+            if (Object.keys(cloudByStock).length === 0) return;
 
             // 全量快照缓存：包含该日期所有行（in_watchlist true/false），供历史行情查询
-            // 阶段四 Bug 6 修复：删除旧的字段级合并逻辑（原本服务于已脱节的 allData.auction），
-            // 改为整段替换 _auctionMemCache（对齐 bidding 模式 pullBiddingForDate）。
-            // 字段级保护已在 patchAuctionFieldBatch 的 upsert SET 子句层面根治（只写 patch 携带的列）。
+            // 阶段四 Bug 6 修复：改为整段替换 _auctionMemCache（对齐 bidding 模式 pullBiddingForDate）。
             // 同时为兼容现有渲染代码（读 camelCase 字段），每行同时携带 snake_case 和 camelCase 别名。
-            const cloudNames = new Set((data || []).map(function(r) { return (r.stock || '').trim(); }));
+            const cloudNames = new Set(Object.keys(cloudByStock));
             // 保留本地 obsAutoAdded=true 的观察组继承股票（云端没有的），追加到云端列表末尾
             const prePullList = _auctionMemCache[date] || [];
             const localObsStocks = prePullList.filter(function(s) {
                 return s && s.stock && s.obsAutoAdded && !cloudNames.has(s.stock.trim());
             });
-            const normalizedRows = (data || []).map(function(row) {
-                return {
-                    stock: row.stock,
-                    code: row.code || '',
-                    volume: row.volume || '',
-                    yest_volume: row.yest_volume || '',
-                    yestVolume: row.yest_volume || '', // camelCase 别名，供渲染代码兼容
-                    note: row.note || '',
-                    change_pct: row.change_pct || '',
-                    changePct: row.change_pct || '', // camelCase 别名，供渲染代码兼容
-                    topics: row.topics || '',
-                    in_watchlist: row.in_watchlist || false,
-                    selected: row.selected || false,
-                    bought: row.bought || false,
-                    sold: row.sold || false,
-                    fixed: row.fixed || false,
-                    // 修复：之前漏映射 obs_auto_added（与 pullAuctionFromTable 同一个坑），
-                    // 回拉后观察组继承行身份丢失，ensure 死循环修正、[PATCH]/[BOUGHT-ENSURE] 刷屏
-                    obs_auto_added: row.obs_auto_added || false,
-                    obsAutoAdded: row.obs_auto_added || false
-                };
-            }).concat(localObsStocks);
+            const normalizedRows = Object.values(cloudByStock).concat(localObsStocks);
             var _localFormal = (_auctionMemCache[date] || []).filter(function(s) { return s && s.in_watchlist === true; }).length;
             var _cloudN = (normalizedRows || []).length;
             if (opts && opts.realtime && _localFormal > 0 && _cloudN < _localFormal) {
@@ -9483,29 +9547,58 @@
             if (error) throw error;
         }
 
-        // 删除 auction_data 表中某天的全部数据（阶段四 Bug 3 修复：与 bidding 对齐，
-        // "清空当日数据"原本只 delete allData.auction[currentDate]，云端行还在，
-        // 下次刷新/Realtime 会把数据"复活"）
+        // 删除 auction_watchlist 与 market_metrics(scope='auction') 中某天的全部数据
+        // （阶段四 Bug 3 修复：与 bidding 对齐，"清空当日数据"原本只 delete allData.auction[currentDate]，
+        //  云端行还在，下次刷新/Realtime 会把数据"复活"）
         async function deleteAuctionFromCloud(date) {
             if (!date) return;
-            if (!_auctionTableAvailable) return;
+            if (!_auctionTableAvailable && !_marketMetricsTableAvailable) return;
             _openAuctionShield();
             try {
                 const sb = getSupabase();
-                const beforeRes = await sb.from('auction_data')
-                    .select('stock', { count: 'exact', head: true })
-                    .eq('date', date);
-                const beforeCount = beforeRes.count || 0;
+                let beforeCount = 0;
+                if (_auctionTableAvailable) {
+                    const beforeRes = await sb.from('auction_watchlist')
+                        .select('stock', { count: 'exact', head: true })
+                        .eq('date', date);
+                    beforeCount += (beforeRes.count || 0);
+                }
+                if (_marketMetricsTableAvailable) {
+                    const beforeRes = await sb.from('market_metrics')
+                        .select('stock', { count: 'exact', head: true })
+                        .eq('date', date)
+                        .eq('scope', 'auction');
+                    beforeCount += (beforeRes.count || 0);
+                }
                 _dbgLog('[AUCTION-DELETE] 准备删除 ' + date + ' 的云端行，删除前 ' + beforeCount + ' 条');
 
-                const { error } = await sb.from('auction_data').delete().eq('date', date);
-                if (error) throw error;
+                if (_auctionTableAvailable) {
+                    const { error } = await sb.from('auction_watchlist').delete().eq('date', date);
+                    if (error) throw error;
+                }
+                if (_marketMetricsTableAvailable) {
+                    const { error } = await sb.from('market_metrics')
+                        .delete()
+                        .eq('date', date)
+                        .eq('scope', 'auction');
+                    if (error) throw error;
+                }
 
                 // 校验：必须真的删掉，防止列名引号/RLS 等导致 delete 返回成功却未命中
-                const afterRes = await sb.from('auction_data')
-                    .select('stock', { count: 'exact', head: true })
-                    .eq('date', date);
-                const afterCount = afterRes.count || 0;
+                let afterCount = 0;
+                if (_auctionTableAvailable) {
+                    const afterRes = await sb.from('auction_watchlist')
+                        .select('stock', { count: 'exact', head: true })
+                        .eq('date', date);
+                    afterCount += (afterRes.count || 0);
+                }
+                if (_marketMetricsTableAvailable) {
+                    const afterRes = await sb.from('market_metrics')
+                        .select('stock', { count: 'exact', head: true })
+                        .eq('date', date)
+                        .eq('scope', 'auction');
+                    afterCount += (afterRes.count || 0);
+                }
                 if (afterCount > 0) {
                     throw new Error('delete 执行后仍有 ' + afterCount + ' 条记录残留（删除前 ' + beforeCount + ' 条）');
                 }
@@ -10009,26 +10102,35 @@
             // 后台加载热门股票数据与高光缓存（Tab 切换前预拉取，避免切换瞬间等待）
             pullHotStocksHighlights().catch(function(e) { console.warn('hot_stocks_highlights 加载失败:', e.message); });
             loadHotStocksFromCloud().then(function() { if (typeof renderHotStocks === 'function') renderHotStocks(); }).catch(function(e) { console.warn('hot_stocks 加载失败:', e.message); });
-            // 后台加载热门股票趋势图独立表（hot_stock_trends：volume/yest_volume/change_pct）
-            // 先尝试一次性迁移（从 hot_stocks 表灌入历史数据），再加载新表
+            // 后台加载热门股票趋势图数据：先迁移旧表，再统一从 market_metrics(scope='hot') 加载
             migrateHotStocksToTrendsTable().then(function() {
+                return migrateHotTrendsToMarketMetrics();
+            }).then(function() {
                 return loadHotTrendsFromCloud();
-            }).then(function() { if (typeof renderHotStocks === 'function') renderHotStocks(); }).catch(function(e) { console.warn('hot_stock_trends 加载失败:', e.message); });
+            }).then(function() { if (typeof renderHotStocks === 'function') renderHotStocks(); }).catch(function(e) { console.warn('hot trends 加载失败:', e.message); });
 
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
         }
 
         // ============================================================
-        // auction_data 独立表操作（拆表后新增）
-        // 列归属：主程序拥有 date/stock/selected/bought/sold/fixed；
-        //         抓取程序拥有 code/volume/yest_volume/note
+        // 早盘竞价拆表操作：auction_watchlist + market_metrics(scope='auction')
+        // 列归属：
+        //   auction_watchlist：date/stock/code/volume/yest_volume/note/change_pct/topics
+        //                      source/obs_auto_added/selected/bought/sold/fixed
+        //   market_metrics：date/stock/code/volume/yest_volume/change_pct/time930/seal_count/scope/source
         // ============================================================
-        let _auctionTableAvailable = false; // 运行时标记：auction_data 表是否可用
+        let _auctionTableAvailable = false; // 运行时标记：auction_watchlist 表是否可用
+        let _marketMetricsTableAvailable = false; // 运行时标记：market_metrics 表是否可用
         let _lastPushedAuctionStatus = '';  // 上次推送的 auction 状态签名（避免无变化时重复推送）
 
-        // 从 auction_data 表全量读取，组装成 {date: [{stock,code,volume,yestVolume,note,changePct,topics,selected,bought,sold,fixed}]} 结构
-        // 阶段三 E：原 _auctionFullRowCache 已退场，全量快照改由 _auctionMemCache 担任（含 in_watchlist=false 影子记录，供趋势图历史查询）
+        // 从 auction_watchlist 与 market_metrics(scope='auction') 全量读取并合并，
+        // 组装成 {date: [in_watchlist=true rows]} 结构返回，同时把全量快照写入 _auctionMemCache。
+        // 合并规则：
+        //   - auction_watchlist 的行 → in_watchlist=true
+        //   - market_metrics(scope='auction') 的行 → in_watchlist=false（影子记录）
+        //   - 公共字段以对应来源为准；watchlist 行额外带 source/obs_auto_added/selected/bought/sold/fixed；
+        //     metrics 行额外带 time930/seal_count。
         async function pullAuctionFromTable() {
             const sb = getSupabase();
             const result = {};
@@ -10036,68 +10138,124 @@
             // allData.auction 与 _auctionMemCache 的引用关系（同 Bug 3 整体导入的坑）。
             // 阶段六 日期隔离修复：不再清空所有日期！改为按日期累积云端行，再通过 guard API 写入，
             // 避免单日期拉取/全表刷新清空其它日期的本地数据（日期隔离根因）。
-            // Accumulate cloud rows by date
             const cloudByDate = {};
             let offset = 0;
             const pageSize = 1000;
-            while (true) {
-                const { data, error } = await sb.from('auction_data')
-                    .select('date,stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed,updated_at,updated_by,obs_auto_added')
-                    .range(offset, offset + pageSize - 1);
-                if (error) throw error;
-                if (!data || data.length === 0) break;
-                data.forEach(function(row) {
-                    // 全量快照缓存：包含所有行（in_watchlist true/false），忠实反映云端真实数据，不做本地合并。
-                    // 同时携带 snake_case 和 camelCase 别名（与 pullAuctionMarketDataForDate 对齐）。
-                    if (!cloudByDate[row.date]) cloudByDate[row.date] = [];
-                    cloudByDate[row.date].push({
-                        stock: row.stock,
-                        code: row.code || '',
-                        volume: row.volume || '',
-                        yest_volume: row.yest_volume || '',
-                        yestVolume: row.yest_volume || '', // camelCase 别名，供渲染代码兼容
-                        note: row.note || '',
-                        change_pct: row.change_pct || '',
-                        changePct: row.change_pct || '', // camelCase 别名，供渲染代码兼容
-                        topics: row.topics || '',
-                        in_watchlist: row.in_watchlist || false,
-                        selected: row.selected || false,
-                        bought: row.bought || false,
-                        sold: row.sold || false,
-                        fixed: row.fixed || false,
-                        // 修复：之前漏映射 obs_auto_added，云端回拉后观察组继承行"身份丢失"，
-                        // 导致 ensureBoughtStocksForDate 每轮都判定字段错误反复修正（日志刷屏/空转推送）
-                        obs_auto_added: row.obs_auto_added || false,
-                        obsAutoAdded: row.obs_auto_added || false
-                    });
-                    // 返回值只含 in_watchlist=true 行，供调用方做 length 检查
-                    // （Bug 1+2 修好后渲染读 _auctionMemCache，不再依赖此返回值；
-                    // 旧路径的 oldLocalAuction 合并保护已失效——_auctionMemCache 即唯一本地存储，
-                    // 在函数开头被清空，没有"旧本地数据"可保留——故直接删除该合并逻辑）
-                    if (row.in_watchlist) {
-                        if (!result[row.date]) result[row.date] = [];
-                        result[row.date].push({
+
+            // 1) 读取 auction_watchlist（正式列表成员）
+            let watchlistError = null;
+            try {
+                while (true) {
+                    const { data, error } = await sb.from('auction_watchlist')
+                        .select('date,stock,code,volume,yest_volume,note,change_pct,topics,source,obs_auto_added,selected,bought,sold,fixed,updated_at,updated_by')
+                        .range(offset, offset + pageSize - 1);
+                    if (error) throw error;
+                    if (!data || data.length === 0) break;
+                    data.forEach(function(row) {
+                        if (!cloudByDate[row.date]) cloudByDate[row.date] = {};
+                        const key = (row.stock || '').trim();
+                        if (!key) return;
+                        cloudByDate[row.date][key] = {
                             stock: row.stock,
                             code: row.code || '',
                             volume: row.volume || '',
-                            yestVolume: row.yest_volume || '',
+                            yest_volume: row.yest_volume || '',
+                            yestVolume: row.yest_volume || '', // camelCase 别名，供渲染代码兼容
                             note: row.note || '',
-                            changePct: row.change_pct || '',
+                            change_pct: row.change_pct || '',
+                            changePct: row.change_pct || '', // camelCase 别名，供渲染代码兼容
                             topics: row.topics || '',
+                            source: row.source || 'manual',
+                            obs_auto_added: row.obs_auto_added || false,
+                            obsAutoAdded: row.obs_auto_added || false,
                             selected: row.selected || false,
                             bought: row.bought || false,
                             sold: row.sold || false,
-                            fixed: row.fixed || false
+                            fixed: row.fixed || false,
+                            in_watchlist: true
+                        };
+                    });
+                    if (data.length < pageSize) break;
+                    offset += pageSize;
+                }
+                _auctionTableAvailable = true;
+            } catch (e) {
+                watchlistError = e;
+                _auctionTableAvailable = false;
+            }
+
+            // 2) 读取 market_metrics(scope='auction')（影子记录/指标数据）
+            offset = 0;
+            let metricsError = null;
+            try {
+                while (true) {
+                    const { data, error } = await sb.from('market_metrics')
+                        .select('date,stock,code,volume,yest_volume,change_pct,time930,seal_count,source')
+                        .eq('scope', 'auction')
+                        .range(offset, offset + pageSize - 1);
+                    if (error) throw error;
+                    if (!data || data.length === 0) break;
+                    data.forEach(function(row) {
+                        if (!cloudByDate[row.date]) cloudByDate[row.date] = {};
+                        const key = (row.stock || '').trim();
+                        if (!key) return;
+                        const existing = cloudByDate[row.date][key];
+                        if (existing) {
+                            // 该股票同时在 watchlist 里：只补充 metrics 特有字段
+                            if (row.time930 !== undefined && row.time930 !== null && row.time930 !== '') existing.time930 = row.time930;
+                            if (row.seal_count !== undefined && row.seal_count !== null && row.seal_count !== '') existing.seal_count = row.seal_count;
+                            return;
+                        }
+                        cloudByDate[row.date][key] = {
+                            stock: row.stock,
+                            code: row.code || '',
+                            volume: row.volume || '',
+                            yest_volume: row.yest_volume || '',
+                            yestVolume: row.yest_volume || '', // camelCase 别名
+                            change_pct: row.change_pct || '',
+                            changePct: row.change_pct || '', // camelCase 别名
+                            time930: row.time930 || '',
+                            seal_count: row.seal_count || '',
+                            source: row.source || 'manual',
+                            in_watchlist: false
+                        };
+                    });
+                    if (data.length < pageSize) break;
+                    offset += pageSize;
+                }
+                _marketMetricsTableAvailable = true;
+            } catch (e) {
+                metricsError = e;
+                _marketMetricsTableAvailable = false;
+            }
+
+            if (watchlistError && metricsError) {
+                throw watchlistError;
+            }
+
+            // 通过 guard API 按日期写入，保留未在云端返回的本地日期（日期隔离）
+            Object.keys(cloudByDate).forEach(function(d) {
+                const rows = Object.values(cloudByDate[d]);
+                setAuctionDateData(d, rows, 'pullAuctionFromTable');
+                // 返回值只含 in_watchlist=true 行，供调用方做长度检查
+                rows.forEach(function(r) {
+                    if (r.in_watchlist) {
+                        if (!result[d]) result[d] = [];
+                        result[d].push({
+                            stock: r.stock,
+                            code: r.code || '',
+                            volume: r.volume || '',
+                            yestVolume: r.yest_volume || '',
+                            note: r.note || '',
+                            changePct: r.change_pct || '',
+                            topics: r.topics || '',
+                            selected: r.selected || false,
+                            bought: r.bought || false,
+                            sold: r.sold || false,
+                            fixed: r.fixed || false
                         });
                     }
                 });
-                if (data.length < pageSize) break;
-                offset += pageSize;
-            }
-            _auctionTableAvailable = true;
-            // 通过 guard API 按日期写入，保留未在云端返回的本地日期（日期隔离）
-            Object.keys(cloudByDate).forEach(function(d) {
-                setAuctionDateData(d, cloudByDate[d], 'pullAuctionFromTable');
             });
             _dbgLog('[AUCTION-WRITE] pullAuctionFromTable cloudDates=' + Object.keys(cloudByDate).length + ' preservedLocalDates=' + (Object.keys(_auctionMemCache).length - Object.keys(cloudByDate).length));
             return result;
@@ -10218,7 +10376,7 @@
                         if (_justPushedHighlights) return; // 自己刚推的，忽略（防自循环）
                         var row = payload.new || payload.old;
                         if (!row || !row.date) return;
-                        // 汇入与 auction_data 共用的统一防抖池，避免两张表几乎同时变更时
+                        // 汇入与 auction_watchlist + market_metrics 共用的统一防抖池，避免两张表几乎同时变更时
                         // 各自独立触发 renderAuction 导致短时间内连续两次整体重渲染（见上方注释）
                         _pendingAuctionReload.highlights = true;
                         _scheduleAuctionRealtimeReload();
@@ -10420,8 +10578,8 @@
         // 触发 hot_stocks 和 hot_stock_trends 两张表的变化，若各自独立 800ms 防抖、各自独立
         // 调用 renderHotStocks()，会导致极短时间内热门股票列表的 DOM 被连续整体重建 2~3 次。
         // 用户点击"序号"展开趋势图的瞬间，若恰好撞上这类连锁重渲染，点击的目标节点已被替换，
-        // 事件效果丢失，表现为"卡顿、有时点不出来"。而早盘竞价 tap 只有 auction_data 一张表、
-        // 一个订阅，不会有这个问题，所以体验更流畅。
+        // 事件效果丢失，表现为"卡顿、有时点不出来"。而早盘竞价 tap 也已拆成 auction_watchlist +
+        // market_metrics 两张表、统一一个防抖池，不会有这个问题，所以体验更流畅。
         // 统一后：不论哪张表先收到变化通知，都汇入同一个定时器，到点后按需重新拉取各自数据，
         // 最后只调用一次 renderHotStocks()。
         var _hotAuctionRealtimeTimer = null;
@@ -10523,36 +10681,73 @@
         // 与 hot_stocks 大表解耦，专供趋势图读取；接口按钮抓取数据时同步写入此表
         // ============================================================
 
-        // 从 hot_stock_trends 表全量读取，构建 _hotTrendsCache = {date: [items]}
+        // 从 market_metrics(scope='hot') 全量读取，构建 _hotTrendsCache = {date: [items]}
+        // 拆表后统一：热门股票趋势数据也落到 market_metrics，与早盘竞价影子数据共用同一张表。
         async function loadHotTrendsFromCloud() {
             if (_justPushedHotTrends) return;
             const sb = getSupabase();
             const result = {};
             let offset = 0;
             const pageSize = 1000;
-            while (true) {
-                const { data, error } = await sb.from('hot_stock_trends')
-                    .select('date,stock,code,volume,yest_volume,change_pct')
-                    .range(offset, offset + pageSize - 1);
-                if (error) throw error;
-                if (!data || data.length === 0) break;
-                data.forEach(function(row) {
-                    if (!row || !row.date || !row.stock) return;
-                    if (!result[row.date]) result[row.date] = [];
-                    result[row.date].push({
-                        stock: row.stock,
-                        code: row.code || '',
-                        volume: row.volume || '',
-                        yest_volume: row.yest_volume || '',
-                        change_pct: row.change_pct || ''
+
+            // 优先读取 market_metrics(scope='hot')
+            let usedMarketMetrics = false;
+            try {
+                while (true) {
+                    const { data, error } = await sb.from('market_metrics')
+                        .select('date,stock,code,volume,yest_volume,change_pct')
+                        .eq('scope', 'hot')
+                        .range(offset, offset + pageSize - 1);
+                    if (error) throw error;
+                    if (!data || data.length === 0) break;
+                    data.forEach(function(row) {
+                        if (!row || !row.date || !row.stock) return;
+                        if (!result[row.date]) result[row.date] = [];
+                        result[row.date].push({
+                            stock: row.stock,
+                            code: row.code || '',
+                            volume: row.volume || '',
+                            yest_volume: row.yest_volume || '',
+                            change_pct: row.change_pct || ''
+                        });
                     });
-                });
-                if (data.length < pageSize) break;
-                offset += pageSize;
+                    if (data.length < pageSize) break;
+                    offset += pageSize;
+                }
+                usedMarketMetrics = true;
+                _marketMetricsTableAvailable = true;
+            } catch (e) {
+                console.warn('[HOT-TRENDS] 从 market_metrics 读取失败，回退到 hot_stock_trends:', e.message);
             }
+
+            // 若 market_metrics 无数据或失败，回退读取旧 hot_stock_trends 表
+            if (!usedMarketMetrics || Object.keys(result).length === 0) {
+                offset = 0;
+                while (true) {
+                    const { data, error } = await sb.from('hot_stock_trends')
+                        .select('date,stock,code,volume,yest_volume,change_pct')
+                        .range(offset, offset + pageSize - 1);
+                    if (error) throw error;
+                    if (!data || data.length === 0) break;
+                    data.forEach(function(row) {
+                        if (!row || !row.date || !row.stock) return;
+                        if (!result[row.date]) result[row.date] = [];
+                        result[row.date].push({
+                            stock: row.stock,
+                            code: row.code || '',
+                            volume: row.volume || '',
+                            yest_volume: row.yest_volume || '',
+                            change_pct: row.change_pct || ''
+                        });
+                    });
+                    if (data.length < pageSize) break;
+                    offset += pageSize;
+                }
+            }
+
             _hotTrendsTableAvailable = true;
             _hotTrendsCache = result;
-            console.log('hot_stock_trends 加载完成:', Object.keys(result).length, '个日期');
+            console.log('hot trends 加载完成:', Object.keys(result).length + ' 个日期' + (usedMarketMetrics ? '（来源：market_metrics）' : '（来源：hot_stock_trends 回退）'));
         }
 
         // 批量 upsert 趋势数据到 hot_stock_trends 表（每批 500 行）
@@ -10615,30 +10810,64 @@
                 });
 
                 // 云端同步：表不可用时跳过
-                if (!_hotTrendsTableAvailable) return;
                 const sb = getSupabase();
                 const batchSize = 500;
-                for (let i = 0; i < rows.length; i += batchSize) {
-                    const { error } = await sb.from('hot_stock_trends')
-                        .upsert(rows.slice(i, i + batchSize), { onConflict: 'date,stock' });
-                    if (error) throw error;
+                if (_hotTrendsTableAvailable) {
+                    for (let i = 0; i < rows.length; i += batchSize) {
+                        const { error } = await sb.from('hot_stock_trends')
+                            .upsert(rows.slice(i, i + batchSize), { onConflict: 'date,stock' });
+                        if (error) throw error;
+                    }
+                }
+
+                // 同步到 market_metrics(scope='hot')：字段映射 date/stock/volume/yest_volume/change_pct
+                if (_marketMetricsTableAvailable) {
+                    const metricsRows = rows.map(function(row) {
+                        return {
+                            date: row.date,
+                            stock: row.stock,
+                            code: row.code || '',
+                            volume: row.volume || '',
+                            yest_volume: row.yest_volume || '',
+                            change_pct: row.change_pct || '',
+                            scope: 'hot',
+                            source: 'main',
+                            updated_at: now,
+                            updated_by: 'main'
+                        };
+                    });
+                    for (let i = 0; i < metricsRows.length; i += batchSize) {
+                        const { error } = await sb.from('market_metrics')
+                            .upsert(metricsRows.slice(i, i + batchSize), { onConflict: 'date,stock,scope' });
+                        if (error) throw error;
+                    }
                 }
             } finally {
                 setTimeout(function() { _justPushedHotTrends = false; }, 2000);
             }
         }
 
-        // 删除单行：从 hot_stock_trends 表删除 (date, stock)，同步移除本地缓存
+        // 删除单行：从 hot_stock_trends 与 market_metrics(scope='hot') 删除 (date, stock)
         async function deleteHotTrendFromCloud(date, stock) {
-            if (!_hotTrendsTableAvailable) return;
+            if (!_hotTrendsTableAvailable && !_marketMetricsTableAvailable) return;
             _justPushedHotTrends = true;
             try {
                 const sb = getSupabase();
-                const { error } = await sb.from('hot_stock_trends')
-                    .delete()
-                    .eq('date', date)
-                    .eq('stock', stock);
-                if (error) throw error;
+                if (_hotTrendsTableAvailable) {
+                    const { error } = await sb.from('hot_stock_trends')
+                        .delete()
+                        .eq('date', date)
+                        .eq('stock', stock);
+                    if (error) throw error;
+                }
+                if (_marketMetricsTableAvailable) {
+                    const { error } = await sb.from('market_metrics')
+                        .delete()
+                        .eq('date', date)
+                        .eq('stock', stock)
+                        .eq('scope', 'hot');
+                    if (error) throw error;
+                }
                 if (_hotTrendsCache[date]) {
                     _hotTrendsCache[date] = _hotTrendsCache[date].filter(function(r) {
                         return r && r.stock !== stock;
@@ -10649,23 +10878,33 @@
             }
         }
 
-        // 按日期清空：删除该 date 下所有行，清空本地缓存
+        // 按日期清空：从 hot_stock_trends 与 market_metrics(scope='hot') 删除该 date 下所有行
         async function deleteHotTrendsForDateFromCloud(date) {
-            if (!_hotTrendsTableAvailable) return;
+            if (!_hotTrendsTableAvailable && !_marketMetricsTableAvailable) return;
             _justPushedHotTrends = true;
             try {
                 const sb = getSupabase();
-                const { error } = await sb.from('hot_stock_trends')
-                    .delete()
-                    .eq('date', date);
-                if (error) throw error;
+                if (_hotTrendsTableAvailable) {
+                    const { error } = await sb.from('hot_stock_trends')
+                        .delete()
+                        .eq('date', date);
+                    if (error) throw error;
+                }
+                if (_marketMetricsTableAvailable) {
+                    const { error } = await sb.from('market_metrics')
+                        .delete()
+                        .eq('date', date)
+                        .eq('scope', 'hot');
+                    if (error) throw error;
+                }
                 _hotTrendsCache[date] = [];
             } finally {
                 setTimeout(function() { _justPushedHotTrends = false; }, 2000);
             }
         }
 
-        // hot_stock_trends 表 Realtime 订阅
+        // hot 趋势 Realtime 订阅：同时监听 market_metrics(scope='hot') 与旧 hot_stock_trends
+        // 拆表后统一写 market_metrics，但保留对旧表的监听以兼容未升级客户端。
         function startHotTrendsRealtime() {
             stopHotTrendsRealtime();
             try {
@@ -10678,14 +10917,25 @@
                         if (_justPushedHotTrends) return;
                         var row = payload.new || payload.old;
                         if (!row || !row.date) return;
-                        // 汇入统一防抖池，避免和 hot_stocks / hot_stocks_highlights 各自独立触发重渲染
                         _pendingHotReload.trends = true;
                         _scheduleHotRealtimeReload();
                     })
                     .subscribe();
-                console.log('hot_stock_trends Realtime 订阅已启动');
+                _marketMetricsHotRealtimeChannel = sb
+                    .channel('market_metrics_hot_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'market_metrics'
+                    }, function(payload) {
+                        if (_justPushedHotTrends) return;
+                        var row = payload.new || payload.old;
+                        if (!row || !row.date || row.scope !== 'hot') return;
+                        _pendingHotReload.trends = true;
+                        _scheduleHotRealtimeReload();
+                    })
+                    .subscribe();
+                console.log('hot trends Realtime 订阅已启动（hot_stock_trends + market_metrics scope=hot）');
             } catch (e) {
-                console.error('hot_stock_trends Realtime 订阅失败:', e);
+                console.error('hot trends Realtime 订阅失败:', e);
             }
         }
 
@@ -10693,6 +10943,10 @@
             if (_hotTrendsRealtimeChannel) {
                 try { getSupabase().removeChannel(_hotTrendsRealtimeChannel); } catch(e) {}
                 _hotTrendsRealtimeChannel = null;
+            }
+            if (_marketMetricsHotRealtimeChannel) {
+                try { getSupabase().removeChannel(_marketMetricsHotRealtimeChannel); } catch(e) {}
+                _marketMetricsHotRealtimeChannel = null;
             }
         }
 
@@ -10762,6 +11016,77 @@
             }
         }
 
+        // 一次性迁移：把 hot_stock_trends 表中已有的趋势数据灌入 market_metrics(scope='hot')
+        // 拆表后统一读 market_metrics，旧数据需要同步一份过去。
+        async function migrateHotTrendsToMarketMetrics() {
+            if (localStorage.getItem('_hot_trends_migrated_to_market_metrics') === '1') {
+                _marketMetricsTableAvailable = true;
+                return;
+            }
+            try {
+                const sb = getSupabase();
+                const allRows = [];
+                let offset = 0;
+                const pageSize = 1000;
+                while (true) {
+                    const { data, error } = await sb.from('hot_stock_trends')
+                        .select('date,stock,code,volume,yest_volume,change_pct')
+                        .range(offset, offset + pageSize - 1);
+                    if (error) {
+                        if (error.message && error.message.indexOf('relation') >= 0) {
+                            console.log('[迁移] 旧 hot_stock_trends 表不存在，无需迁移到 market_metrics');
+                            localStorage.setItem('_hot_trends_migrated_to_market_metrics', '1');
+                            _marketMetricsTableAvailable = true;
+                            return;
+                        }
+                        throw error;
+                    }
+                    if (!data || data.length === 0) break;
+                    allRows.push(...data);
+                    if (data.length < pageSize) break;
+                    offset += pageSize;
+                }
+                if (allRows.length === 0) {
+                    localStorage.setItem('_hot_trends_migrated_to_market_metrics', '1');
+                    _marketMetricsTableAvailable = true;
+                    console.log('[迁移] hot_stock_trends 无数据，market_metrics(scope=hot) 无需迁移');
+                    return;
+                }
+                const now = new Date().toISOString();
+                const batchSize = 500;
+                let migrated = 0;
+                for (let i = 0; i < allRows.length; i += batchSize) {
+                    const chunk = allRows.slice(i, i + batchSize).map(function(r) {
+                        return {
+                            date: r.date,
+                            stock: r.stock.trim(),
+                            code: r.code || '',
+                            volume: r.volume || '',
+                            yest_volume: r.yest_volume || '',
+                            change_pct: r.change_pct || '',
+                            scope: 'hot',
+                            source: 'main_migrate',
+                            updated_at: now,
+                            updated_by: 'main_migrate'
+                        };
+                    });
+                    const { error: upErr } = await sb.from('market_metrics')
+                        .upsert(chunk, { onConflict: 'date,stock,scope', ignoreDuplicates: true });
+                    if (upErr) {
+                        console.warn('[迁移] 批次写入 market_metrics 失败:', upErr.message);
+                        if (upErr.message && upErr.message.indexOf('relation') >= 0) return;
+                    } else {
+                        migrated += chunk.length;
+                    }
+                }
+                _marketMetricsTableAvailable = true;
+                localStorage.setItem('_hot_trends_migrated_to_market_metrics', '1');
+                console.log('[迁移] hot_stock_trends → market_metrics(scope=hot) 已迁移', migrated, '行');
+            } catch (e) {
+                console.warn('[迁移] hot_stock_trends → market_metrics 迁移失败:', e.message);
+            }
+        }
+
         // 切换分组（早盘竞价 / 热门股票）
         function switchGroup(g) {
             if (g !== 'auction' && g !== 'hot') return;
@@ -10826,14 +11151,15 @@
             renderAuction('hot');
         }
 
-        // 批量更新某日期所有股票的状态列（主程序拥有：selected/obs_auto_added/in_watchlist）
+        // 批量更新某日期所有股票的状态列（主程序拥有：selected/obs_auto_added）
         // 不触碰行情列（volume/yest_volume/note/code），避免覆盖抓取程序的数据
         // 方案 B：bought/sold/fixed 三列不再由本函数覆盖——标签唯一权威源是 stocksData
         // （股票列表页手动标签），行上残留的旧标签位已是废弃字段，覆写云端只会让
         // 陈旧值继续沉淀（"幽灵标签"）。云端这三列保持最后一次旧值自然退役。
+        // 拆表后：只写 auction_watchlist，该表没有 in_watchlist 列（每行天然是正式成员）。
         async function pushAuctionStatusForDate(date) {
             const sb = getSupabase();
-            // 阶段六 影子bug6：只推送正式成员的状态，避免给影子记录设置 in_watchlist=true（会提升为正式成员）
+            // 阶段六 影子bug6：只推送正式成员的状态
             const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock && s.in_watchlist === true; });
             if (auctionList.length === 0) return;
             const now = new Date().toISOString();
@@ -10842,11 +11168,10 @@
             for (let i = 0; i < auctionList.length; i += batchSize) {
                 const batch = auctionList.slice(i, i + batchSize);
                 await Promise.all(batch.map(function(item) {
-                    return sb.from('auction_data')
+                    return sb.from('auction_watchlist')
                         .update({
                             selected: item.selected || false,
                             obs_auto_added: !!item.obsAutoAdded, // 之前漏更新，云端该列一直是插入时的旧值
-                            in_watchlist: true,
                             updated_at: now,
                             updated_by: 'main'
                         })
@@ -10856,16 +11181,19 @@
             }
         }
 
-        // 脏日期全量同步（增删股票后调用）：移出云端多余股票（置 in_watchlist=false）、插入本地新增的、更新现有状态
-        // 阶段六 影子bug6：localList 必须只含 in_watchlist===true 的正式成员，否则影子记录会被当作
-        // 正式成员参与同步，导致云端把影子记录插入为 in_watchlist=true，回拉后混入第一页列表。
+        // 脏日期全量同步（增删股票后调用）：同步 auction_watchlist 与本地正式列表一致。
+        // 拆表后变化：
+        //   - 只操作 auction_watchlist；market_metrics 影子记录不在这里删。
+        //   - 云端有但本地无的股票：从 auction_watchlist 物理删除（不再置 in_watchlist=false）。
+        //   - auction_watchlist 没有 in_watchlist 列，所有行天然是正式成员。
+        // 阶段六 影子bug6：localList 必须只含 in_watchlist===true 的正式成员。
         async function syncAuctionListForDate(date) {
             const sb = getSupabase();
             const localList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock && s.in_watchlist === true; });
             const localStocks = new Set(localList.map(function(s) { return s.stock.trim(); }));
 
-            // 读取云端该日期已有股票
-            const { data: cloudRows, error: readErr } = await sb.from('auction_data')
+            // 读取云端 auction_watchlist 该日期已有股票
+            const { data: cloudRows, error: readErr } = await sb.from('auction_watchlist')
                 .select('stock').eq('date', date);
             if (readErr) throw readErr;
             const cloudStocks = new Set((cloudRows || []).map(function(r) { return (r.stock || '').trim(); }));
@@ -10873,27 +11201,23 @@
             const now = new Date().toISOString();
             const scMap = loadAllData().stockCodeMap || {};
 
-            // 1. 云端有但本地无的股票：置 in_watchlist=false（不再物理删除，保留全量快照）
+            // 1. 云端有但本地无的股票：从 auction_watchlist 物理删除
             const toRemove = [];
             cloudStocks.forEach(function(s) { if (!localStocks.has(s)) toRemove.push(s); });
 
             // === 安全护栏（2026-07-25 新增）===
             // 历史根因：本函数用"调用这一刻 _auctionMemCache[date] 里有什么"作为"用户真实
-            // 删除了什么"的判断依据。如果调用发生在本地内存缓存尚未加载完整/尚未就绪的时刻
-            // （异步竞态：页面刚打开、tab 切换、后台恢复等），localList 会被误判为"很小"或"空"，
-            // 导致云端该日期几乎全部正式记录被当成"本地已删除"，整批降级为影子记录并直接
-            // 覆盖推送云端——这是持久化写入，不会因为刷新/切页自动恢复。这正是 2026-07-23
-            // 当天 58 只股票全部被误判为 in_watchlist=false 的实际发生机制。
+            // 删除了什么"的判断依据。如果调用发生在本地内存缓存尚未加载完整/尚未就绪的时刻，
+            // localList 会被误判为"很小"或"空"，导致云端该日期几乎全部正式记录被当成"本地已删除"
+            // 而物理删除——这是持久化写入，不会因为刷新/切页自动恢复。
             // 护栏逻辑：只要本次拟移除的数量占云端已有总数的比例过高（>60%）且云端本来不是空的，
-            // 视为"本地快照可疑地不完整"，只记录诊断日志、跳过这次移除和推送，不做任何破坏性
-            // 改动——把"静默数据丢失"变成"当场拒绝执行+可追溯日志"，且完全不影响正常情况下
-            // （用户真的手动删除少数几只股票）的既有行为。
+            // 视为"本地快照可疑地不完整"，只记录诊断日志、跳过这次移除和推送，不做任何破坏性改动。
             const _cloudTotal = cloudStocks.size;
             const _removeRatio = _cloudTotal > 0 ? (toRemove.length / _cloudTotal) : 0;
             const _suspiciousWipe = _cloudTotal > 0 && _removeRatio > 0.6;
             if (_suspiciousWipe) {
                 _dbgLog('[SYNC-GUARD] ⛔ syncAuctionListForDate date=' + date +
-                    ' 疑似本地快照不完整，已跳过本次批量降级！云端共' + _cloudTotal +
+                    ' 疑似本地快照不完整，已跳过本次批量删除！云端共' + _cloudTotal +
                     '只，本地仅' + localStocks.size + '只，拟移除' + toRemove.length +
                     '只（比例' + Math.round(_removeRatio * 100) + '%）。' +
                     '本地样本：' + ([...localStocks].slice(0, 5).join('、') || '(空)') +
@@ -10901,12 +11225,11 @@
                 return;
             }
             if (toRemove.length > 0) {
-                _dbgLog('[SYNC-GUARD] syncAuctionListForDate date=' + date + ' 正常降级 ' +
+                _dbgLog('[SYNC-GUARD] syncAuctionListForDate date=' + date + ' 正常删除 ' +
                     toRemove.length + ' 只（云端' + _cloudTotal + '只 → 本地' + localStocks.size +
                     '只）：' + toRemove.join('、'));
-                // [ATOMIC-WRITE] 改单条循环为一次批量 IN 更新，降低竞态/部分失败导致日期内名单不一致的概率
-                const { error: rmErr } = await sb.from('auction_data')
-                    .update({ in_watchlist: false, updated_at: now, updated_by: 'main' })
+                const { error: rmErr } = await sb.from('auction_watchlist')
+                    .delete()
                     .eq('date', date)
                     .in('stock', toRemove);
                 if (rmErr) throw rmErr;
@@ -10918,103 +11241,93 @@
                 const newRows = newStocks.map(function(s) {
                     return {
                         date: date, stock: s.stock.trim(),
-                        code: scMap[s.stock.trim()] || '',
+                        code: scMap[s.stock.trim()] || s.code || '',
                         volume: s.volume || '', yest_volume: s.yestVolume || '', note: s.note || '',
                         change_pct: s.changePct || '', topics: s.topics || '',
-                        in_watchlist: true,
+                        source: s.source || 'manual',
                         selected: s.selected || false, bought: s.bought || false,
                         sold: s.sold || false, fixed: s.fixed || false,
                         obs_auto_added: !!s.obsAutoAdded,
                         updated_at: now, updated_by: 'main'
                     };
                 });
-                const { error: insErr } = await sb.from('auction_data')
+                const { error: insErr } = await sb.from('auction_watchlist')
                     .upsert(newRows, { onConflict: 'date,stock', ignoreDuplicates: true });
                 if (insErr) throw insErr;
             }
 
-            // 3. 更新现有股票的状态列（用单次 upsert 替代逐条 update，避免 N 次网络往返/部分成功）
+            // 3. 更新现有股票（用单次 upsert 替代逐条 update，避免 N 次网络往返/部分成功）
             const existingStocks = localList.filter(function(s) { return cloudStocks.has(s.stock.trim()); });
             if (existingStocks.length > 0) {
                 const statusRows = existingStocks.map(function(s) {
                     return {
                         date: date, stock: s.stock.trim(),
+                        code: scMap[s.stock.trim()] || s.code || '',
+                        volume: s.volume || '', yest_volume: s.yestVolume || '', note: s.note || '',
+                        change_pct: s.changePct || '', topics: s.topics || '',
+                        source: s.source || 'manual',
                         selected: s.selected || false, bought: s.bought || false,
                         sold: s.sold || false, fixed: s.fixed || false,
                         obs_auto_added: !!s.obsAutoAdded,
-                        in_watchlist: true,
                         updated_at: now, updated_by: 'main'
                     };
                 });
-                const { error: updErr } = await sb.from('auction_data')
+                const { error: updErr } = await sb.from('auction_watchlist')
                     .upsert(statusRows, { onConflict: 'date,stock' });
                 if (updErr) throw updErr;
             }
 
             _dbgLog('[SYNC-GUARD] syncAuctionListForDate date=' + date + ' 完成：云端' + _cloudTotal +
-                '只 → 本地' + localStocks.size + '只（降级' + toRemove.length + ' / 新增' + newStocks.length +
+                '只 → 本地' + localStocks.size + '只（删除' + toRemove.length + ' / 新增' + newStocks.length +
                 ' / 更新状态' + existingStocks.length + '）');
         }
 
         // ============================================================
-        // 一次性数据恢复工具（2026-07-25 新增，2026-07-29 阶段八加固）：
-        // 仅修复 in_watchlist 字段缺失（undefined/null）的正式列表行，显式 false 的
-        // 影子记录保持原样，避免"恢复"操作把历史日期的影子记录批量提升为正式成员。
-        // 只翻这一个状态位，绝不碰 volume/yestVolume/note/topics 等任何业务字段，
-        // 也不新增/删除任何股票行。
+        // 一次性数据恢复工具（2026-07-25 新增，2026-07-29 阶段八加固，拆表后改造）：
+        // auction_watchlist 表没有 in_watchlist 列，每行天然是正式成员。本函数读取该表，
+        // 修复本地 _auctionMemCache 中"云端在 watchlist 里、但本地 in_watchlist 不为 true"的
+        // 显示异常行。只翻这一个状态位，绝不碰 volume/yestVolume/note/topics 等任何业务字段，
+        // 也不新增/删除任何股票行；显式 false 的影子记录保持原样。
         // 用途：配合按钮"恢复本日数据"手动触发，日期固定为 currentDate（点击那一刻
-        // 页面正在看的那一天），恢复对象为该日期云端 auction_data 表里 in_watchlist
-        // 缺失的记录；若记录已明确是影子记录(false)，不会被修改。
+        // 页面正在看的那一天）。
         // ============================================================
         async function repairAuctionInWatchlistForDate(dateArg) {
             const date = dateArg || currentDate;
             if (!date) { alert('无法确定要恢复的日期'); return; }
-            if (!confirm('即将把 ' + date + ' 这一天 in_watchlist 字段缺失的股票重新标记为正式列表（不改数值、不碰影子记录），确认执行吗？')) return;
+            if (!confirm('即将把 ' + date + ' 这一天在云端 watchlist 中但本地显示异常的股票重新标记为正式列表（不改数值、不碰影子记录），确认执行吗？')) return;
 
             const sb = getSupabase();
             try {
                 _dbgLog('[REPAIR] repairAuctionInWatchlistForDate 开始 date=' + date);
-                const { data: cloudRows, error: readErr } = await sb.from('auction_data')
-                    .select('stock, in_watchlist').eq('date', date);
+                const { data: cloudRows, error: readErr } = await sb.from('auction_watchlist')
+                    .select('stock, selected, bought, sold, fixed, obs_auto_added').eq('date', date);
                 if (readErr) throw readErr;
 
                 if (!cloudRows || cloudRows.length === 0) {
-                    _dbgLog('[REPAIR] date=' + date + ' 云端无任何记录，无需恢复');
-                    alert(date + ' 云端没有任何记录，无法恢复（不是"被隐藏"，而是本来就没有数据）');
+                    _dbgLog('[REPAIR] date=' + date + ' 云端 watchlist 无任何记录，无需恢复');
+                    alert(date + ' 云端 watchlist 没有任何记录，无法恢复（不是"被隐藏"，而是本来就没有数据）');
                     return;
                 }
 
-                const alreadyTrueCount = cloudRows.filter(function(r) { return r.in_watchlist === true; }).length;
-                const toFixCloudRows = cloudRows.filter(function(r) { return r && r.in_watchlist === null; });
-                _dbgLog('[REPAIR] date=' + date + ' 云端共' + cloudRows.length + '条，已是正式列表' +
-                    alreadyTrueCount + '条，待修复' + toFixCloudRows.length + '条：' +
-                    toFixCloudRows.map(function(r) { return r.stock; }).join('、'));
+                const cloudStocks = new Set((cloudRows || []).map(function(r) { return (r.stock || '').trim(); }));
+                _dbgLog('[REPAIR] date=' + date + ' 云端 watchlist 共' + cloudRows.length + '条：' +
+                    Array.from(cloudStocks).join('、'));
 
-                const now = new Date().toISOString();
-                if (toFixCloudRows.length > 0) {
-                    const { error: updErr } = await sb.from('auction_data')
-                        .update({ in_watchlist: true, updated_at: now, updated_by: 'main-repair' })
-                        .eq('date', date)
-                        .is('in_watchlist', null);
-                    if (updErr) throw updErr;
-                }
-
-                // 同步本地内存缓存，避免还要再等一次云端拉取才能看到结果
-                // 阶段八 影子记录污染修复：只修复 in_watchlist 缺失(undefined)的行，
-                // 显式 false 的影子记录保持原样。
+                // 同步本地内存缓存：云端 watchlist 中的股票在本地若显示异常（in_watchlist 不为 true），修复为 true
+                // 阶段八 影子记录污染修复：只修复本地 in_watchlist 缺失/异常的行，显式 false 的影子记录保持原样。
                 const auctionData = getAuctionData();
                 const localRows = auctionData[date] || [];
                 let repairedCount = 0;
                 localRows.forEach(function(r) {
-                    if (r && r.in_watchlist === undefined) {
+                    if (r && r.stock && cloudStocks.has(r.stock.trim()) && r.in_watchlist !== true) {
                         r.in_watchlist = true;
                         repairedCount++;
                     }
                 });
                 setAuctionDateData(date, localRows, 'repairAuctionInWatchlistForDate');
 
-                _dbgLog('[REPAIR] date=' + date + ' 恢复完成，显式正式记录' + alreadyTrueCount + '条，修复缺失字段' + repairedCount + '条');
-                alert('✅ 已恢复 ' + date + '：' + alreadyTrueCount + ' 条已是正式列表，' + repairedCount + ' 条缺失字段已修复（影子记录未改动）');
+                _dbgLog('[REPAIR] date=' + date + ' 恢复完成，云端 watchlist ' + cloudRows.length + '条，修复本地异常' + repairedCount + '条');
+                alert('✅ 已恢复 ' + date + '：云端 watchlist 共 ' + cloudRows.length + ' 条，' + repairedCount + ' 条本地显示异常已修复（影子记录未改动）');
 
                 if (date === currentDate) {
                     renderAuction();
@@ -11409,29 +11722,21 @@
         //   1. 调用方只传"这次真正要改的字段"，不传的字段既不出现在云端 SQL 的 SET 子句里，
         //      也不覆盖 _auctionMemCache 里该行的其它字段。
         //   2. 本地写入是"merge 指定字段到已有行"，不是"整行/整个数组替换"——
-        //      这是根治"旧快照覆盖新数据"竞态的关键，替代原来"读一份 slice() 快照、
-        //      await 网络请求、结束后整段写回 auctionData[date]"的模式。
-        //   3. 云端 upsert 的冲突键固定为 date,stock（沿用现有 auction_data 表约定，不改动）。
+        //      这是根治"旧快照覆盖新数据"竞态的关键。
+        //   3. 拆表后云端 upsert 的冲突键：
+        //      - auction_watchlist：date,stock
+        //      - market_metrics：date,stock,scope
         //   4. in_watchlist 字段不属于这两个函数的管辖范围——它由"该股票是否在当前正式列表"
         //      这一业务规则决定，写入逻辑保留在 syncAuctionListForDate 等现有函数里，
         //      不要通过 patch 参数传入 in_watchlist，也不要在这两个函数内部推断它。
         //
-        // 【阶段一范围说明】本次只新增这两个函数本身并验证其独立工作正常，不改造任何旧调用方
-        // （猫抓/同花顺/其它写入入口切换到调用这两个函数，属于任务分工文档里的阶段二 B/C；
-        // Realtime 屏蔽窗口按批量操作整体开合的调整，属于阶段二 D；
-        // _auctionFullRowCache 退场与查询函数改造，属于阶段三 E —— 已完成）。
-        //
-        // 可 patch 的字段范围（对应表里由抓取程序/主程序共同维护的业务列）：
-        //   volume, yest_volume, note, change_pct, topics, code, selected, bought, sold, fixed
-        // 不允许出现在 patch 里的字段：in_watchlist（原因见上），date/stock（这两个是定位列，
-        //   通过函数参数单独传入，不放在 patch 对象里，避免和定位语义混淆）。
-
-        // 允许 patch 的字段白名单，防止调用方不小心把 in_watchlist、date、stock 等
-        // 非受控字段混进 patch 对象，在 SQL 生成阶段被悄悄一起写进 SET 子句。
-        // 方案 B：bought/sold/fixed 移出白名单——标签唯一权威源是 stocksData（股票列表页
-        // 手动标签），云端 auction_data 的这三列已废弃。任何 patch 路径携带这三列都会被
-        // 静默丢弃，避免陈旧标签位沉淀回云端形成"幽灵标签"（华电能源误标买一类问题）。
-        const AUCTION_PATCHABLE_FIELDS = ['volume', 'yest_volume', 'note', 'change_pct', 'topics', 'code', 'selected'];
+        // 拆表后字段归属：
+        //   auction_watchlist：note, topics, source, obs_auto_added, selected, bought, sold, fixed, code
+        //   market_metrics(scope='auction')：volume, yest_volume, change_pct, time930, seal_count, code
+        // 公共字段 code 同时写入两张表。
+        const AUCTION_WATCHLIST_FIELDS = ['note', 'topics', 'source', 'obs_auto_added', 'selected', 'bought', 'sold', 'fixed', 'code'];
+        const AUCTION_METRICS_FIELDS = ['volume', 'yest_volume', 'change_pct', 'time930', 'seal_count', 'code'];
+        const AUCTION_PATCHABLE_FIELDS = AUCTION_WATCHLIST_FIELDS.concat(AUCTION_METRICS_FIELDS.filter(function(f) { return AUCTION_WATCHLIST_FIELDS.indexOf(f) < 0; }));
 
         // 从调用方传入的 patch 对象中，只挑出白名单内、且确实存在（!== undefined）的字段。
         // 之所以要求"确实存在"而不是"值为真"，是因为 false/''/0 都是合法的业务值
@@ -11445,6 +11750,17 @@
                 }
             });
             return clean;
+        }
+
+        // 把 clean patch 拆成两张表各自的 patch。
+        function _splitAuctionPatch(cleanPatch) {
+            const watchlistPatch = {};
+            const metricsPatch = {};
+            Object.keys(cleanPatch).forEach(function(key) {
+                if (AUCTION_WATCHLIST_FIELDS.indexOf(key) >= 0) watchlistPatch[key] = cleanPatch[key];
+                if (AUCTION_METRICS_FIELDS.indexOf(key) >= 0) metricsPatch[key] = cleanPatch[key];
+            });
+            return { watchlistPatch: watchlistPatch, metricsPatch: metricsPatch };
         }
 
         // 本地 merge：只把 clean patch 里出现的字段写进 _auctionMemCache 对应行，
@@ -11479,14 +11795,15 @@
         // （不是每行各开一个），避免批量过程中窗口提前过期、被自身触发的 Realtime 打断。
         //
         // items: [{stock, ...patch}, ...]，每个 item 里除 stock 外的其余字段会各自
-        //   经过白名单过滤，不同 item 允许携带不同的字段组合（比如同一批里有的行只改
-        //   volume、有的行只改 note，互不影响）。
+        //   经过白名单过滤，并按字段归属分别写入 auction_watchlist / market_metrics(scope='auction')。
+        //   不同 item 允许携带不同的字段组合（比如同一批里有的行只改 volume、有的行只改 note，互不影响）。
         async function patchAuctionFieldBatch(date, items) {
             if (!date || !Array.isArray(items) || items.length === 0) return { ok: true, rows: 0 };
             _openAuctionShield();
             try {
                 const now = new Date().toISOString();
-                const rows = [];
+                const watchlistRows = [];
+                const metricsRows = [];
                 const localOps = [];
                 items.forEach(function(item) {
                     if (!item || !item.stock) return;
@@ -11494,18 +11811,33 @@
                     if (!nameTrim) return;
                     const cleanPatch = _sanitizeAuctionPatch(item);
                     if (Object.keys(cleanPatch).length === 0) return; // 没有合法字段可写，跳过
-                    rows.push(Object.assign(
-                        { date: date, stock: nameTrim, updated_at: now, updated_by: 'main' },
-                        cleanPatch
-                    ));
+                    const split = _splitAuctionPatch(cleanPatch);
+                    if (Object.keys(split.watchlistPatch).length > 0) {
+                        watchlistRows.push(Object.assign(
+                            { date: date, stock: nameTrim, updated_at: now, updated_by: 'main' },
+                            split.watchlistPatch
+                        ));
+                    }
+                    if (Object.keys(split.metricsPatch).length > 0) {
+                        metricsRows.push(Object.assign(
+                            { date: date, stock: nameTrim, scope: 'auction', updated_at: now, updated_by: 'main' },
+                            split.metricsPatch
+                        ));
+                    }
                     localOps.push({ stock: nameTrim, cleanPatch: cleanPatch });
                 });
-                if (rows.length === 0) return { ok: true, rows: 0 };
+                if (watchlistRows.length === 0 && metricsRows.length === 0) return { ok: true, rows: 0 };
 
-                if (_auctionTableAvailable) {
+                if (_auctionTableAvailable && watchlistRows.length > 0) {
                     const sb = getSupabase();
-                    const { error } = await sb.from('auction_data')
-                        .upsert(rows, { onConflict: 'date,stock' });
+                    const { error } = await sb.from('auction_watchlist')
+                        .upsert(watchlistRows, { onConflict: 'date,stock' });
+                    if (error) throw error;
+                }
+                if (_marketMetricsTableAvailable && metricsRows.length > 0) {
+                    const sb = getSupabase();
+                    const { error } = await sb.from('market_metrics')
+                        .upsert(metricsRows, { onConflict: 'date,stock,scope' });
                     if (error) throw error;
                 }
 
@@ -11514,7 +11846,7 @@
                     _mergeAuctionPatchLocal(date, op.stock, op.cleanPatch);
                 });
 
-                return { ok: true, rows: rows.length };
+                return { ok: true, rows: localOps.length };
             } catch (e) {
                 _dbgLog('[AUCTION-ERR] patchAuctionFieldBatch ' + (e && e.message));
                 return { ok: false, error: e };
@@ -11556,7 +11888,12 @@
             }
         }
 
-        // 导入功能用：批量 upsert 行情+状态数据（用于 importAuctionFromPaste / importAuctionHistoryFill）
+        // 导入功能用：批量 upsert 行情+状态数据到 auction_watchlist
+        // （用于 importAuctionFromPaste / importAuctionHistoryFill）
+        // 拆表后：
+        //   - 只写 auction_watchlist；影子记录由 patchAuctionFieldBatch / syncAuctionListForDate 维护。
+        //   - 导入批次中的影子记录（in_watchlist!==true）若已存在于 auction_watchlist，
+        //     则物理删除，替代旧 auction_data 时代的"置 in_watchlist=false 降级"。
         async function pushAuctionDataToCloud(date, items) {
             if (!_auctionTableAvailable) return;
             _openAuctionShield();
@@ -11565,38 +11902,47 @@
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
             // in_watchlist 判断依据：该股票是否是"当前 auctionData[date] 正式列表"的成员。
-            // 正式列表成员 → in_watchlist=true，tap 页面正常显示；
-            // 不在正式列表里、单独传入用于补数据的影子记录 → in_watchlist=false，
-            // 只写入全量快照缓存供趋势图查询，不出现在 tap 页面第一页，也不会在下次
-            // syncAuctionListForDate 同步时被误判为"该移除"而连累其它正式股票。
             const existingWatchlistNames = {};
             // 阶段六 影子bug6：只统计正式成员（in_watchlist===true），否则影子记录的股票名会进入 map，
-            // 导致导入时把影子记录也标记为 in_watchlist=true（提升为正式成员，混入第一页）。
+            // 导致导入时把影子记录也标记为正式成员（混入第一页）。
             ((getAuctionData()[date]) || []).forEach(function(s) {
                 if (s && s.stock && s.in_watchlist === true) existingWatchlistNames[s.stock.trim()] = true;
             });
-            const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
+            const rows = items.filter(function(s) { return s && s.stock && existingWatchlistNames[s.stock.trim()]; }).map(function(item) {
                 const nameTrim = item.stock.trim();
                 return {
                     date: date, stock: nameTrim,
                     code: scMap[nameTrim] || item.code || '',
                     volume: item.volume || '', yest_volume: item.yestVolume || '', note: item.note || '',
                     change_pct: item.changePct || '', topics: item.topics || '',
-                    in_watchlist: !!existingWatchlistNames[nameTrim],
+                    source: item.source || 'manual',
                     selected: item.selected || false, bought: item.bought || false,
                     sold: item.sold || false, fixed: item.fixed || false,
                     obs_auto_added: !!item.obsAutoAdded,
                     updated_at: now, updated_by: 'main'
                 };
             });
-            if (rows.length === 0) return;
-            const { error } = await sb.from('auction_data')
-                .upsert(rows, { onConflict: 'date,stock' });
-            if (error) throw error;
+            if (rows.length > 0) {
+                const { error } = await sb.from('auction_watchlist')
+                    .upsert(rows, { onConflict: 'date,stock' });
+                if (error) throw error;
+            }
+
+            // 影子记录：从 auction_watchlist 物理删除（不再降级）
+            const shadowItems = items.filter(function(s) { return s && s.stock && !existingWatchlistNames[s.stock.trim()]; });
+            if (_auctionTableAvailable && shadowItems.length > 0) {
+                const shadowNames = shadowItems.map(function(s) { return s.stock.trim(); });
+                const { error: delErr } = await sb.from('auction_watchlist')
+                    .delete()
+                    .eq('date', date)
+                    .in('stock', shadowNames);
+                if (delErr) throw delErr;
+            }
+
+            if (rows.length === 0 && shadowItems.length === 0) return;
 
             // 推送成功后，直接把这批数据合并进本地内存缓存，
             // 避免趋势图因 _justPushedAuction 屏蔽了 Realtime 回显而读不到当天刚导入/编辑的数据
-            // 阶段三 E：原 _auctionFullRowCache 已退场，改写 _auctionMemCache（snake_case 字段结构）
             var _existingList = _auctionMemCache[date] || [];
             var mergedRows = [];
             rows.forEach(function(row) {
@@ -11606,7 +11952,7 @@
                     stock: row.stock, code: row.code,
                     volume: row.volume, yest_volume: row.yest_volume, note: row.note,
                     change_pct: row.change_pct, topics: row.topics,
-                    in_watchlist: existing ? existing.in_watchlist : row.in_watchlist,
+                    in_watchlist: true,
                     selected: row.selected, bought: row.bought, sold: row.sold, fixed: row.fixed
                 };
                 mergedRows.push(mergedRow);
@@ -11614,7 +11960,6 @@
             mergeAuctionDateRows(date, mergedRows, 'pushAuctionDataToCloud');
 
             // 更新状态签名（导入后状态可能变了）
-            // 阶段六 影子bug6：状态签名只统计正式成员
             if (date === currentDate) {
                 _lastPushedAuctionStatus = JSON.stringify((getAuctionData()[currentDate] || []).filter(function(s) { return s && s.stock && s.in_watchlist === true; }).map(function(s) {
                     return { s: s.stock, sel: s.selected || false, b: s.bought || false,
@@ -11630,8 +11975,9 @@
         // 阶段二 C 改造：改用统一的 patchAuctionFieldBatch，只上报 code 列，
         // 不再各自发 update 请求；屏蔽窗口、updated_at/updated_by、本地 merge
         // 都由 patchAuctionFieldBatch 内部统一处理。
+        // 拆表后：code 是公共字段，patchAuctionFieldBatch 会同时写入 auction_watchlist 与 market_metrics。
         async function pushAuctionCodeToCloud(date) {
-            if (!_auctionTableAvailable) return;
+            if (!_auctionTableAvailable && !_marketMetricsTableAvailable) return;
             const scMap = loadAllData().stockCodeMap || {};
             // 阶段六 影子bug6：只推送正式成员的 code，避免给影子记录上报 code
             const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock && s.in_watchlist === true; });
@@ -11647,10 +11993,12 @@
             }
         }
 
-        // 一次性迁移：将本地 allData.auction 灌入 auction_data 表
+        // 一次性迁移：将本地 allData.auction 按 in_watchlist 拆到 auction_watchlist 与 market_metrics(scope='auction')。
+        // 拆表后：in_watchlist===true 的行进入 auction_watchlist；in_watchlist!==true 的行进入 market_metrics(scope='auction')。
         async function migrateAuctionToTable() {
             if (localStorage.getItem('_auction_table_migrated') === '1') {
                 _auctionTableAvailable = true; // 已迁移过，标记表可用
+                _marketMetricsTableAvailable = true;
                 return;
             }
             const auctionData = getAuctionData();
@@ -11658,14 +12006,24 @@
                 return Array.isArray(auctionData[d]) && auctionData[d].length > 0;
             });
             if (dates.length === 0) {
-                // 本地无数据，检查表是否可用（尝试读一行）
+                // 本地无数据，检查新表是否可用（尝试读一行）
                 try {
                     const sb = getSupabase();
-                    const { data, error } = await sb.from('auction_data').select('date').limit(1);
-                    if (!error) {
-                        _auctionTableAvailable = true;
+                    let watchlistOk = false;
+                    let metricsOk = false;
+                    try {
+                        const { error } = await sb.from('auction_watchlist').select('date').limit(1);
+                        if (!error) watchlistOk = true;
+                    } catch(e) {}
+                    try {
+                        const { error } = await sb.from('market_metrics').select('date').eq('scope', 'auction').limit(1);
+                        if (!error) metricsOk = true;
+                    } catch(e) {}
+                    if (watchlistOk || metricsOk) {
+                        _auctionTableAvailable = watchlistOk;
+                        _marketMetricsTableAvailable = metricsOk;
                         localStorage.setItem('_auction_table_migrated', '1');
-                        console.log('[迁移] 本地无 auction 数据，auction_data 表已就绪');
+                        console.log('[迁移] 本地无 auction 数据，auction_watchlist/market_metrics 表已就绪');
                     }
                 } catch(e) { console.warn('[迁移] 表不可用:', e.message); }
                 return;
@@ -11673,31 +12031,61 @@
             const sb = getSupabase();
             const scMap = loadAllData().stockCodeMap || {};
             const now = new Date().toISOString();
-            let totalRows = 0;
+            let watchlistRows = 0;
+            let metricsRows = 0;
             let hadError = false;
             for (let di = 0; di < dates.length; di++) {
                 var date = dates[di];
-                var rows = auctionData[date].filter(function(s) { return s && s.stock; }).map(function(item) {
-                    return {
-                        date: date, stock: item.stock.trim(),
-                        code: scMap[item.stock.trim()] || '',
-                        volume: item.volume || '', yest_volume: item.yestVolume || '', note: item.note || '',
-                        selected: item.selected || false, bought: item.bought || false,
-                        sold: item.sold || false, fixed: item.fixed || false,
+                var watchlistBatch = [];
+                var metricsBatch = [];
+                auctionData[date].forEach(function(item) {
+                    if (!item || !item.stock) return;
+                    var nameTrim = item.stock.trim();
+                    var baseRow = {
+                        date: date, stock: nameTrim,
+                        code: scMap[nameTrim] || item.code || '',
+                        volume: item.volume || '', yest_volume: item.yestVolume || '',
+                        change_pct: item.changePct || '',
                         updated_at: now, updated_by: 'main'
                     };
-                });
-                if (rows.length === 0) continue;
-                try {
-                    var { error } = await sb.from('auction_data')
-                        .upsert(rows, { onConflict: 'date,stock', ignoreDuplicates: true });
-                    if (error) {
-                        console.warn('[迁移] 日期', date, '失败:', error.message);
-                        hadError = true;
-                        // 如果是表不存在的错误，直接中止
-                        if (error.message && error.message.indexOf('relation') >= 0) return;
+                    if (item.in_watchlist === true) {
+                        watchlistBatch.push(Object.assign({}, baseRow, {
+                            note: item.note || '',
+                            topics: item.topics || '',
+                            source: item.source || 'manual',
+                            selected: item.selected || false, bought: item.bought || false,
+                            sold: item.sold || false, fixed: item.fixed || false,
+                            obs_auto_added: !!item.obsAutoAdded
+                        }));
                     } else {
-                        totalRows += rows.length;
+                        metricsBatch.push(Object.assign({}, baseRow, {
+                            scope: 'auction',
+                            source: item.source || 'manual'
+                        }));
+                    }
+                });
+                try {
+                    if (watchlistBatch.length > 0) {
+                        var { error } = await sb.from('auction_watchlist')
+                            .upsert(watchlistBatch, { onConflict: 'date,stock', ignoreDuplicates: true });
+                        if (error) {
+                            console.warn('[迁移] 日期', date, 'auction_watchlist 失败:', error.message);
+                            hadError = true;
+                            if (error.message && error.message.indexOf('relation') >= 0) return;
+                        } else {
+                            watchlistRows += watchlistBatch.length;
+                        }
+                    }
+                    if (metricsBatch.length > 0) {
+                        var { error } = await sb.from('market_metrics')
+                            .upsert(metricsBatch, { onConflict: 'date,stock,scope', ignoreDuplicates: true });
+                        if (error) {
+                            console.warn('[迁移] 日期', date, 'market_metrics 失败:', error.message);
+                            hadError = true;
+                            if (error.message && error.message.indexOf('relation') >= 0) return;
+                        } else {
+                            metricsRows += metricsBatch.length;
+                        }
                     }
                 } catch(e) {
                     console.warn('[迁移] 日期', date, '异常:', e.message);
@@ -11706,12 +12094,101 @@
                 }
             }
             // 只有迁移成功（无错误）或表确实可用时才标记
-            if (!hadError || totalRows > 0) {
+            if (!hadError || watchlistRows > 0 || metricsRows > 0) {
                 _auctionTableAvailable = true;
+                _marketMetricsTableAvailable = true;
                 localStorage.setItem('_auction_table_migrated', '1');
-                console.log('[迁移] auction_data 表已灌入 ' + totalRows + ' 条');
+                console.log('[迁移] auction_watchlist 已灌入 ' + watchlistRows + ' 条，market_metrics(scope=auction) 已灌入 ' + metricsRows + ' 条');
             } else {
-                console.warn('[迁移] 迁移失败，auction_data 表标记为不可用，保留本地数据');
+                console.warn('[迁移] 迁移失败，auction 表标记为不可用，保留本地数据');
+            }
+        }
+
+        // 一次性迁移：从旧 auction_data 表读取全部数据，按 in_watchlist 拆到
+        // auction_watchlist 与 market_metrics(scope='auction')，并在 localStorage 标记已迁移。
+        async function migrateAuctionDataToNewTables() {
+            if (localStorage.getItem('_auction_data_migrated_to_new_tables') === '1') {
+                _auctionTableAvailable = true;
+                _marketMetricsTableAvailable = true;
+                return;
+            }
+            try {
+                const sb = getSupabase();
+                const allRows = [];
+                let offset = 0;
+                const pageSize = 1000;
+                while (true) {
+                    const { data, error } = await sb.from('auction_data')
+                        .select('date,stock,code,volume,yest_volume,note,change_pct,topics,in_watchlist,selected,bought,sold,fixed,obs_auto_added,source')
+                        .range(offset, offset + pageSize - 1);
+                    if (error) {
+                        if (error.message && error.message.indexOf('relation') >= 0) {
+                            console.log('[迁移] 旧 auction_data 表不存在，无需迁移');
+                            localStorage.setItem('_auction_data_migrated_to_new_tables', '1');
+                            _auctionTableAvailable = true;
+                            _marketMetricsTableAvailable = true;
+                            return;
+                        }
+                        throw error;
+                    }
+                    if (!data || data.length === 0) break;
+                    allRows.push(...data);
+                    if (data.length < pageSize) break;
+                    offset += pageSize;
+                }
+                if (allRows.length === 0) {
+                    localStorage.setItem('_auction_data_migrated_to_new_tables', '1');
+                    _auctionTableAvailable = true;
+                    _marketMetricsTableAvailable = true;
+                    console.log('[迁移] 旧 auction_data 表无数据，已标记迁移完成');
+                    return;
+                }
+                const now = new Date().toISOString();
+                const watchlistBatch = [];
+                const metricsBatch = [];
+                allRows.forEach(function(row) {
+                    if (!row || !row.date || !row.stock) return;
+                    const watchlistRow = {
+                        date: row.date, stock: row.stock.trim(),
+                        code: row.code || '',
+                        volume: row.volume || '', yest_volume: row.yest_volume || '', note: row.note || '',
+                        change_pct: row.change_pct || '', topics: row.topics || '',
+                        source: row.source || 'manual',
+                        selected: row.selected || false, bought: row.bought || false,
+                        sold: row.sold || false, fixed: row.fixed || false,
+                        obs_auto_added: row.obs_auto_added || false,
+                        updated_at: now, updated_by: 'main_migrate'
+                    };
+                    const metricsRow = {
+                        date: row.date, stock: row.stock.trim(), scope: 'auction',
+                        code: row.code || '',
+                        volume: row.volume || '', yest_volume: row.yest_volume || '',
+                        change_pct: row.change_pct || '',
+                        source: row.source || 'manual',
+                        updated_at: now, updated_by: 'main_migrate'
+                    };
+                    if (row.in_watchlist === true) {
+                        watchlistBatch.push(watchlistRow);
+                    } else {
+                        metricsBatch.push(metricsRow);
+                    }
+                });
+                if (watchlistBatch.length > 0) {
+                    const { error } = await sb.from('auction_watchlist')
+                        .upsert(watchlistBatch, { onConflict: 'date,stock', ignoreDuplicates: true });
+                    if (error) throw error;
+                }
+                if (metricsBatch.length > 0) {
+                    const { error } = await sb.from('market_metrics')
+                        .upsert(metricsBatch, { onConflict: 'date,stock,scope', ignoreDuplicates: true });
+                    if (error) throw error;
+                }
+                _auctionTableAvailable = true;
+                _marketMetricsTableAvailable = true;
+                localStorage.setItem('_auction_data_migrated_to_new_tables', '1');
+                console.log('[迁移] 旧 auction_data 已拆分：auction_watchlist ' + watchlistBatch.length + ' 条，market_metrics(scope=auction) ' + metricsBatch.length + ' 条');
+            } catch (e) {
+                console.warn('[迁移] 旧 auction_data 拆分失败:', e.message);
             }
         }
 
@@ -11790,7 +12267,7 @@
                 // 重置内存中的 allData，让 loadAllData() 重新从 localStorage 读取
                 allData = null;
 
-                // 从 auction_data 独立表拉取 auction 数据（拆表后新增）
+                // 从 auction_watchlist + market_metrics 拉取 auction 数据（拆表后新增）
                 // 若新表不可用或为空，保留本地数据（不清空）
                 try {
                     const tableAuction = await pullAuctionFromTable();
@@ -12143,7 +12620,7 @@
 
                 const sb = getSupabase();
 
-                // auction 数据已拆表到 auction_data 独立表，不再在 user_data blob 中合并
+                // auction 数据已拆表到 auction_watchlist + market_metrics，不再在 user_data blob 中合并
                 // （旧合并逻辑已移除，由 pushAuctionToCloud 按列归属更新新表）
 
                 const { error } = await sb
@@ -12341,7 +12818,7 @@
                             allData[key] = _jiwangMemCache;
                             return;
                         }
-                        // auction（阶段四 Bug 2 修复）：与 bidding/jiwang 同样改为纯云端表（auction_data）+ 内存缓存，
+                        // auction（阶段四 Bug 2 修复）：与 bidding/jiwang 同样改为纯云端表（auction_watchlist + market_metrics）+ 内存缓存，
                         // 不再从 localStorage 读取旧快照，避免旧/空本地数据在刷新时顶替云端数据，
                         // 也避免与 _auctionMemCache 形成两份不同步的状态（这是阶段四审核发现的核心问题）。
                         if (key === 'auction') {
@@ -12606,7 +13083,7 @@
             if (!allData || !allData[name]) return;
             // bidding 已改为纯云端表 + 内存缓存，不再落 localStorage
             if (name === 'bidding') return;
-            // 阶段四 Bug 4 修复：auction 同样改为纯云端表（auction_data）+ 内存缓存（_auctionMemCache），
+            // 阶段四 Bug 4 修复：auction 同样改为纯云端表（auction_watchlist + market_metrics）+ 内存缓存（_auctionMemCache），
             // 不再落 localStorage，避免本地旧/空快照在下次保存或导入时把云端数据覆盖掉，
             // 也避免与 _auctionMemCache 形成两份不同步的状态
             if (name === 'auction') return;
@@ -14317,7 +14794,7 @@
             }
 
             scheduleCloudPush();
-            // 同步代码到 auction_data 独立表的 code 列（拆表后新增）
+            // 同步代码到 auction_watchlist + market_metrics 的 code 列（拆表后新增）
             pushAuctionCodeToCloud(targetDate).catch(function(e) { _dbgLog('[AUCTION-ERR] importAuctionCodeMap pushAuctionCodeToCloud ' + targetDate + ' ' + (e && e.message || e)); });
             ta.value = '';
             setStockCodeMapStatus(`✅ 已导入 ${count} 条映射，${addedToAuction} 只已加入今日竞价列表`, false);
@@ -14697,7 +15174,7 @@
             setAuctionDateData(targetDate, auctionList, 'importAuctionFromPaste');
             saveModule('auction');
             invalidateTopicCache();
-            // 同步到 auction_data 独立表（阶段二 C：改为字段级 patch）
+            // 同步到 auction_watchlist + market_metrics（阶段二 C：改为字段级 patch）
             // 粘贴导入是全量数据写入，覆盖所有业务字段；in_watchlist 不在 patch 白名单内，
             // 由 syncAuctionListForDate 单独管理（标记 formal list 成员）
             (function() {
@@ -14729,7 +15206,7 @@
                             _dbgLog('[AUCTION-ERR] importAuctionFromPaste 云端同步 ' + (e && e.message || e));
                         }
                     })();
-                    // 阶段八修复：粘贴导入之前只把 topics 写进当天快照（auction_data），
+                    // 阶段八修复：粘贴导入之前只把 topics 写进当天快照（auction_watchlist），
                     // 没有同步进跨日期共享的 stock_topics 题材库表，导致这批题材超过
                     // buildTopicCache 的 66 个交易日扫描窗口后就再也读不到了。
                     // 这里补上：只对本次「确实带了题材」的股票推送，避免用空字符串
@@ -16013,7 +16490,7 @@
 
         // ---------- 同花顺（早盘竞价）：历史断点涨幅补全 ----------
         // 与热门股票 tab 的 fillHotHistoryGapPctFromThs 完全独立的一套实现（不共用函数），
-        // 写入走 patchAuctionFieldBatch（写 auction_data 表 / _auctionMemCache 缓存），
+        // 写入走 patchAuctionFieldBatch（写 auction_watchlist + market_metrics / _auctionMemCache 缓存），
         // 三条红线相同：不读不写第一页正式列表语义、不调 syncAuctionListForDate、patch 只放 change_pct。
         // 早盘竞价的第一页列表由 getTodayAuction() 过滤 in_watchlist===true 得到，
         // 影子记录（in_watchlist=false）不会出现在第一页，但趋势图能读到——正是本功能依赖的机制。
@@ -16643,7 +17120,7 @@
                 saveModule('auction');
                 renderAuction();
                 renderList();
-                // 阶段四 Bug 5 收尾：monitorWarning 是纯内存字段（不在 auction_data 表的列里，
+                // 阶段四 Bug 5 收尾：monitorWarning 是纯内存字段（不在 auction_watchlist / market_metrics 的列里，
                 // 也不在 AUCTION_PATCHABLE_FIELDS 白名单里），无需同步到云端。
                 // 原本的 pushAuctionDataToCloud(today, ...) 会把整行（含 volume/yest_volume 等）
                 // 一起带上，反而会覆盖云端其它字段，属于副作用大于收益的残留代码，直接删除。
@@ -19574,19 +20051,19 @@
                     if (raw) {
                         const parsed = JSON.parse(raw);
                         const todayInLS = (parsed[today] || []).length;
-                        // [DATE-CLARIFY] auction 模块已改为纯云端 auction_data 表 + 内存缓存，
+                        // [DATE-CLARIFY] auction 模块已改为纯云端 auction_watchlist + market_metrics + 内存缓存，
                         // 正常使用时不再向 stockApp_v42_auction 写入；该 key 仅保留旧数据供迁移/对账。
                         push('　　localStorage 中 ' + today + ' 的股票数：' + todayInLS +
                              (todayInLS === todayList.length
                                  ? '（与内存一致 ✅）'
-                                 : '（与内存不一致，但属正常 ⚠️：auction 已拆分到云端 auction_data 表，本地 key 不再更新；内存=' + todayList.length + '）'));
+                                 : '（与内存不一致，但属正常 ⚠️：auction 已拆分到云端 auction_watchlist / market_metrics 表，本地 key 不再更新；内存=' + todayList.length + '）'));
                     } else {
-                        push('　　localStorage 中 ' + today + ' 的股票数：0（auction 已拆分到云端 auction_data 表，本地 key 不再写入；内存=' + todayList.length + '）');
+                        push('　　localStorage 中 ' + today + ' 的股票数：0（auction 已拆分到云端 auction_watchlist / market_metrics 表，本地 key 不再写入；内存=' + todayList.length + '）');
                     }
                 } catch (e) {
                     push('　　localStorage 读取失败：' + e.message);
                 }
-                push('　　云端表 auction_data 可用(_auctionTableAvailable)：' + _auctionTableAvailable);
+                push('　　云端表 auction_watchlist 可用(_auctionTableAvailable)：' + _auctionTableAvailable + '，market_metrics 可用(_marketMetricsTableAvailable)：' + _marketMetricsTableAvailable);
                 push('　　_syncState（云同步状态）：' + _syncState);
                 push('');
 
@@ -19648,7 +20125,7 @@
                         push('　　　⚠️ 数值相同可能原因：');
                         push('　　　　1. API 确实返回了相同值（小盘股竞价量可能稳定）');
                         push('　　　　2. 之前的"覆盖"操作写入了相同值');
-                        push('　　　　3. 云端 auction_data 表两个日期存的 volume 相同');
+                        push('　　　　3. 云端 auction_watchlist / market_metrics 两个日期存的 volume 相同');
                         push('　　　建议：点击猫抓"全竞价量"重新抓取覆盖（需代理正常工作）');
                     }
                 }
@@ -26095,7 +26572,7 @@
             let d = endDate;
             for (let i = 0; i < count; i++) {
                 if (!d) break;
-                // 优先 auction_data 本地数据，回退 scraper_raw_data 缓存（对比日曲线）
+                // 优先 auction 本地缓存数据，回退 scraper_raw_data 缓存（对比日曲线）
                 days.push({
                     date: d,
                     volume: getStockHistoryValue(d, stockName, 'volume', dataSource),
@@ -26354,7 +26831,7 @@
                 saveData();
                 renderAuction();
 
-                // 按 currentGroup 分支推送到对应的云表（hot_stocks / auction_data），避免错误写入
+                // 按 currentGroup 分支推送到对应的云表（hot_stocks / auction_watchlist），避免错误写入
                 if (currentGroup === 'hot') {
                     // 字段级 PATCH：本次改了 note/changePct/topics 三个字段（对齐同函数 auction 分支的处理方式）
                     patchHotField(currentDate, auctionList[index].stock, {
@@ -38904,6 +39381,8 @@
 
             // 迁移 auction 数据到独立表（拆表后新增，首次运行时自动执行）
             migrateAuctionToTable();
+            // 从旧 auction_data 表迁移到 auction_watchlist + market_metrics（拆表后新增，首次运行时自动执行）
+            migrateAuctionDataToNewTables();
             // 迁移 bidding 数据到独立表（拆表后新增，首次运行时自动执行）
             migrateBiddingToTable();
             // 迁移 jiwang 数据到独立表（拆表后新增，首次运行时自动执行）
