@@ -87,6 +87,7 @@ const CONFIG = {
   // 字段含义见：https://numcat.net/api-docs?scope=stock#tag/%E5%B8%82%E5%9C%BA%E7%BB%9F%E8%AE%A1/POST/api/reference-proxy/market/emoindic-daily
   NUMCAT_URL: 'https://numcat.net/api/reference-proxy/market/emoindic-daily',
   NUMCAT_APINAME: 'emoindic_daily',
+  NUMCAT_RECENT_DAYS: 10, // 拉取最近 N 个交易日（情绪看板需要 5 日趋势，多取几天防止节假日断档）
   SEAL_FIELD: 'owfd_0925_count',
 
   // 情绪看板：字段映射（NumCat 情绪周期接口字段名 → 内部指标名）
@@ -175,7 +176,11 @@ async function fetchNumCatEmotionFull(env) {
   const resp = await fetch(CONFIG.NUMCAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiname: CONFIG.NUMCAT_APINAME, apikey: env.NUMCAT_API_KEY, params: {} })
+    body: JSON.stringify({
+      apiname: CONFIG.NUMCAT_APINAME,
+      apikey: env.NUMCAT_API_KEY,
+      params: { recentdays: CONFIG.NUMCAT_RECENT_DAYS }
+    })
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
