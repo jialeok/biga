@@ -1,0 +1,15 @@
+name = "bidding-duoban-snap"
+main = "workers/bidding-duoban-snap.js"
+compatibility_date = "2025-07-29"
+
+# 北京时间 9:25、9:26 触发 = UTC 01:25、01:26
+[triggers]
+crons = ["25 1 * * *", "26 1 * * *"]
+
+[vars]
+SUPABASE_URL = "https://tonqfgeyxnnwicjopshn.supabase.co"
+TZ = "Asia/Shanghai"
+
+# 敏感变量请通过 wrangler secret 设置：
+#   wrangler secret put SUPABASE_SERVICE_ROLE_KEY --config wrangler.bidding-duoban-snap.toml
+#   wrangler secret put SUPABASE_ANON_KEY --config wrangler.bidding-duoban-snap.toml
