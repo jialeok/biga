@@ -29455,7 +29455,16 @@
             
             getBiddingData()[currentDate] = biddingData;
             saveData();
-            
+
+            // [FIX] 清空操作必须真正删除云端对应日期的行：pushBiddingToCloud 对“全空”表单有
+            // “跳过推送、避免覆盖云端已有数据”的安全网（第 9492 行 return），只 blank 列而不删云端，
+            // 会导致刷新 / Realtime 把旧数据“复活”。这里显式删云端行才是干净清除。
+            // bidding 行名来自固定模板，删掉云端行不影响下次重新生成；本地仍保留空行供用户重新填写。
+            deleteBiddingFromCloud(currentDate).catch(function(e) {
+                _dbgLog('[BIDDING-CLEAR] deleteBiddingFromCloud 失败: ' + (e && e.message));
+                try { showWarningToast('⚠️ 云端清除失败，旧数据可能仍在：' + (e && e.message), 8000); } catch (err) {}
+            });
+
             // 同步清除圆形统计的今日盈亏
             const stats = getStats();
             stats.profit = '';
