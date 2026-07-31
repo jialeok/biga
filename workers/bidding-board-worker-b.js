@@ -51,11 +51,17 @@ const CONFIG = {
 
 // ⚠️ Cloudflare 星期编号：1=周日, 2=周一, ..., 6=周五, 7=周六
 // 周一到周五用 2-6，不是 1-5（1-5 = 周日到周四，周五会漏掉！）
+// 双格式兼容：不管 Dashboard 上配的是 1-5（旧错版）还是 2-6（正确版），都能匹配到
 const CRON_TO_POINT = {
   '25 1 * * 2-6': 't0925-seal',
   '26 1 * * 2-6': 't0926',
   '40 1 * * 2-6': 't0926', // 开盘后补抓：盘前 am_pred 未发布时，开盘后重抓一次拿到今日预测
   '0 8 * * 2-6': 'close',
+  // 兼容旧的错误配置（1-5 = 周日-周四，周一到周四实际能触发，保留以平滑过渡）
+  '25 1 * * 1-5': 't0925-seal',
+  '26 1 * * 1-5': 't0926',
+  '40 1 * * 1-5': 't0926',
+  '0 8 * * 1-5': 'close',
 };
 const SEAL_COLUMN = 'time930';
 
@@ -681,9 +687,30 @@ function checkRefreshRateLimit(ip) {
 
 // ══════════════════════════ 入口 ═══════════════════════════
 
+// 从 cron 表达式解析触发点：只看分钟+小时，不依赖星期几字段
+// （Cloudflare 星期编号 1=周日→7=周六，容易写错；按时间匹配更可靠）
+function cronToPoint(cronExpr) {
+  // 先精确匹配（兼容旧配置）
+  if (CRON_TO_POINT[cronExpr]) return CRON_TO_POINT[cronExpr];
+  // 按 minute hour 提取匹配
+  const parts = cronExpr.trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  const min = parts[0], hour = parts[1];
+  const key = min + ' ' + hour;
+  // Worker B: 25分→封单家数, 26分→情绪, 40分→情绪(补抓), 08:00→收盘/记忘
+  const MIN_HOUR_TO_POINT = {
+    '25 1': 't0925-seal', '26 1': 't0926', '40 1': 't0926', '0 8': 'close',
+  };
+  return MIN_HOUR_TO_POINT[key] || null;
+}
+
 export default {
   async scheduled(event, env, ctx) {
-    const point = CRON_TO_POINT[event.cron];
+    const point = cronToPoint(event.cron);
+    if (!point) {
+      console.error('[bidding-B] 无法识别 cron 表达式:', event.cron);
+      return;
+    }
     if (point === 't0925-seal') ctx.waitUntil(runSeal(env, 'cron'));
     else if (point === 't0926') ctx.waitUntil(runEmotion(env, 'cron'));
     else if (point === 'close') ctx.waitUntil(runClose(env, 'cron'));
