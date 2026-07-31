@@ -10468,6 +10468,35 @@
         // 拆表后：
         //   - hot_stocks 每行天然是正式列表成员（无 in_watchlist 列）
         //   - market_metrics(scope='hot') 存影子/指标数据（volume/yest_volume/change_pct）
+
+        // [BUG-FIX] 读侧字段级 merge：云端非空字段覆盖本地，云端空字段保留本地值。
+        // 解决竞态场景：补全按钮 patchHotFieldBatch 刚把补全值写入本地 _hotFullRowCache，
+        // 此时 Realtime 触发的 loadHotStocksFromCloud 恰好读到云端尚未 commit 的旧值（补全字段为空），
+        // 整表重置会用空值覆盖本地补全值，导致趋势图刷新后丢失数据。
+        // 改为字段级 merge 后，云端空字段不会覆盖本地已有值，趋势图能读到补全值。
+        // 注意：不保留云端没有的行（避免另一台设备删除的行复活）；只对云端已有的行做字段级合并。
+        const HOT_MERGE_FIELDS = ['code', 'volume', 'yest_volume', 'note', 'change_pct', 'topics', 'selected', 'bought', 'sold', 'fixed'];
+        function _mergeHotCloudToLocal(oldList, cloudRows) {
+            if (!oldList || oldList.length === 0) return cloudRows.slice();
+            const oldMap = {};
+            oldList.forEach(function(r) {
+                if (r && r.stock) oldMap[r.stock.trim()] = r;
+            });
+            return cloudRows.map(function(cr) {
+                if (!cr || !cr.stock) return cr;
+                const local = oldMap[cr.stock.trim()];
+                if (!local) return cr; // 本地没有，用云端
+                const row = Object.assign({}, local); // 以本地为基础，保留本地已有字段
+                HOT_MERGE_FIELDS.forEach(function(f) {
+                    // 云端字段非空（非 undefined/null/''）才覆盖本地
+                    if (cr[f] !== undefined && cr[f] !== null && cr[f] !== '') {
+                        row[f] = cr[f];
+                    }
+                });
+                return row;
+            });
+        }
+
         async function loadHotStocksFromCloud() {
             // 若刚推送了本地修改（saveAuction 的 hot 分支），跳过重新加载，防止云端空数据覆盖本地修改
             if (_justPushedHotAuction) return;
@@ -10573,10 +10602,12 @@
             }
 
             // 合并写入全量快照缓存，并提取正式列表成员到 result
-            _hotFullRowCache = {};
+            // [BUG-FIX] 不再整表清空 _hotFullRowCache，改为字段级 merge：
+            // 保留旧对象引用，逐 date 用 _mergeHotCloudToLocal 字段级合并（云端非空才覆盖本地）。
+            // 这样竞态期间本地刚写入的补全值不会被云端旧值（空字段）覆盖，趋势图能读到补全值。
             _hotWatchlistIndex = newWatchlistIndex; // 替换为本次加载的正式成员索引
             Object.keys(cloudByDate).forEach(function(d) {
-                const rows = Object.values(cloudByDate[d]);
+                const rows = _mergeHotCloudToLocal(_hotFullRowCache[d], Object.values(cloudByDate[d]));
                 _hotFullRowCache[d] = rows;
                 const watchlistSet = _hotWatchlistIndex[d] || new Set();
                 rows.forEach(function(r) {
@@ -11976,8 +12007,10 @@
                         await new Promise(function(r) { setTimeout(r, 100); });
                     }
                     if (!_hotAuctionTableAvailable && !_marketMetricsTableAvailable) {
+                        // [BUG-FIX] 原 ok:true 会让调用方误以为云端写入成功，导致 UI 显示绿勾。
+                        // 实际云端未写入，刷新后数据会丢失。改为 ok:false，让调用方走错误分支提示用户重试。
                         console.warn('patchHotFieldBatch：hot_stocks 与 market_metrics 表均未就绪，本地缓存已更新但云端未同步。日期:', date);
-                        return { ok: true, rows: localOps.length, cloudSkipped: true };
+                        return { ok: false, rows: localOps.length, cloudSkipped: true, error: new Error('云端表未就绪，数据未上传（已暂存本地）') };
                     }
                 }
 
@@ -17744,6 +17777,7 @@
         // ---------- 同花顺（热门股票）：两全昨日成交量 ----------
         async function fillHotYesterdayVolumeFromThs(btn) {
             setBtnLoading(btn, true);
+            _openHotAuctionShield(); // [BUG-FIX] 入口立即开 shield，覆盖 await fetchDayVolumes 期间的竞态窗口
             try {
                 const today = currentDate;
                 const yesterday = getPreviousTradingDay(today);
@@ -17948,6 +17982,7 @@
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
             } finally {
+                _closeHotAuctionShield(); // [BUG-FIX] 对应入口的 _openHotAuctionShield
                 setBtnLoading(btn, false);
             }
         }
@@ -17961,6 +17996,7 @@
 
         async function _fillHotTodayYesterdayVolumeFromThsImpl(btn, overwrite) {
             setBtnLoading(btn, true);
+            _openHotAuctionShield(); // [BUG-FIX] 入口立即开 shield，覆盖 await fetchDayVolumes 期间的竞态窗口
             try {
                 const today = currentDate;
                 const yesterday = getPreviousTradingDay(today);
@@ -18129,6 +18165,7 @@
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
             } finally {
+                _closeHotAuctionShield(); // [BUG-FIX] 对应入口的 _openHotAuctionShield
                 setBtnLoading(btn, false);
             }
         }
@@ -18142,6 +18179,7 @@
 
         async function _fillHotYesterdayYesterdayVolumeFromThsImpl(btn, overwrite) {
             setBtnLoading(btn, true);
+            _openHotAuctionShield(); // [BUG-FIX] 入口立即开 shield，覆盖 await fetchDayVolumes 期间的竞态窗口
             try {
                 const today = currentDate;
                 const yesterday = getPreviousTradingDay(today);
@@ -18308,6 +18346,7 @@
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
             } finally {
+                _closeHotAuctionShield(); // [BUG-FIX] 对应入口的 _openHotAuctionShield
                 setBtnLoading(btn, false);
             }
         }
@@ -18494,6 +18533,7 @@
             mode = (mode === 'overwrite') ? 'overwrite' : 'fill';
             const modeLabel = mode === 'overwrite' ? '覆盖' : '补全';
             setBtnLoading(btn, true);
+            _openHotAuctionShield(); // [BUG-FIX] 入口立即开 shield，覆盖 await fetchDayVolumes 期间的竞态窗口
             try {
                 const today = currentDate;
                 const hotData = getHotAuctionData();
@@ -18716,6 +18756,7 @@
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
             } finally {
+                _closeHotAuctionShield(); // [BUG-FIX] 对应入口的 _openHotAuctionShield
                 setBtnLoading(btn, false);
             }
         }
@@ -18730,6 +18771,7 @@
         // 与早盘竞价 tab 的同名按钮完全独立（不共用函数）。
         async function fillHotHistoryGapYestVolumeFromThs(btn) {
             setBtnLoading(btn, true);
+            _openHotAuctionShield(); // [BUG-FIX] 入口立即开 shield，覆盖 await fetchDayVolumes 期间的竞态窗口
             try {
                 const today = currentDate;
                 const hotData = getHotAuctionData();
@@ -18872,6 +18914,7 @@
                 if (msg.indexOf('Failed to fetch') >= 0) msg = '代理请求失败，请检查网络';
                 setApiStatus('thsApiStatusHot', '❌ ' + msg, false);
             } finally {
+                _closeHotAuctionShield(); // [BUG-FIX] 对应入口的 _openHotAuctionShield
                 setBtnLoading(btn, false);
             }
         }
