@@ -8840,6 +8840,7 @@
         let _hotTrendsCache = {}; // hot_stock_trends 表本地缓存 {date: [items]}（原缺失声明）
         let _hotTrendsReloadTimer = null; // hot_stock_trends Realtime 收到变更后的防抖重载定时器（原缺失声明）
         let _justPushedHotTrends = false; // 标记刚推送过 hot_stock_trends，忽略自己触发的 Realtime 通知（原缺失声明，loadHotTrendsFromCloud 第一行就读取它，若在赋值前被调用会 ReferenceError）
+        let _hotNumcatDebugSnapshots = {}; // 猫抓补全调试快照（内存，不落 localStorage），key=日期字符串，value=快照对象
 
         function generateToken() {
             const arr = new Uint8Array(16);
@@ -19239,27 +19240,23 @@
                     hotAuctionData[dayBefore] = existingDayBeforeList;
                 }
 
-                // 🔍[调试-诊断报告用] 快照写入 localStorage（三天全部记录）
+                // 🔍[调试-诊断报告用] 快照写入内存变量（不落 localStorage），三天全部记录
                 function saveDayDebug(dateStr, ymd, fillLog, overwrite, patchesLen) {
-                    try {
-                        localStorage.setItem('lastNumcatFillDebugHot_' + dateStr, JSON.stringify({
-                            requestedAt: new Date().toISOString(),
-                            date: dateStr,
-                            overwrite: !!overwrite,
-                            requestedCodesCount: allCodesSet.size,
-                            apiRawItemsCount: items.length,
-                            apiRawItemsForDate: items.filter(function(row) {
-                                return String(row[tradedateIdx] || '').trim() === ymd;
-                            }).map(function(row) {
-                                return { symbol: row[symbolIdx], name: row[1], tradedate: row[tradedateIdx],
-                                    auc_vol: row[aucVolIdx], auc_pct_chg: (aucPctIdx >= 0 ? row[aucPctIdx] : undefined) };
-                            }),
-                            patchesCount: patchesLen,
-                            fillLog: fillLog
-                        }));
-                    } catch (e) {
-                        console.error('保存 lastNumcatFillDebugHot_' + dateStr + ' 失败:', e);
-                    }
+                    _hotNumcatDebugSnapshots[dateStr] = {
+                        requestedAt: new Date().toISOString(),
+                        date: dateStr,
+                        overwrite: !!overwrite,
+                        requestedCodesCount: allCodesSet.size,
+                        apiRawItemsCount: items.length,
+                        apiRawItemsForDate: items.filter(function(row) {
+                            return String(row[tradedateIdx] || '').trim() === ymd;
+                        }).map(function(row) {
+                            return { symbol: row[symbolIdx], name: row[1], tradedate: row[tradedateIdx],
+                                auc_vol: row[aucVolIdx], auc_pct_chg: (aucPctIdx >= 0 ? row[aucPctIdx] : undefined) };
+                        }),
+                        patchesCount: patchesLen,
+                        fillLog: fillLog
+                    };
                 }
                 if (needToday) saveDayDebug(today, todayYMD, todayFillLog, opts.overwriteToday, todayPatches.length);
                 if (needYesterday) saveDayDebug(yesterday, yesterdayYMD, yesterdayFillLog, opts.overwriteYesterday, yesterdayPatches.length);
@@ -19550,18 +19547,17 @@
                 push('　　　　 本次已修复为「云端有效值才覆盖，否则保留本地」，若仍复现请把本报告完整复制发出。');
                 push('');
 
-                // ---- 最近一次猫抓补全请求快照（lastNumcatFillDebugHot_<date>） ----
+                // ---- 最近一次猫抓补全请求快照（内存变量 _hotNumcatDebugSnapshots，不落 localStorage） ----
                 // 🔍[诊断增强] 显示今天/昨天/前天三天的处理快照
                 function showDayDebug(label, dateKey, showPctCol) {
                     push('');
                     push('【最近一次猫抓补全 · ' + label + '（' + dateKey + '）】');
                     try {
-                        const rawDebug = localStorage.getItem('lastNumcatFillDebugHot_' + dateKey);
-                        if (!rawDebug) {
-                            push('　　（无记录：尚未点击过猫抓补全该日，或该功能是刚更新的旧版本未生成记录）');
+                        const dbg = _hotNumcatDebugSnapshots[dateKey];
+                        if (!dbg) {
+                            push('　　（无记录：本次页面加载后尚未点击过猫抓补全该日）');
                             return;
                         }
-                        const dbg = JSON.parse(rawDebug);
                         push('　　请求时间：' + dbg.requestedAt);
                         push('　　overwrite模式：' + dbg.overwrite);
                         push('　　接口返回中该交易日的原始记录 ' + (dbg.apiRawItemsForDate || []).length + ' 条');
