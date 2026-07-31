@@ -11007,13 +11007,19 @@
                 // 云端同步到旧表 hot_stock_trends（market_metrics 由 patchHotFieldBatch 负责，此处不再写入）
                 const sb = getSupabase();
                 const batchSize = 500;
-                if (_hotTrendsTableAvailable) {
-                    for (let i = 0; i < rows.length; i += batchSize) {
-                        const { error } = await sb.from('hot_stock_trends')
-                            .upsert(rows.slice(i, i + batchSize), { onConflict: 'date,stock' });
-                        if (error) throw error;
+                // [BUG-FIX] 不再依赖 _hotTrendsTableAvailable 标记静默跳过：初始化完成前该标记可能为 false，
+                // 导致抓取数据只进本地缓存、不进云端，刷新后丢失。改为直接尝试写入，表不存在时再报错。
+                for (let i = 0; i < rows.length; i += batchSize) {
+                    const { error } = await sb.from('hot_stock_trends')
+                        .upsert(rows.slice(i, i + batchSize), { onConflict: 'date,stock' });
+                    if (error) {
+                        if (error.message && error.message.indexOf('relation') >= 0) {
+                            _hotTrendsTableAvailable = false;
+                        }
+                        throw error;
                     }
                 }
+                _hotTrendsTableAvailable = true;
             } finally {
                 setTimeout(function() { _justPushedHotTrends = false; }, 2000);
             }
