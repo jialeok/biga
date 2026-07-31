@@ -1,7 +1,10 @@
 name = "bidding-board-worker-a"
 main = "bidding-board-worker-a.js"
-compatibility_date = "2026-07-31"
+compatibility_date = "2025-07-29"
 
+# ⚠️ 重要：wrangler deploy 会用这里的 crons 配置完全覆盖云端定时任务！
+# 如果这里 crons 为空，会清空 Dashboard 上手动配的定时任务——这是 7/30 断抓的根因。
+# 部署命令：wrangler deploy --config workers/wrangler-a.toml
 [triggers]
 crons = [
   "15 1 * * 1-5",
