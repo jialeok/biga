@@ -11851,6 +11851,15 @@
                 const watchlistRows = [];
                 const metricsRows = [];
                 const localOps = [];
+
+                // 预先查询本地缓存，判断哪些股票是正式成员（in_watchlist: true）
+                // 影子记录（不存在或in_watchlist: false）的patch只写market_metrics，不写hot_stocks，避免创建幽灵正式成员行
+                const existingDateCache = _hotFullRowCache[date] || [];
+                function isWatchlistStock(nameTrim) {
+                    var found = existingDateCache.find(function(r) { return r && r.stock === nameTrim; });
+                    return !!(found && found.in_watchlist);
+                }
+
                 items.forEach(function(item) {
                     if (!item || !item.stock) return;
                     const nameTrim = item.stock.trim();
@@ -11858,23 +11867,31 @@
                     const cleanPatch = _sanitizeHotPatch(item);
                     if (Object.keys(cleanPatch).length === 0) return;
                     const split = _splitHotPatch(cleanPatch);
-                    if (Object.keys(split.watchlistPatch).length > 0) {
+
+                    // 只有正式成员才写hot_stocks表；影子记录只写market_metrics
+                    const isInWatchlist = isWatchlistStock(nameTrim);
+                    if (isInWatchlist && Object.keys(split.watchlistPatch).length > 0) {
                         watchlistRows.push(Object.assign(
                             { date: date, stock: nameTrim, updated_at: now, updated_by: 'main' },
                             split.watchlistPatch
                         ));
                     }
+                    // market_metrics所有股票都写，影子记录也写入以持久化趋势数据
                     if (Object.keys(split.metricsPatch).length > 0) {
                         metricsRows.push(Object.assign(
-                            { date: date, stock: nameTrim, scope: 'hot', updated_at: now, updated_by: 'main' },
+                            { date: date, stock: nameTrim, scope: 'hot', in_watchlist: false, updated_at: now, updated_by: 'main' },
                             split.metricsPatch
                         ));
                     }
-                    localOps.push({ stock: nameTrim, cleanPatch: cleanPatch });
+                    localOps.push({ stock: nameTrim, cleanPatch: cleanPatch, isInWatchlist: isInWatchlist });
                 });
                 if (watchlistRows.length === 0 && metricsRows.length === 0) return { ok: true, rows: 0 };
 
-                // 本地缓存无条件更新（趋势图立即可读）
+                // 本地缓存先更新（趋势图/当前页立即可读）
+                // 注意：热门股票tab的影子记录由buildYesterdayListFromToday创建新对象，
+                // fillVolume修改的是这些临时对象，只有_mergeHotPatchLocal能把它们写入_hotFullRowCache。
+                // 这和早盘竞价tab不同（早盘竞价fillVolume直接修改_auctionMemCache引用），
+                // 所以本地merge必须在网络请求前同步执行，否则趋势图立即渲染时读不到影子数据。
                 localOps.forEach(function(op) {
                     _mergeHotPatchLocal(date, op.stock, op.cleanPatch);
                 });
@@ -19305,13 +19322,47 @@
                 push('');
 
                 // ---- 趋势图数据源体检（hot_stocks 全量快照 + hot_stock_trends 独立表） ----
-                push('【趋势图数据源 1/2：_hotFullRowCache（来自 hot_stocks 表）】');
+                push('【趋势图数据源 1/2：_hotFullRowCache（全量快照，含正式+影子记录）】');
                 // todayCache 已在上方代码映射体检中声明，直接复用
                 const yestCache = yesterday ? (_hotFullRowCache[yesterday] || []) : [];
-                push('　　' + today + ' 快照行数：' + todayCache.length);
-                push('　　' + (yesterday || '') + ' 快照行数：' + yestCache.length);
+                const dayBeforeCache = dayBefore ? (_hotFullRowCache[dayBefore] || []) : [];
+                push('　　' + today + ' 快照行数：' + todayCache.length + '（正式列表=' + todayList.length + '）');
+                push('　　' + (yesterday || '') + ' 快照行数：' + yestCache.length + '（正式列表=' + yesterdayList.length + '，影子记录=' + (yestCache.length - yesterdayList.length) + '）');
+                if (dayBefore) {
+                    const dayBeforeList = (hotAuctionData[dayBefore] || []).filter(function(s) { return s && s.stock; });
+                    push('　　' + dayBefore + ' 快照行数：' + dayBeforeCache.length + '（正式列表=' + dayBeforeList.length + '，影子记录=' + (dayBeforeCache.length - dayBeforeList.length) + '）');
+                }
+                // 近5天快照行数概览
+                push('　　近5交易日快照行数（含影子记录）：');
+                var d5 = today;
+                for (var i = 0; i < 5; i++) {
+                    if (!d5) break;
+                    var c5 = _hotFullRowCache[d5] || [];
+                    var w5 = (hotAuctionData[d5] || []).filter(function(s) { return s && s.stock; }).length;
+                    push('　　　' + d5 + '：共' + c5.length + '行（正式' + w5 + '/影子' + (c5.length - w5) + '）');
+                    d5 = getPreviousTradingDay(d5);
+                }
 
-                push('【趋势图数据源 2/2：_hotTrendsCache（来自 hot_stock_trends 独立表）】');
+                // 抽样核对今天列表第一只股票近5天的 trend 数据
+                if (todayList.length > 0) {
+                    const sample = todayList[0];
+                    const sampleName = sample.stock.trim();
+                    push('');
+                    push('　　抽样核对「' + sampleName + '」近5天数据完整性（趋势图应该有5个数据点）：');
+                    var ds = today;
+                    for (var j = 0; j < 5; j++) {
+                        if (!ds) break;
+                        var vol = getStockHistoryValue(ds, sampleName, 'volume', 'hot');
+                        var yvol = getStockHistoryValue(ds, sampleName, 'yestVolume', 'hot');
+                        var pct = getStockHistoryValue(ds, sampleName, 'changePct', 'hot');
+                        var status = (vol !== null || yvol !== null) ? '✓有数据' : '✗缺竞价量';
+                        push('　　　' + ds + '：volume=' + (vol === null ? '(空)' : vol) + ' | yestVolume=' + (yvol === null ? '(空)' : yvol) + ' | changePct=' + (pct === null ? '(空)' : (pct + '%')) + ' | ' + status);
+                        ds = getPreviousTradingDay(ds);
+                    }
+                }
+                push('');
+
+                push('【趋势图数据源 2/2：_hotTrendsCache（来自 hot_stock_trends 独立表，已废弃，仅兼容）】');
                 const todayTrend = _hotTrendsCache[today] || [];
                 const yestTrend = yesterday ? (_hotTrendsCache[yesterday] || []) : [];
                 push('　　' + today + ' 趋势行数：' + todayTrend.length);
@@ -19319,18 +19370,19 @@
 
                 if (todayList.length > 0) {
                     const sample = todayList[0];
-                    const cacheRow = todayCache.find(function(r) { return r.stock === sample.stock; });
+                    const cacheRow = todayCache.find(function(r) { return r.stock === sample.stock.trim(); });
                     const trendRow = todayTrend.find(function(r) { return r.stock === sample.stock; });
-                    push('　　抽样核对「' + sample.stock + '」：');
+                    push('　　抽样核对「' + sample.stock + '」（内存 vs 快照 vs 趋势表）：');
                     push('　　　内存(hotAuctionData) volume=' + (sample.volume || '(空)') + ' / yestVolume=' + (sample.yestVolume || '(空)'));
                     push('　　　快照(_hotFullRowCache) volume=' + (cacheRow ? (cacheRow.volume || '(空)') : '（无此股票）') +
-                         ' / yest_volume=' + (cacheRow ? (cacheRow.yest_volume || '(空)') : '（无此股票）'));
+                         ' / yest_volume=' + (cacheRow ? (cacheRow.yest_volume || '(空)') : '（无此股票）') +
+                         ' / in_watchlist=' + (cacheRow ? cacheRow.in_watchlist : '（无此股票）'));
                     push('　　　趋势表(_hotTrendsCache) volume=' + (trendRow ? (trendRow.volume || '(空)') : '（无此股票）') +
                          ' / yest_volume=' + (trendRow ? (trendRow.yest_volume || '(空)') : '（无此股票）'));
-                    const mismatch = cacheRow && ((cacheRow.volume || '') !== (sample.volume || '') || (cacheRow.yest_volume || '') !== (sample.yestVolume || ''));
-                    const mismatch2 = trendRow && ((trendRow.volume || '') !== (sample.volume || '') || (trendRow.yest_volume || '') !== (sample.yestVolume || ''));
-                    if (mismatch) push('　　　⚠️ 内存与 hot_stocks 快照不一致，可能显示旧值');
-                    if (mismatch2) push('　　　⚠️ 内存与 hot_stock_trends 趋势表不一致，趋势图可能显示旧值');
+                    const mismatch = cacheRow && ((String(cacheRow.volume || '') !== String(sample.volume || '')) || (String(cacheRow.yest_volume || '') !== String(sample.yestVolume || '')));
+                    const mismatch2 = trendRow && ((String(trendRow.volume || '') !== String(sample.volume || '')) || (String(trendRow.yest_volume || '') !== String(sample.yestVolume || '')));
+                    if (mismatch) push('　　　⚠️ 内存与 _hotFullRowCache 快照不一致，可能显示旧值');
+                    if (mismatch2) push('　　　⚠️ 内存与 hot_stock_trends 趋势表不一致（趋势表已废弃，不影响）');
                 }
                 push('');
 
