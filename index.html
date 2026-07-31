@@ -8841,6 +8841,7 @@
         let _hotTrendsReloadTimer = null; // hot_stock_trends Realtime 收到变更后的防抖重载定时器（原缺失声明）
         let _justPushedHotTrends = false; // 标记刚推送过 hot_stock_trends，忽略自己触发的 Realtime 通知（原缺失声明，loadHotTrendsFromCloud 第一行就读取它，若在赋值前被调用会 ReferenceError）
         let _hotNumcatDebugSnapshots = {}; // 猫抓补全调试快照（内存，不落 localStorage），key=日期字符串，value=快照对象
+        let _hotWatchlistIndex = {}; // 正式成员索引：{ date: Set(stockName) }，来源为 hot_stocks 表（该表天然只有正式成员）。行对象不再携带 in_watchlist 字段。
 
         function generateToken() {
             const arr = new Uint8Array(16);
@@ -10426,6 +10427,9 @@
             let offset = 0;
             const pageSize = 1000;
 
+            // 正式成员索引（方案2：行对象不再携带 in_watchlist，用独立 Set 维护）
+            const newWatchlistIndex = {};
+
             // 1) 读取 hot_stocks（正式列表成员）
             let stocksError = null;
             try {
@@ -10453,9 +10457,11 @@
                             selected: row.selected || false,
                             bought: row.bought || false,
                             sold: row.sold || false,
-                            fixed: row.fixed || false,
-                            in_watchlist: true
+                            fixed: row.fixed || false
                         };
+                        // 登记到正式成员索引
+                        if (!newWatchlistIndex[row.date]) newWatchlistIndex[row.date] = new Set();
+                        newWatchlistIndex[row.date].add(nameTrim);
                     });
                     if (data.length < pageSize) break;
                     offset += pageSize;
@@ -10496,8 +10502,7 @@
                             code: cloudCode || mapCode,
                             volume: row.volume || '',
                             yest_volume: row.yest_volume || '',
-                            change_pct: row.change_pct || '',
-                            in_watchlist: false
+                            change_pct: row.change_pct || ''
                         };
                     });
                     if (data.length < pageSize) break;
@@ -10515,11 +10520,13 @@
 
             // 合并写入全量快照缓存，并提取正式列表成员到 result
             _hotFullRowCache = {};
+            _hotWatchlistIndex = newWatchlistIndex; // 替换为本次加载的正式成员索引
             Object.keys(cloudByDate).forEach(function(d) {
                 const rows = Object.values(cloudByDate[d]);
                 _hotFullRowCache[d] = rows;
+                const watchlistSet = _hotWatchlistIndex[d] || new Set();
                 rows.forEach(function(r) {
-                    if (r.in_watchlist) {
+                    if (watchlistSet.has((r.stock || '').trim())) {
                         if (!result[d]) result[d] = [];
                         // 查找本地旧数据，合并 volume/yestVolume/note/changePct/topics（云端有值才覆盖）
                         const localList = oldLocalData[d] || [];
@@ -11639,6 +11646,9 @@
                     .upsert(statusRows, { onConflict: 'date,stock' });
                 if (updErr) throw updErr;
             }
+
+            // 方案2：同步完成后更新本地正式成员索引
+            _hotWatchlistIndex[date] = new Set(localStocks);
             } finally {
                 // 写入真正全部完成后，再留 2 秒缓冲吸收 Realtime 回显，而不是在写入尚未结束时就提前放开
                 _closeHotAuctionShield(2000);
@@ -11722,7 +11732,6 @@
                         note: item.note || '',
                         change_pct: item.changePct || '',
                         topics: item.topics || '',
-                        in_watchlist: isWatchlist,
                         selected: item.selected || false,
                         bought: item.bought || false,
                         sold: item.sold || false,
@@ -11829,7 +11838,7 @@
         }
 
         // 只把 patch 里出现的字段 merge 进 _hotFullRowCache 对应行；不存在则新建
-        // （新建行 in_watchlist 默认 false，影子记录恰好落在这里，语义自洽，无需特殊处理）。
+        // 方案2：新建行不设 in_watchlist，正式/影子身份由 _hotWatchlistIndex 独立判断
         function _mergeHotPatchLocal(date, stock, cleanPatch) {
             const nameTrim = (stock || '').trim();
             if (!nameTrim) return;
@@ -11839,7 +11848,7 @@
             if (idx >= 0) {
                 Object.keys(cleanPatch).forEach(function(k) { list[idx][k] = cleanPatch[k]; });
             } else {
-                const row = Object.assign({ stock: nameTrim, in_watchlist: false }, cleanPatch);
+                const row = Object.assign({ stock: nameTrim }, cleanPatch);
                 list.push(row);
             }
         }
@@ -11859,12 +11868,10 @@
                 const metricsRows = [];
                 const localOps = [];
 
-                // 预先查询本地缓存，判断哪些股票是正式成员（in_watchlist: true）
-                // 影子记录（不存在或in_watchlist: false）的patch只写market_metrics，不写hot_stocks，避免创建幽灵正式成员行
-                const existingDateCache = _hotFullRowCache[date] || [];
+                // 方案2：用 _hotWatchlistIndex 独立 Set 判断正式成员，不依赖行对象上的 in_watchlist 字段
+                const watchlistSet = _hotWatchlistIndex[date] || new Set();
                 function isWatchlistStock(nameTrim) {
-                    var found = existingDateCache.find(function(r) { return r && r.stock === nameTrim; });
-                    return !!(found && found.in_watchlist);
+                    return watchlistSet.has(nameTrim);
                 }
 
                 items.forEach(function(item) {
@@ -13679,8 +13686,8 @@
         function getTodayGroupList(dataSource='auction') {
             const list = getGroupData(dataSource)[currentDate] || [];
             if (dataSource === 'hot') {
-                // hot 分组行对象不带 in_watchlist 字段（undefined），用 !== false 兼容
-                return list.filter(function(r) { return r && r.in_watchlist !== false; });
+                // 方案2：_hotAuctionData 只从 hot_stocks 表加载正式成员，无需过滤
+                return list.filter(function(r) { return r && r.stock; });
             }
             // auction 分组：严格判断，只保留 in_watchlist === true 的正式列表成员
             // 阶段八 影子记录污染修复：与 getTodayAuction 保持一致，缺失(undefined)行
@@ -14830,7 +14837,7 @@
                 newNames.forEach(name => {
                     const exists = hotList.some(item => item && item.stock && item.stock.trim() === name);
                     if (!exists) {
-                        hotList.push({ stock: name, volume: '', yestVolume: '', note: '', changePct: '', topics: '', in_watchlist: true, selected: false, bought: false, sold: false, fixed: false });
+                        hotList.push({ stock: name, volume: '', yestVolume: '', note: '', changePct: '', topics: '', selected: false, bought: false, sold: false, fixed: false });
                         addedToHot++;
                     }
                 });
@@ -15516,8 +15523,8 @@
         function getNumericVolume(val) {
             if (val === '' || val === null || val === undefined) return null;
             const n = parseFloat(val);
-            if (isNaN(n) || n === 0) return null;
-            return n;
+            if (isNaN(n)) return null;
+            return n; // 0 是合法的竞价量/成交量，不再视为 null
         }
 
         function parseVolumeOnlyText(text) {
@@ -18483,11 +18490,14 @@
                     const name = s.stock.trim();
                     const code = (s.code || scMap[name] || '').trim();
                     if (!code) return;
-                    // 有效起始日：窗口内最早竞价量(volume)有值的日期；整个窗口都没竞价量则跳过这只股票
+                    // 有效起始日：窗口内最早有任意数据（volume/yestVolume/changePct）的日期
+                    // 修复死锁：原逻辑只用 volume 作为起点，导致猫抓三天覆盖范围之外的日期永远无法补全
                     let startDate = null;
                     for (let i = 0; i < windowDates.length; i++) {
                         const vol = getStockHistoryValue(windowDates[i], name, 'volume', 'hot');
-                        if (vol !== null) { startDate = windowDates[i]; break; }
+                        const yest = getStockHistoryValue(windowDates[i], name, 'yestVolume', 'hot');
+                        const pct = getStockHistoryValue(windowDates[i], name, 'changePct', 'hot');
+                        if (vol !== null || yest !== null || pct !== null) { startDate = windowDates[i]; break; }
                     }
                     if (!startDate) { noStartDateNames.push(name); return; }
                     // 起始日及之后、到今天为止
@@ -18708,10 +18718,13 @@
                     const name = s.stock.trim();
                     const code = (s.code || scMap[name] || '').trim();
                     if (!code) return;
+                    // 修复死锁：用任意数据作为起点，不只依赖 volume
                     let startDate = null;
                     for (let i = 0; i < windowDates.length; i++) {
                         const vol = getStockHistoryValue(windowDates[i], name, 'volume', 'hot');
-                        if (vol !== null) { startDate = windowDates[i]; break; }
+                        const yest = getStockHistoryValue(windowDates[i], name, 'yestVolume', 'hot');
+                        const pct = getStockHistoryValue(windowDates[i], name, 'changePct', 'hot');
+                        if (vol !== null || yest !== null || pct !== null) { startDate = windowDates[i]; break; }
                     }
                     if (!startDate) return;
                     const gapDates = [];
@@ -19465,6 +19478,7 @@
                 push('　　#hotForm 表单元素存在：' + (!!formEl));
                 push('　　#hotForm onsubmit 绑定：' + (formEl && formEl.getAttribute('onsubmit') || '（未找到）'));
                 push('　　云端表 hot_stocks 可用(_hotAuctionTableAvailable)：' + _hotAuctionTableAvailable);
+                push('　　云端表 market_metrics 可用(_marketMetricsTableAvailable)：' + _marketMetricsTableAvailable);
                 push('　　云端表 hot_stock_trends 可用(_hotTrendsTableAvailable)：' + _hotTrendsTableAvailable);
                 push('　　_syncState（云同步状态）：' + _syncState);
                 push('　　说明：热门股票数据不落 localStorage 的 auction 模块，直接以 hot_stocks /');
@@ -19526,7 +19540,7 @@
                     push('　　　内存(hotAuctionData) volume=' + (sample.volume || '(空)') + ' / yestVolume=' + (sample.yestVolume || '(空)'));
                     push('　　　快照(_hotFullRowCache) volume=' + (cacheRow ? (cacheRow.volume || '(空)') : '（无此股票）') +
                          ' / yest_volume=' + (cacheRow ? (cacheRow.yest_volume || '(空)') : '（无此股票）') +
-                         ' / in_watchlist=' + (cacheRow ? cacheRow.in_watchlist : '（无此股票）'));
+                         ' / 正式成员=' + (cacheRow ? ((_hotWatchlistIndex[today] && _hotWatchlistIndex[today].has((cacheRow.stock || '').trim())) ? '是' : '否(影子)') : '（无此股票）'));
                     push('　　　趋势表(_hotTrendsCache) volume=' + (trendRow ? (trendRow.volume || '(空)') : '（无此股票）') +
                          ' / yest_volume=' + (trendRow ? (trendRow.yest_volume || '(空)') : '（无此股票）'));
                     const mismatch = cacheRow && ((String(cacheRow.volume || '') !== String(sample.volume || '')) || (String(cacheRow.yest_volume || '') !== String(sample.yestVolume || '')));
