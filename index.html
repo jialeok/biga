@@ -10993,10 +10993,10 @@
                     .on('postgres_changes', {
                         event: '*', schema: 'public', table: 'market_metrics'
                     }, function(payload) {
-                        if (_justPushedHotTrends) return;
+                        if (_justPushedHotAuction || _justPushedHotTrends) return; // 自己刚推的，忽略
                         var row = payload.new || payload.old;
                         if (!row || !row.date || row.scope !== 'hot') return;
-                        _pendingHotReload.trends = true;
+                        _pendingHotReload.stocks = true; // market_metrics变化影响_hotFullRowCache，需触发loadHotStocksFromCloud
                         _scheduleHotRealtimeReload();
                     })
                     .subscribe();
@@ -11876,10 +11876,10 @@
                             split.watchlistPatch
                         ));
                     }
-                    // market_metrics所有股票都写，影子记录也写入以持久化趋势数据
+                    // market_metrics所有股票都写（正式成员+影子记录），确保行情数据持久化
                     if (Object.keys(split.metricsPatch).length > 0) {
                         metricsRows.push(Object.assign(
-                            { date: date, stock: nameTrim, scope: 'hot', in_watchlist: false, updated_at: now, updated_by: 'main' },
+                            { date: date, stock: nameTrim, scope: 'hot', updated_at: now, updated_by: 'main' },
                             split.metricsPatch
                         ));
                     }
@@ -18792,24 +18792,28 @@
                 const scMap = loadAllData().stockCodeMap || {};
 
                 // [BUG-FIX/恢复] 从云端全量快照缓存恢复缺失的 code，再收集请求代码。
+                // 返回patches数组以便持久化恢复的code到云端（对齐同花顺版本逻辑）
                 const recoverCodesFromCache = function(list, dateKey) {
                     const cacheList = _hotFullRowCache[dateKey] || [];
                     const cacheMap = {};
                     cacheList.forEach(function(r) { if (r && r.stock) cacheMap[r.stock.trim()] = r; });
-                    let count = 0;
+                    const patches = [];
                     list.forEach(function(s) {
                         if (!s || !s.stock || (s.code || '').trim()) return;
                         const cached = cacheMap[s.stock.trim()];
                         if (cached && (cached.code || '').trim()) {
                             s.code = cached.code.trim();
-                            count++;
+                            patches.push({ stock: s.stock, code: s.code });
                         }
                     });
-                    return count;
+                    return patches;
                 };
-                const recoveredToday = recoverCodesFromCache(todayList, today);
-                const recoveredYesterday = recoverCodesFromCache(yesterdayList, yesterday);
-                const recoveredDayBefore = recoverCodesFromCache(dayBeforeList, dayBefore);
+                const _todayRecoveredCodePatches = recoverCodesFromCache(todayList, today);
+                const _yesterdayRecoveredCodePatches = recoverCodesFromCache(yesterdayList, yesterday);
+                const _dayBeforeRecoveredCodePatches = recoverCodesFromCache(dayBeforeList, dayBefore);
+                const recoveredToday = _todayRecoveredCodePatches.length;
+                const recoveredYesterday = _yesterdayRecoveredCodePatches.length;
+                const recoveredDayBefore = _dayBeforeRecoveredCodePatches.length;
                 if (recoveredToday > 0 || recoveredYesterday > 0 || recoveredDayBefore > 0) {
                     console.log('[NUMCAT-DEBUG-HOT] 从缓存恢复 code: 今日' + recoveredToday + ' 昨日' + recoveredYesterday + ' 前日' + recoveredDayBefore);
                 }
@@ -18973,6 +18977,16 @@
                 const todayCodePatches = []; // [BUG-FIX] 自动回填 code
                 const yesterdayCodePatches = [];
                 const dayBeforeCodePatches = [];
+                // 合并从_hotFullRowCache缓存恢复的code patches
+                if (_todayRecoveredCodePatches.length > 0) {
+                    _todayRecoveredCodePatches.forEach(function(p) { todayCodePatches.push(p); });
+                }
+                if (_yesterdayRecoveredCodePatches.length > 0) {
+                    _yesterdayRecoveredCodePatches.forEach(function(p) { yesterdayCodePatches.push(p); });
+                }
+                if (_dayBeforeRecoveredCodePatches.length > 0) {
+                    _dayBeforeRecoveredCodePatches.forEach(function(p) { dayBeforeCodePatches.push(p); });
+                }
                 // 🔍[调试-诊断报告用] 记录"今天"这轮每只股票的命中/未命中情况，写入
                 // lastNumcatFillDebugHot_<date>（加 Hot 前缀与早盘竞价 key 互相独立）。
                 const todayFillLog = [];
