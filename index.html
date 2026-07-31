@@ -9261,7 +9261,13 @@
             const primaryVal = _readHistoryValueFrom(primaryCache[date], stockName, field);
             if (primaryVal !== null) return primaryVal;
             // 本 tab 缺失 → 回退另一个 tab 的影子数据
-            return _readHistoryValueFrom(fallbackCache[date], stockName, field);
+            const fallbackVal = _readHistoryValueFrom(fallbackCache[date], stockName, field);
+            if (fallbackVal !== null) return fallbackVal;
+            // 热门股票：再回退 hot_stock_trends 独立缓存（抓取程序/Worker 写入的历史趋势数据）
+            if (dataSource === 'hot' && _hotTrendsCache && _hotTrendsCache[date]) {
+                return _readHistoryValueFrom(_hotTrendsCache[date], stockName, field);
+            }
+            return null;
         }
 
         // ===== stock_topics 表操作（题材库独立表）=====
