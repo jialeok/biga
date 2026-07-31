@@ -2,14 +2,17 @@
  * 猫爪 NumCat 看板 · Worker B（NumCat 专用）
  *
  * 部署到 Cloudflare 账号 B，只读写 NumCat 数据，完全不碰同花顺/腾讯行情。
- * 共 4 个 cron：
- *   1. 9:25  (UTC 01:25) → 抓封单家数，写入 bidding_data.time930（name='封单家数'）
- *   2. 9:26  (UTC 01:26) → 抓情绪看板，写入 emotion_data
- *   3. 9:40  (UTC 01:40) → 开盘后补抓情绪看板（盘前 am_pred 未发布时，开盘后重抓拿到今日预测）
- *   4. 16:00 (UTC 08:00) → 抓记忘看板昨收涨跌比，写入 jiwang_data
+ * 共 4 个 cron（注意 Cloudflare 星期编号：1=周日→7=周六，工作日用 2-6）：
+ *   1. 9:25  (UTC 01:25, MON-FRI=2-6) → 抓封单家数，写入 bidding_data.time930（name='封单家数'）
+ *   2. 9:26  (UTC 01:26, MON-FRI=2-6) → 抓情绪看板，写入 emotion_data
+ *   3. 9:40  (UTC 01:40, MON-FRI=2-6) → 开盘后补抓情绪看板（盘前 am_pred 未发布时，开盘后重抓拿到今日预测）
+ *   4. 16:00 (UTC 08:00, MON-FRI=2-6) → 抓记忘看板昨收涨跌比，写入 jiwang_data
  *
  * 手动触发：GET /fetch?token=<FETCH_TOKEN>&point=t0925-seal|t0926|close|jiwang|auto
  * 公开刷新：GET /refresh-emotion（按 IP 限流，仅刷新预测量能）
+ *
+ * ⚠️ 历史坑：crons 里星期几用 1-5 在 Cloudflare 等于周日-周四，周五永远不触发！
+ *    正确写法是 2-6（周一到周五）。
  */
 
 // ══════════════════════════ 配置区 ══════════════════════════
@@ -46,11 +49,13 @@ const CONFIG = {
   EMOTION_TABLE: 'emotion_data',
 };
 
+// ⚠️ Cloudflare 星期编号：1=周日, 2=周一, ..., 6=周五, 7=周六
+// 周一到周五用 2-6，不是 1-5（1-5 = 周日到周四，周五会漏掉！）
 const CRON_TO_POINT = {
-  '25 1 * * 1-5': 't0925-seal',
-  '26 1 * * 1-5': 't0926',
-  '40 1 * * 1-5': 't0926', // 开盘后补抓：盘前 am_pred 未发布时，开盘后重抓一次拿到今日预测
-  '0 8 * * 1-5': 'close',
+  '25 1 * * 2-6': 't0925-seal',
+  '26 1 * * 2-6': 't0926',
+  '40 1 * * 2-6': 't0926', // 开盘后补抓：盘前 am_pred 未发布时，开盘后重抓一次拿到今日预测
+  '0 8 * * 2-6': 'close',
 };
 const SEAL_COLUMN = 'time930';
 

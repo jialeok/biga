@@ -5,12 +5,15 @@ compatibility_date = "2025-07-29"
 # ⚠️ 重要：wrangler deploy 会用这里的 crons 配置完全覆盖云端定时任务！
 # 如果这里 crons 为空，会清空 Dashboard 上手动配的定时任务——这是 7/30 断抓的根因。
 # 部署命令：wrangler deploy --config workers/wrangler-b.toml
+#
+# ⚠️ Cloudflare 星期编号：1=周日, 2=周一, ..., 6=周五, 7=周六
+#    周一到周五 = 2-6（不是 1-5！1-5 在 Cloudflare 是周日到周四，周五永远不触发！）
 [triggers]
 crons = [
-  "25 1 * * 1-5",
-  "26 1 * * 1-5",
-  "40 1 * * 1-5",
-  "0 8 * * 1-5",
+  "25 1 * * 2-6",
+  "26 1 * * 2-6",
+  "40 1 * * 2-6",
+  "0 8 * * 2-6",
 ]
 
 # 需通过 wrangler secret put 设置：
