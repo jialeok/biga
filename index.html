@@ -7512,7 +7512,10 @@
     <script>
     // 弹窗上下文：记录哪个 tab、哪个按钮触发了模式选择
     let _historyGapPctCtx = { btn: null, tab: 'auction' };
+    let _historyGapPctModalOpen = false; // [BUG-FIX] 防重复弹出标志
     function openHistoryGapPctModeModal(btn, tab) {
+        if (_historyGapPctModalOpen) return; // 防重复触发（事件冒泡/键盘Enter导致弹两次）
+        _historyGapPctModalOpen = true;
         _historyGapPctCtx = { btn: btn, tab: tab || 'auction' };
         const modal = document.getElementById('historyGapPctModeModal');
         if (modal) modal.classList.add('active');
@@ -7524,10 +7527,13 @@
         if (owBtn) owBtn.onmouseenter = function(){ if(desc) desc.textContent = '覆盖模式：从起点日起，对所有交易日（含已有涨幅的日期）重新拉取K线、重算涨幅并覆盖写入。用于修正之前不正确或不完整的涨幅数据。'; };
     }
     function closeHistoryGapPctModeModal() {
+        _historyGapPctModalOpen = false; // [BUG-FIX] 重置防重复标志（点击遮罩关闭时也要重置）
         const modal = document.getElementById('historyGapPctModeModal');
         if (modal) modal.classList.remove('active');
     }
     function confirmHistoryGapPctMode(mode) {
+        if (!_historyGapPctModalOpen) return; // 防重复确认
+        _historyGapPctModalOpen = false;
         const ctx = _historyGapPctCtx;
         closeHistoryGapPctModeModal();
         if (ctx.tab === 'hot') {
@@ -17714,6 +17720,22 @@
                 const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
 
+                // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
+                const _cloudTasks = [];
+                const _cloudErrors = [];
+                function _safePatch(date, patches, label) {
+                    if (patches.length === 0) return;
+                    _cloudTasks.push(
+                        patchHotFieldBatch(date, patches).then(function(res) {
+                            if (res && res.ok === false) _cloudErrors.push(label + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
+                        }).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); })
+                    );
+                }
+                function _safeTrends(date, list, label) {
+                    if (!list || list.length === 0) return;
+                    _cloudTasks.push(pushHotTrendsToCloud(date, list).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); }));
+                }
+
                 // [BUG-FIX/恢复] 从云端全量快照缓存恢复缺失的 code，避免保存/同步后内存 code 丢失。
                 const recoverCodesFromCache = function(list, dateKey) {
                     const cacheList = _hotFullRowCache[dateKey] || [];
@@ -17790,15 +17812,11 @@
                     }
                 });
                 hotAuctionData[today] = todayList;
-                if (todayCodePatches.length > 0) {
-                    patchHotFieldBatch(today, todayCodePatches).catch(function(e) { console.warn('patchHotFieldBatch today code 失败:', e); });
-                }
-                if (todayYestVolPatches.length > 0) {
-                    patchHotFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch today yest_volume 失败:', e); });
-                }
+                _safePatch(today, todayCodePatches, '今日code');
+                _safePatch(today, todayYestVolPatches, '今日yest_volume');
                 // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
                 var _trendsToday = todayList.filter(function(s) { return s && s.stock && s.yestVolume; });
-                pushHotTrendsToCloud(today, _trendsToday).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
+                _safeTrends(today, _trendsToday, '今日趋势');
 
                 // ===== 第二批：调取对比日的昨日成交量（yesterday.yestVolume ← dayBefore 的 volume）=====
                 setApiStatus('thsApiStatusHot', '【2/2】正在获取 ' + allCodes.length + ' 只股票在 ' + dayBefore + ' 的成交量...', true);
@@ -17851,19 +17869,17 @@
 
                 hotAuctionData[yesterday] = existingYesterdayList; // 正式列表：只含对比日原有股票，数量不变
                 invalidateTopicCache();
-                if (yesterdayCodePatches.length > 0) {
-                    patchHotFieldBatch(yesterday, yesterdayCodePatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday code 失败:', e); });
-                }
-                if (yesterdayYestVolPatches.length > 0) {
-                    patchHotFieldBatch(yesterday, yesterdayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday yest_volume 失败:', e); });
-                }
+                _safePatch(yesterday, yesterdayCodePatches, '昨日code');
+                _safePatch(yesterday, yesterdayYestVolPatches, '昨日yest_volume');
                 // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
                 var _trendsYest = existingYesterdayList.filter(function(s) { return s && s.stock && s.yestVolume; });
-                pushHotTrendsToCloud(yesterday, _trendsYest).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                _safeTrends(yesterday, _trendsYest, '昨日趋势');
                 var _trendsShadow = shadowOnlyYesterdayStocks.filter(function(s) { return s && s.stock && s.yestVolume; });
-                if (_trendsShadow.length > 0) {
-                    pushHotTrendsToCloud(yesterday, _trendsShadow).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
-                }
+                _safeTrends(yesterday, _trendsShadow, '昨日趋势(影子)');
+
+                // [BUG-FIX] 等待所有云端写入完成
+                setApiStatus('thsApiStatusHot', '正在同步到云端...', true);
+                await Promise.all(_cloudTasks);
 
                 // 刷新表单和看板
                 renderHotForm();
@@ -17874,10 +17890,14 @@
                 const yesterdaySource = yesterdayListWasEmpty
                     ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
                     : '';
-                setApiStatus('thsApiStatusHot',
-                    '✅ 今日填 ' + todayFilled + '/' + todayTotal + '，对比日填 ' + yesterdayFilled + '/' + yesterdayTotal + yesterdaySource +
-                    '；跳过 今日' + todaySkipped + ' / 对比日' + yesterdaySkipped + '（无数据或缺代码）',
-                    true);
+                let _statusMsg = '✅ 今日填 ' + todayFilled + '/' + todayTotal + '，对比日填 ' + yesterdayFilled + '/' + yesterdayTotal + yesterdaySource +
+                    '；跳过 今日' + todaySkipped + ' / 对比日' + yesterdaySkipped + '（无数据或缺代码）';
+                if (_cloudErrors.length > 0) {
+                    _statusMsg += ' ⚠️ 云端写入失败：' + _cloudErrors.join('；');
+                    setApiStatus('thsApiStatusHot', _statusMsg, false);
+                } else {
+                    setApiStatus('thsApiStatusHot', _statusMsg, true);
+                }
             } catch (err) {
                 console.error('fillHotYesterdayVolumeFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
@@ -17911,6 +17931,22 @@
                     return;
                 }
                 const scMap = loadAllData().stockCodeMap || {};
+
+                // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
+                const _cloudTasks = [];
+                const _cloudErrors = [];
+                function _safePatch(date, patches, label) {
+                    if (patches.length === 0) return;
+                    _cloudTasks.push(
+                        patchHotFieldBatch(date, patches).then(function(res) {
+                            if (res && res.ok === false) _cloudErrors.push(label + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
+                        }).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); })
+                    );
+                }
+                function _safeTrends(date, list, label) {
+                    if (!list || list.length === 0) return;
+                    _cloudTasks.push(pushHotTrendsToCloud(date, list).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); }));
+                }
 
                 // [BUG-FIX/恢复] 若内存行缺 code，优先从本地全量快照缓存(_hotFullRowCache)找回，
                 // 这样即使之前保存/同步把内存 code 冲掉，仍能从云端快照恢复，避免"没有可补全的股票"。
@@ -18008,15 +18044,11 @@
                 }
                 hotAuctionData[today] = todayList;
                 invalidateTopicCache();
-                if (codePatches.length > 0) {
-                    patchHotFieldBatch(today, codePatches).catch(function(e) { console.warn('patchHotFieldBatch today code 失败:', e); });
-                }
-                if (todayYestVolPatches.length > 0) {
-                    patchHotFieldBatch(today, todayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch today yest_volume 失败:', e); });
-                }
+                _safePatch(today, codePatches, '今日code');
+                _safePatch(today, todayYestVolPatches, '今日yest_volume');
                 // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
                 var _trendsItems = todayList.filter(function(s) { return s && s.stock && s.yestVolume; });
-                pushHotTrendsToCloud(today, _trendsItems).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
+                _safeTrends(today, _trendsItems, '今日趋势');
 
                 // 调试：验证 _hotFullRowCache 是否已更新
                 if (todayYestVolPatches.length > 0) {
@@ -18033,12 +18065,20 @@
                     console.log('[HotTodayYestVol] 缓存验证(' + _verifyLog.length + '只):\n' + _verifyLog.join('\n'));
                 }
 
+                // [BUG-FIX] 等待所有云端写入完成
+                setApiStatus('thsApiStatusHot', '正在同步到云端...', true);
+                await Promise.all(_cloudTasks);
+
                 renderHotForm();
                 renderHotStocks();
 
-                setApiStatus('thsApiStatusHot',
-                    '✅ ' + (overwrite ? '覆盖' : '补全') + ' 当天昨日成交量 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）',
-                    true);
+                let _statusMsg = '✅ ' + (overwrite ? '覆盖' : '补全') + ' 当天昨日成交量 ' + filled + '/' + todayList.length + '，跳过 ' + skipped + '（无数据或缺代码）';
+                if (_cloudErrors.length > 0) {
+                    _statusMsg += ' ⚠️ 云端写入失败：' + _cloudErrors.join('；');
+                    setApiStatus('thsApiStatusHot', _statusMsg, false);
+                } else {
+                    setApiStatus('thsApiStatusHot', _statusMsg, true);
+                }
             } catch (err) {
                 console.error('fillHotTodayYesterdayVolumeFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
@@ -18076,6 +18116,22 @@
                 const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
                 const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
                 const scMap = loadAllData().stockCodeMap || {};
+
+                // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
+                const _cloudTasks = [];
+                const _cloudErrors = [];
+                function _safePatch(date, patches, label) {
+                    if (patches.length === 0) return;
+                    _cloudTasks.push(
+                        patchHotFieldBatch(date, patches).then(function(res) {
+                            if (res && res.ok === false) _cloudErrors.push(label + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
+                        }).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); })
+                    );
+                }
+                function _safeTrends(date, list, label) {
+                    if (!list || list.length === 0) return;
+                    _cloudTasks.push(pushHotTrendsToCloud(date, list).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); }));
+                }
 
                 // [BUG-FIX/恢复] 从云端全量快照缓存恢复缺失的 code。
                 const cacheList = _hotFullRowCache[yesterday] || [];
@@ -18162,19 +18218,13 @@
 
                 hotAuctionData[yesterday] = existingYesterdayList;
                 invalidateTopicCache();
-                if (codePatches.length > 0) {
-                    patchHotFieldBatch(yesterday, codePatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday code 失败:', e); });
-                }
-                if (yesterdayYestVolPatches.length > 0) {
-                    patchHotFieldBatch(yesterday, yesterdayYestVolPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday yest_volume 失败:', e); });
-                }
+                _safePatch(yesterday, codePatches, '昨日code');
+                _safePatch(yesterday, yesterdayYestVolPatches, '昨日yest_volume');
                 // [BUG-FIX] 只推送有 yestVolume 的股票到 hot_stock_trends，避免空 volume/change_pct 覆盖已有值
                 var _trendsExist = existingYesterdayList.filter(function(s) { return s && s.stock && s.yestVolume; });
-                pushHotTrendsToCloud(yesterday, _trendsExist).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
+                _safeTrends(yesterday, _trendsExist, '昨日趋势');
                 var _trendsShadow = shadowOnlyYesterdayStocks.filter(function(s) { return s && s.stock && s.yestVolume; });
-                if (_trendsShadow.length > 0) {
-                    pushHotTrendsToCloud(yesterday, _trendsShadow).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
-                }
+                _safeTrends(yesterday, _trendsShadow, '昨日趋势(影子)');
 
                 // 调试：验证 _hotFullRowCache 是否已更新
                 if (yesterdayYestVolPatches.length > 0) {
@@ -18191,15 +18241,23 @@
                     console.log('[HotYestYestVol] 缓存验证(' + _verifyLog.length + '只):\n' + _verifyLog.join('\n'));
                 }
 
+                // [BUG-FIX] 等待所有云端写入完成
+                setApiStatus('thsApiStatusHot', '正在同步到云端...', true);
+                await Promise.all(_cloudTasks);
+
                 renderHotForm();
                 renderHotStocks();
 
                 const yesterdaySource = yesterdayListWasEmpty
                     ? '（对比日列表已用今日列表 ' + todayList.length + ' 只作为基础）'
                     : '';
-                setApiStatus('thsApiStatusHot',
-                    '✅ ' + (overwrite ? '覆盖' : '补全') + ' 对比日昨成交量 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）',
-                    true);
+                let _statusMsg = '✅ ' + (overwrite ? '覆盖' : '补全') + ' 对比日昨成交量 ' + filled + '/' + yesterdayList.length + yesterdaySource + '，跳过 ' + skipped + '（无数据或缺代码）';
+                if (_cloudErrors.length > 0) {
+                    _statusMsg += ' ⚠️ 云端写入失败：' + _cloudErrors.join('；');
+                    setApiStatus('thsApiStatusHot', _statusMsg, false);
+                } else {
+                    setApiStatus('thsApiStatusHot', _statusMsg, true);
+                }
             } catch (err) {
                 console.error('fillHotYesterdayYesterdayVolumeFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
@@ -18231,6 +18289,23 @@
 
                 // 收集 thscode
                 const scMap = loadAllData().stockCodeMap || {};
+
+                // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
+                const _cloudTasks = [];
+                const _cloudErrors = [];
+                function _safePatch(date, patches, label) {
+                    if (patches.length === 0) return;
+                    _cloudTasks.push(
+                        patchHotFieldBatch(date, patches).then(function(res) {
+                            if (res && res.ok === false) _cloudErrors.push(label + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
+                        }).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); })
+                    );
+                }
+                function _safeTrends(date, list, label) {
+                    if (!list || list.length === 0) return;
+                    _cloudTasks.push(pushHotTrendsToCloud(date, list).catch(function(e) { _cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e))); }));
+                }
+
                 const stockMap = {}; // thscode -> stock 对象
                 const thscodes = [];
                 const codePatches = []; // [BUG-FIX] 把 scMap 里的 code 写回 hot_stocks
@@ -18327,24 +18402,27 @@
 
                 hotAuctionData[today] = todayList;
                 invalidateTopicCache();
+
+                // 同步到云端（字段级 PATCH：先写 code，再写本次改动的 change_pct/note，不再整行覆盖）
+                // [BUG-FIX] await所有patch，收集错误反馈UI
+                _safePatch(today, codePatches, '今日code');
+                _safePatch(today, changePctPatches, '今日change_pct');
+                _safeTrends(today, todayList, '今日趋势');
+
+                setApiStatus('thsApiStatusHot', '正在同步到云端...', true);
+                await Promise.all(_cloudTasks);
+
                 renderHotForm();
                 renderHotStocks();
 
-                // 同步到云端（字段级 PATCH：先写 code，再写本次改动的 change_pct/note，不再整行覆盖）
-                if (codePatches.length > 0) {
-                    patchHotFieldBatch(today, codePatches).catch(function(e) { console.warn('patchHotFieldBatch code 失败:', e); });
-                }
-                if (changePctPatches.length > 0) {
-                    patchHotFieldBatch(today, changePctPatches).catch(function(e) {
-                        console.warn('patchHotFieldBatch change_pct 失败:', e);
-                    });
-                }
-                pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
-
                 const action = overwrite ? '覆盖' : '补全';
-                setApiStatus('thsApiStatusHot',
-                    '✅ ' + action + ' ' + filledCount + ' 只股票涨幅，跳过 ' + skippedCount + ' 只无数据或已有',
-                    true);
+                let _statusMsg = '✅ ' + action + ' ' + filledCount + ' 只股票涨幅，跳过 ' + skippedCount + ' 只无数据或已有';
+                if (_cloudErrors.length > 0) {
+                    _statusMsg += ' ⚠️ 云端写入失败：' + _cloudErrors.join('；');
+                    setApiStatus('thsApiStatusHot', _statusMsg, false);
+                } else {
+                    setApiStatus('thsApiStatusHot', _statusMsg, true);
+                }
             } catch (err) {
                 console.error('fetchHotChangePctFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '获取失败';
@@ -18538,13 +18616,24 @@
                 }
 
                 // 逐日上报（只写 change_pct，其它字段一律不碰）
+                // [BUG-FIX] await所有patch，收集云端写入错误反馈到UI，不再fire-and-forget
+                setApiStatus('thsApiStatusHot', modeLabel + '模式：K线拉取完成，正在同步到云端...', true);
+                const patchErrors = [];
+                const patchTasks = [];
                 const gapDateKeys = Object.keys(patchesByDate);
                 for (let di = 0; di < gapDateKeys.length; di++) {
                     const dt = gapDateKeys[di];
-                    patchHotFieldBatch(dt, patchesByDate[dt]).catch(function(e) {
-                        _dbgLog('[HOT-ERR] patchHotFieldBatch 历史断点涨幅(' + modeLabel + ') ' + dt + ' ' + (e && e.message || e));
-                    });
+                    patchTasks.push(
+                        patchHotFieldBatch(dt, patchesByDate[dt]).then(function(res) {
+                            if (res && res.ok === false) {
+                                patchErrors.push(dt + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
+                            }
+                        }).catch(function(e) {
+                            patchErrors.push(dt + ': ' + (e && e.message ? e.message : String(e)));
+                        })
+                    );
                 }
+                await Promise.all(patchTasks);
 
                 // 刷新当前页渲染（趋势图会读到 _hotFullRowCache 里新补的 change_pct）
                 renderHotForm();
@@ -18554,7 +18643,8 @@
                     ' | 补全断点=' + filledGapDays + ' | 覆盖已有=' + overwrittenDays +
                     ' | 无K线数据股票=' + noDataStocks + '（目标日=' + noDataGapDays + '）' +
                     ' | 拉取失败=' + failedStocks +
-                    ' | 非交易日跳过=' + nonTradingSkipTotal);
+                    ' | 非交易日跳过=' + nonTradingSkipTotal +
+                    ' | 云端写入错误=' + patchErrors.length);
 
                 const statusParts = ['✅ ' + modeLabel + '完成：' + filledStocks + ' 只股票'];
                 if (mode === 'overwrite') {
@@ -18566,7 +18656,13 @@
                 if (noDataStocks > 0) statusParts.push(noDataStocks + ' 只目标日无K线数据');
                 if (failedStocks > 0) statusParts.push(failedStocks + ' 只拉取失败');
                 if (nonTradingSkipTotal > 0) statusParts.push('跳过 ' + nonTradingSkipTotal + ' 个非交易日');
-                setApiStatus('thsApiStatusHot', statusParts.join('，') + '（影子记录，不影响任何日期的最近多板池）', true);
+                let finalMsg = statusParts.join('，') + '（影子记录，不影响任何日期的最近多板池）';
+                if (patchErrors.length > 0) {
+                    finalMsg += ' ⚠️ 云端写入失败：' + patchErrors.join('；');
+                    setApiStatus('thsApiStatusHot', finalMsg, false);
+                } else {
+                    setApiStatus('thsApiStatusHot', finalMsg, true);
+                }
             } catch (err) {
                 console.error('fillHotHistoryGapPctFromThs(' + modeLabel + ') 失败:', err);
                 let msg = err && err.message ? err.message : (modeLabel + '失败');
@@ -18690,20 +18786,36 @@
                 }
 
                 // 逐日上报（只写 yest_volume，其它字段一律不碰；影子记录 in_watchlist 默认 false）
+                // [BUG-FIX] await所有patch，收集云端写入错误反馈到UI，不再fire-and-forget
+                setApiStatus('thsApiStatusHot', '历史断点昨日成交量：K线拉取完成，正在同步到云端...', true);
+                const patchErrors = [];
+                const patchTasks = [];
                 const gapDateKeys = Object.keys(patchesByDate);
                 for (let di = 0; di < gapDateKeys.length; di++) {
                     const dt = gapDateKeys[di];
-                    patchHotFieldBatch(dt, patchesByDate[dt]).catch(function(e) {
-                        console.warn('patchHotFieldBatch 历史断点昨日成交量 ' + dt + ' 失败:', e);
-                    });
+                    patchTasks.push(
+                        patchHotFieldBatch(dt, patchesByDate[dt]).then(function(res) {
+                            if (res && res.ok === false) {
+                                patchErrors.push(dt + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
+                            }
+                        }).catch(function(e) {
+                            patchErrors.push(dt + ': ' + (e && e.message ? e.message : String(e)));
+                        })
+                    );
                 }
+                await Promise.all(patchTasks);
 
                 renderHotForm();
                 renderHotStocks();
 
-                setApiStatus('thsApiStatusHot',
-                    '✅ 补全完成：' + filledStocks + ' 只股票、' + filledGapDays + ' 个断点日昨日成交量已写入（影子记录，不影响任何日期的最近多板池）' +
-                    (failedStocks > 0 ? '，' + failedStocks + ' 只拉取失败' : ''), true);
+                let finalMsg = '✅ 补全完成：' + filledStocks + ' 只股票、' + filledGapDays + ' 个断点日昨日成交量已写入（影子记录，不影响任何日期的最近多板池）' +
+                    (failedStocks > 0 ? '，' + failedStocks + ' 只拉取失败' : '');
+                if (patchErrors.length > 0) {
+                    finalMsg += ' ⚠️ 云端写入失败：' + patchErrors.join('；');
+                    setApiStatus('thsApiStatusHot', finalMsg, false);
+                } else {
+                    setApiStatus('thsApiStatusHot', finalMsg, true);
+                }
             } catch (err) {
                 console.error('fillHotHistoryGapYestVolumeFromThs 失败:', err);
                 let msg = err && err.message ? err.message : '补全失败';
@@ -18987,11 +19099,13 @@
                 if (_dayBeforeRecoveredCodePatches.length > 0) {
                     _dayBeforeRecoveredCodePatches.forEach(function(p) { dayBeforeCodePatches.push(p); });
                 }
-                // 🔍[调试-诊断报告用] 记录"今天"这轮每只股票的命中/未命中情况，写入
+                // 🔍[调试-诊断报告用] 记录各日每只股票的命中/未命中情况，写入
                 // lastNumcatFillDebugHot_<date>（加 Hot 前缀与早盘竞价 key 互相独立）。
                 const todayFillLog = [];
+                const yesterdayFillLog = [];
+                const dayBeforeFillLog = [];
 
-                const fillVolume = function(list, dateStr, overwrite, fillPct, patchesArr, codePatchesArr) {
+                const fillVolume = function(list, dateStr, overwrite, fillPct, patchesArr, codePatchesArr, fillLogArr) {
                     const ymd = dateStr.replace(/-/g, '');
                     const dayData = aucByDate[ymd] || {};
                     list.forEach(function(s) {
@@ -19046,8 +19160,9 @@
                             skippedCount++; // 接口无该股票数据，覆盖/补全模式下都跳过
                         }
 
-                        if (fillPct) {
-                            todayFillLog.push({
+                        // 🔍[调试] 记录所有天的处理结果（不仅是今天）
+                        if (fillLogArr) {
+                            fillLogArr.push({
                                 stock: s.stock, code: code,
                                 hadDayData: hasDayData,
                                 apiReturnedPct: dayEntry ? (dayEntry.pct || null) : null,
@@ -19059,8 +19174,10 @@
                                 volumeAfter: s.volume || '',
                                 reasonNotWritten: skipReason || (
                                     !dayEntry ? '接口返回结果里无该股票' : (
-                                        !dayEntry.pct ? '接口未返回auc_pct_chg' : (
-                                            !overwrite && (s.changePct || '').trim() ? '已有涨幅且非覆盖模式，未覆盖' : '未知'
+                                        fillPct && !dayEntry.pct ? '接口未返回auc_pct_chg' : (
+                                            !overwrite && fillPct && (s.changePct || '').trim() ? '已有涨幅且非覆盖模式，未覆盖' : (
+                                                !overwrite && !fillPct && getNumericVolume(s.volume) !== null ? '已有竞价量且非覆盖模式，未覆盖' : '未知'
+                                            )
                                         )
                                     )
                                 )
@@ -19070,31 +19187,12 @@
                 };
 
                 if (needToday) {
-                    fillVolume(todayList, today, !!opts.overwriteToday, true, todayPatches, todayCodePatches);   // 今天：填 volume + 涨幅
+                    fillVolume(todayList, today, !!opts.overwriteToday, true, todayPatches, todayCodePatches, todayFillLog);   // 今天：填 volume + 涨幅
                     hotAuctionData[today] = todayList;
-                    // 🔍[调试-诊断报告用] 快照写入 localStorage，供"运行诊断"读取展示。
-                    try {
-                        localStorage.setItem('lastNumcatFillDebugHot_' + today, JSON.stringify({
-                            requestedAt: new Date().toISOString(),
-                            today: today,
-                            overwrite: !!opts.overwriteToday,
-                            requestedCodesCount: allCodesSet.size,
-                            apiRawItemsCount: items.length,
-                            apiRawItemsForToday: items.filter(function(row) {
-                                return String(row[tradedateIdx] || '').trim() === todayYMD;
-                            }).map(function(row) {
-                                return { symbol: row[symbolIdx], name: row[1], tradedate: row[tradedateIdx],
-                                    auc_vol: row[aucVolIdx], auc_pct_chg: (aucPctIdx >= 0 ? row[aucPctIdx] : undefined) };
-                            }),
-                            fillLog: todayFillLog
-                        }));
-                    } catch (e) {
-                        console.error('保存 lastNumcatFillDebugHot 失败:', e);
-                    }
                 }
                 let shadowOnlyYesterdayStocks = [];
                 if (needYesterday) {
-                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false, yesterdayPatches, yesterdayCodePatches); // 昨日：只填 volume
+                    fillVolume(yesterdayList, yesterday, !!opts.overwriteYesterday, false, yesterdayPatches, yesterdayCodePatches, yesterdayFillLog); // 昨日：只填 volume
                     // 同「对比日昨成交量」(ths) 的修复：不能用 buildYesterdayListFromToday 造出的 yesterdayList
                     // 直接覆盖 hotAuctionData[yesterday]，否则会把对比日原有、这次名单没覆盖到的股票冲掉，
                     // 后续 syncHotStocksListForDate 同步时会把这些股票误标记 in_watchlist=false 而从
@@ -19122,7 +19220,7 @@
                 // 原有正式列表成员，前天原本没有的股票落影子记录（in_watchlist=false），不进前天第一页。
                 let shadowOnlyDayBeforeStocks = [];
                 if (needDayBefore) {
-                    fillVolume(dayBeforeList, dayBefore, !!opts.overwriteDayBefore, false, dayBeforePatches, dayBeforeCodePatches); // 前天：只填 volume
+                    fillVolume(dayBeforeList, dayBefore, !!opts.overwriteDayBefore, false, dayBeforePatches, dayBeforeCodePatches, dayBeforeFillLog); // 前天：只填 volume
                     const existingDayBeforeList = (hotAuctionData[dayBefore] || []).slice();
                     const existingDayBeforeNames = {};
                     existingDayBeforeList.forEach(function(s) {
@@ -19141,45 +19239,81 @@
                     hotAuctionData[dayBefore] = existingDayBeforeList;
                 }
 
+                // 🔍[调试-诊断报告用] 快照写入 localStorage（三天全部记录）
+                function saveDayDebug(dateStr, ymd, fillLog, overwrite, patchesLen) {
+                    try {
+                        localStorage.setItem('lastNumcatFillDebugHot_' + dateStr, JSON.stringify({
+                            requestedAt: new Date().toISOString(),
+                            date: dateStr,
+                            overwrite: !!overwrite,
+                            requestedCodesCount: allCodesSet.size,
+                            apiRawItemsCount: items.length,
+                            apiRawItemsForDate: items.filter(function(row) {
+                                return String(row[tradedateIdx] || '').trim() === ymd;
+                            }).map(function(row) {
+                                return { symbol: row[symbolIdx], name: row[1], tradedate: row[tradedateIdx],
+                                    auc_vol: row[aucVolIdx], auc_pct_chg: (aucPctIdx >= 0 ? row[aucPctIdx] : undefined) };
+                            }),
+                            patchesCount: patchesLen,
+                            fillLog: fillLog
+                        }));
+                    } catch (e) {
+                        console.error('保存 lastNumcatFillDebugHot_' + dateStr + ' 失败:', e);
+                    }
+                }
+                if (needToday) saveDayDebug(today, todayYMD, todayFillLog, opts.overwriteToday, todayPatches.length);
+                if (needYesterday) saveDayDebug(yesterday, yesterdayYMD, yesterdayFillLog, opts.overwriteYesterday, yesterdayPatches.length);
+                if (needDayBefore) saveDayDebug(dayBefore, dayBeforeYMD, dayBeforeFillLog, opts.overwriteDayBefore, dayBeforePatches.length);
+
                 invalidateTopicCache();
 
-                // 字段级 PATCH 上报：todayPatches/yesterdayPatches 同时包含正式列表成员和影子记录——
-                // 对 patch 函数而言两者都是 upsert(date,stock) 定位 + 只写 volume，影子记录在
-                // _hotFullRowCache 里新建时 in_watchlist 默认 false，正是预期行为。
-                // [BUG-FIX] 先上报自动回填的 code，再上报 volume/pct，避免后续请求仍缺代码
-                if (todayCodePatches.length > 0) {
-                    patchHotFieldBatch(today, todayCodePatches).catch(function(e) { console.warn('patchHotFieldBatch today code 失败:', e); });
+                renderHotForm();
+                renderHotStocks();
+
+                // [BUG-FIX] 云端写入：不再fire-and-forget。所有patch和trends push并发执行，用Promise.all等全部完成。
+                // 收集每个写入的成功/失败，错误在UI状态里明确提示，不再只打console.warn静默吞掉。
+                setApiStatus('numcatApiStatusHot', '正在同步到云端...', true);
+                const cloudTasks = [];
+                const cloudErrors = [];
+                function safePatch(date, patches, label) {
+                    if (patches.length === 0) return;
+                    cloudTasks.push(
+                        patchHotFieldBatch(date, patches).then(function(res) {
+                            if (res && res.ok === false) {
+                                cloudErrors.push(label + ': ' + (res.error && res.error.message ? res.error.message : '未知错误'));
+                            }
+                        }).catch(function(e) {
+                            cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e)));
+                        })
+                    );
                 }
-                if (yesterdayCodePatches.length > 0) {
-                    patchHotFieldBatch(yesterday, yesterdayCodePatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday code 失败:', e); });
+                function safeTrendsPush(date, list, label) {
+                    if (!list || list.length === 0) return;
+                    cloudTasks.push(
+                        pushHotTrendsToCloud(date, list).catch(function(e) {
+                            cloudErrors.push(label + ': ' + (e && e.message ? e.message : String(e)));
+                        })
+                    );
                 }
-                if (dayBeforeCodePatches.length > 0) {
-                    patchHotFieldBatch(dayBefore, dayBeforeCodePatches).catch(function(e) { console.warn('patchHotFieldBatch dayBefore code 失败:', e); });
-                }
-                if (todayPatches.length > 0) {
-                    patchHotFieldBatch(today, todayPatches).catch(function(e) { console.warn('patchHotFieldBatch today 失败:', e); });
-                }
-                if (yesterdayPatches.length > 0) {
-                    patchHotFieldBatch(yesterday, yesterdayPatches).catch(function(e) { console.warn('patchHotFieldBatch yesterday 失败:', e); });
-                }
-                if (dayBeforePatches.length > 0) {
-                    patchHotFieldBatch(dayBefore, dayBeforePatches).catch(function(e) { console.warn('patchHotFieldBatch dayBefore 失败:', e); });
-                }
-                // 趋势图缓存同步（hot_stock_trends 表，热门股票独有，沿用原整行逻辑不变）
+                // 先code，再volume/pct
+                safePatch(today, todayCodePatches, '今日code');
+                safePatch(yesterday, yesterdayCodePatches, '昨日code');
+                safePatch(dayBefore, dayBeforeCodePatches, '前日code');
+                safePatch(today, todayPatches, '今日竞价量/涨幅');
+                safePatch(yesterday, yesterdayPatches, '昨日竞价量');
+                safePatch(dayBefore, dayBeforePatches, '前日竞价量');
+                // 趋势缓存
                 if (needYesterday) {
-                    pushHotTrendsToCloud(yesterday, hotAuctionData[yesterday]).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday 失败:', e); });
-                    if (shadowOnlyYesterdayStocks.length > 0) {
-                        pushHotTrendsToCloud(yesterday, shadowOnlyYesterdayStocks).catch(function(e) { console.warn('pushHotTrendsToCloud yesterday(影子) 失败:', e); });
-                    }
+                    safeTrendsPush(yesterday, hotAuctionData[yesterday], '昨日趋势');
+                    safeTrendsPush(yesterday, shadowOnlyYesterdayStocks, '昨日趋势(影子)');
                 }
                 if (needDayBefore) {
-                    pushHotTrendsToCloud(dayBefore, hotAuctionData[dayBefore]).catch(function(e) { console.warn('pushHotTrendsToCloud dayBefore 失败:', e); });
-                    if (shadowOnlyDayBeforeStocks.length > 0) {
-                        pushHotTrendsToCloud(dayBefore, shadowOnlyDayBeforeStocks).catch(function(e) { console.warn('pushHotTrendsToCloud dayBefore(影子) 失败:', e); });
-                    }
+                    safeTrendsPush(dayBefore, hotAuctionData[dayBefore], '前日趋势');
+                    safeTrendsPush(dayBefore, shadowOnlyDayBeforeStocks, '前日趋势(影子)');
                 }
-                if (needToday) pushHotTrendsToCloud(today, todayList).catch(function(e) { console.warn('pushHotTrendsToCloud today 失败:', e); });
+                if (needToday) safeTrendsPush(today, todayList, '今日趋势');
 
+                await Promise.all(cloudTasks);
                 renderHotForm();
                 renderHotStocks();
 
@@ -19197,7 +19331,12 @@
                         : '';
                     resultText = '✅ ' + mode + action + '：竞价量 ' + filledVolumeCount + ' / 涨幅 ' + filledPctCount + '，跳过 ' + skippedCount + ' 只无数据' + yesterdayNote;
                 }
-                setApiStatus('numcatApiStatusHot', resultText, true);
+                if (cloudErrors.length > 0) {
+                    resultText += ' ⚠️ 部分云端写入失败：' + cloudErrors.join('；');
+                    setApiStatus('numcatApiStatusHot', resultText, false);
+                } else {
+                    setApiStatus('numcatApiStatusHot', resultText, true);
+                }
             } catch (err) {
                 console.error('fetchHotAuctionFromNumcat 失败:', err);
                 let msg = err && err.message ? err.message : '获取失败';
@@ -19412,44 +19551,49 @@
                 push('');
 
                 // ---- 最近一次猫抓补全请求快照（lastNumcatFillDebugHot_<date>） ----
-                push('【最近一次猫抓补全请求快照（lastNumcatFillDebugHot）】');
-                try {
-                    const rawDebug = localStorage.getItem('lastNumcatFillDebugHot_' + today);
-                    if (!rawDebug) {
-                        push('　　（无记录：本次诊断前尚未点击过"猫抓补全"按钮，或该功能是刚更新的旧版本未生成记录）');
-                    } else {
+                // 🔍[诊断增强] 显示今天/昨天/前天三天的处理快照
+                function showDayDebug(label, dateKey, showPctCol) {
+                    push('');
+                    push('【最近一次猫抓补全 · ' + label + '（' + dateKey + '）】');
+                    try {
+                        const rawDebug = localStorage.getItem('lastNumcatFillDebugHot_' + dateKey);
+                        if (!rawDebug) {
+                            push('　　（无记录：尚未点击过猫抓补全该日，或该功能是刚更新的旧版本未生成记录）');
+                            return;
+                        }
                         const dbg = JSON.parse(rawDebug);
                         push('　　请求时间：' + dbg.requestedAt);
                         push('　　overwrite模式：' + dbg.overwrite);
-                        push('　　请求的股票代码总数：' + dbg.requestedCodesCount);
-                        push('　　接口返回的原始记录总数（含昨日）：' + dbg.apiRawItemsCount);
-                        push('　　接口返回中"今天"这个交易日的原始记录 ' + (dbg.apiRawItemsForToday || []).length + ' 条：');
-                        (dbg.apiRawItemsForToday || []).forEach(function(r) {
-                            push('　　　[原始] symbol=' + r.symbol + ' name=' + r.name + ' tradedate=' + r.tradedate +
-                                 ' auc_vol=' + r.auc_vol + ' auc_pct_chg=' + (r.auc_pct_chg === undefined ? '(字段不存在)' : (r.auc_pct_chg === null || r.auc_pct_chg === '' ? '(空值)' : r.auc_pct_chg)));
-                        });
-                        push('　　逐只处理结果（fillLog，仅"今天"这一轮，共 ' + (dbg.fillLog || []).length + ' 条）：');
-                        (dbg.fillLog || []).forEach(function(f) {
-                            if (f.hadDayData === false) {
-                                push('　　　✗ ' + f.stock + '(' + (f.code || '无代码') + ') | 未命中接口返回 | 原因：' + f.reasonNotWritten);
-                            } else if (f.skippedReason) {
-                                push('　　　- ' + f.stock + '(' + f.code + ') | 跳过：' + f.skippedReason + ' | 接口本次是否有这只股票的数据：' + f.hadDayData);
-                            } else {
-                                push('　　　' + (f.pctWrittenThisTime ? '✓' : '△') + ' ' + f.stock + '(' + f.code + ') | 接口返回auc_pct_chg=' +
-                                     (f.apiReturnedPct === null ? '(空)' : f.apiReturnedPct) + ' | 接口返回auc_vol=' + f.apiReturnedVol +
-                                     ' | 本次是否写入涨幅=' + f.pctWrittenThisTime + ' | 写入后changePct=' + (f.changePctAfter || '(空)') +
-                                     (f.reasonNotWritten ? ' | 未写入原因：' + f.reasonNotWritten : ''));
-                            }
-                        });
-                        const noApiPct = (dbg.fillLog || []).filter(function(f) { return f.hadDayData === true && !f.apiReturnedPct; });
-                        push('　　★ 本次请求中，接口命中了股票但未返回auc_pct_chg（即涨幅字段本次确实是接口没给）的股票共 ' + noApiPct.length + ' 只：');
-                        if (noApiPct.length > 0) {
-                            push('　　　' + noApiPct.map(function(f) { return f.stock; }).join('、'));
+                        push('　　接口返回中该交易日的原始记录 ' + (dbg.apiRawItemsForDate || []).length + ' 条');
+                        push('　　生成patch数：' + (dbg.patchesCount || 0));
+                        const log = dbg.fillLog || [];
+                        const written = log.filter(function(f) { return f.volWrittenThisTime || f.pctWrittenThisTime; });
+                        const notHit = log.filter(function(f) { return f.hadDayData === false; });
+                        const alreadyHas = log.filter(function(f) { return f.hadDayData && !f.volWrittenThisTime && !f.pctWrittenThisTime; });
+                        push('　　处理结果：共' + log.length + '只 | 本次写入=' + written.length + ' | 未命中接口=' + notHit.length + ' | 已有值跳过=' + alreadyHas.length);
+                        if (notHit.length > 0 && notHit.length <= 10) {
+                            push('　　未命中接口的股票：' + notHit.map(function(f) { return f.stock + '(' + (f.code || '无代码') + ')'; }).join('、'));
                         }
+                        // 只展示有异常/未写入的，避免报告太长
+                        const abnormal = log.filter(function(f) { return f.hadDayData === false || (!f.volWrittenThisTime && !f.pctWrittenThisTime && f.reasonNotWritten && f.reasonNotWritten !== '未知'); });
+                        if (abnormal.length > 0 && abnormal.length <= 20) {
+                            push('　　异常/未写入明细：');
+                            abnormal.forEach(function(f) {
+                                const mark = f.hadDayData === false ? '✗' : '△';
+                                push('　　　' + mark + ' ' + f.stock + '(' + (f.code || '无代码') + ') | 接口auc_vol=' + (f.apiReturnedVol === undefined ? '(无)' : f.apiReturnedVol) +
+                                     (showPctCol ? ' | 接口auc_pct_chg=' + (f.apiReturnedPct === null ? '(空)' : f.apiReturnedPct) : '') +
+                                     ' | 写入后volume=' + (f.volumeAfter || '(空)') +
+                                     (showPctCol ? ' | 写入后changePct=' + (f.changePctAfter || '(空)') : '') +
+                                     (f.reasonNotWritten ? ' | 原因：' + f.reasonNotWritten : ''));
+                            });
+                        }
+                    } catch (e) {
+                        push('　　读取猫抓请求快照异常：' + (e && e.message ? e.message : String(e)));
                     }
-                } catch (e) {
-                    push('　　读取猫抓请求快照异常：' + (e && e.message ? e.message : String(e)));
                 }
+                showDayDebug('今天', today, true);
+                if (yesterday) showDayDebug('昨天', yesterday, false);
+                if (dayBefore) showDayDebug('前天', dayBefore, false);
                 push('');
 
                 push('===== 报告结束 =====');
