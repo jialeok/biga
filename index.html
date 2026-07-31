@@ -10820,92 +10820,92 @@
         // 批量 upsert 趋势数据到 hot_stock_trends 表（每批 500 行）
         // items 是热门股票数组，字段结构与 _hotAuctionData 一致：{stock, code, volume, yestVolume, changePct, ...}
         async function pushHotTrendsToCloud(date, items) {
-            // [BUG-FIX] 即使 trends 表不可用，也要更新本地 _hotTrendsCache，
-            // 对齐 patchHotFieldBatch 的模式：本地缓存无条件更新，云端同步可选。
+            // [BUG-FIX-20260731] 核心修复：
+            // 1. 停止写入 market_metrics 表！业务数据更新完全由 patchHotFieldBatch 负责（字段级PATCH，安全），
+            //    此处重复写入 market_metrics 会用空字符串覆盖已有有效值，导致"抓竞价量后成交量消失"的互斥bug。
+            // 2. 本函数职责单一化：只负责①更新本地 _hotTrendsCache（趋势图立即可见）②同步到旧表 hot_stock_trends（兼容回退逻辑）。
+            // 3. market_metrics 是主数据源，由 patchHotFieldBatch 写入，Realtime 会自动触发 _hotTrendsCache 刷新。
             _justPushedHotTrends = true;
             try {
                 const scMap = loadAllData().stockCodeMap || {};
                 const now = new Date().toISOString();
-                // [BUG-FIX] 原实现用整行替换 upsert + 整行替换缓存，导致"当天昨日成交量"等
-                // 单字段补数据按钮把已有 volume/change_pct 覆盖成空串。改为字段级合并：
-                // 新值非空才覆盖，空串保留旧值（云端 + 缓存双重保护）。
                 if (!_hotTrendsCache[date]) _hotTrendsCache[date] = [];
+
+                // 从两个来源构建完整的 existing 数据：
+                // - _hotTrendsCache: 趋势缓存本身（历史影子数据）
+                // - _hotFullRowCache: 全量业务缓存（patchHotFieldBatch刚写入的最新数据在这）
                 var existingMap = {};
                 _hotTrendsCache[date].forEach(function(r) {
-                    if (r && r.stock) existingMap[r.stock] = r;
+                    if (r && r.stock) existingMap[r.stock] = Object.assign({}, r);
                 });
-                const rows = items.filter(function(s) { return s && s.stock; }).map(function(item) {
-                    var name = item.stock.trim();
-                    var existing = existingMap[name] || {};
-                    var newVolume = item.volume || '';
-                    var newYestVol = item.yestVolume || '';
-                    var newChangePct = item.changePct || '';
-                    var newCode = scMap[name] || item.code || existing.code || '';
-                    // 字段级合并：新值非空用新值，否则保留旧值
-                    return {
-                        date: date,
-                        stock: name,
-                        code: newCode || existing.code || '',
-                        volume: newVolume || existing.volume || '',
-                        yest_volume: newYestVol || existing.yest_volume || '',
-                        change_pct: newChangePct || existing.change_pct || '',
-                        updated_at: now,
-                        updated_by: 'main'
-                    };
-                });
-                if (rows.length === 0) return;
+                // 合并 _hotFullRowCache 中的最新数据（业务字段权威来源）
+                if (_hotFullRowCache[date]) {
+                    _hotFullRowCache[date].forEach(function(r) {
+                        if (r && r.stock) {
+                            var name = r.stock.trim();
+                            var merged = existingMap[name] || { stock: name };
+                            if (r.volume) merged.volume = r.volume;
+                            if (r.yest_volume || r.yestVolume) merged.yest_volume = r.yest_volume || r.yestVolume || '';
+                            if (r.change_pct || r.changePct) merged.change_pct = r.change_pct || r.changePct || '';
+                            if (r.code) merged.code = r.code;
+                            existingMap[name] = merged;
+                        }
+                    });
+                }
 
-                // [BUG-FIX] 先更新本地缓存（无条件），再尝试云端同步
-                rows.forEach(function(row) {
-                    var idx = _hotTrendsCache[date].findIndex(function(r) { return r.stock === row.stock; });
-                    if (idx >= 0) {
-                        // 只更新非空字段
-                        var target = _hotTrendsCache[date][idx];
-                        if (row.volume) target.volume = row.volume;
-                        if (row.yest_volume) target.yest_volume = row.yest_volume;
-                        if (row.change_pct) target.change_pct = row.change_pct;
-                        if (row.code) target.code = row.code;
-                    } else {
-                        _hotTrendsCache[date].push({
-                            stock: row.stock,
-                            code: row.code,
-                            volume: row.volume,
-                            yest_volume: row.yest_volume,
-                            change_pct: row.change_pct
+                // 合并本次传入的新数据（只覆盖非空字段）
+                items.filter(function(s) { return s && s.stock; }).forEach(function(item) {
+                    var name = item.stock.trim();
+                    var merged = existingMap[name] || { stock: name };
+                    var newVolume = item.volume || '';
+                    var newYestVol = item.yestVolume || item.yest_volume || '';
+                    var newChangePct = item.changePct || item.change_pct || '';
+                    var newCode = scMap[name] || item.code || merged.code || '';
+                    if (newVolume) merged.volume = newVolume;
+                    if (newYestVol) merged.yest_volume = newYestVol;
+                    if (newChangePct) merged.change_pct = newChangePct;
+                    if (newCode) merged.code = newCode;
+                    existingMap[name] = merged;
+                });
+
+                // 构造 hot_stock_trends 旧表写入行（只写有数据的股票，避免空行）
+                const rows = [];
+                Object.keys(existingMap).forEach(function(name) {
+                    var r = existingMap[name];
+                    if (r.volume || r.yest_volume || r.change_pct) {
+                        rows.push({
+                            date: date,
+                            stock: name,
+                            code: r.code || '',
+                            volume: r.volume || '',
+                            yest_volume: r.yest_volume || '',
+                            change_pct: r.change_pct || '',
+                            updated_at: now,
+                            updated_by: 'main'
                         });
                     }
                 });
+                if (rows.length === 0) return;
 
-                // 云端同步：表不可用时跳过
+                // 先更新本地 _hotTrendsCache（无条件，趋势图立即可见）
+                // 重建缓存，确保和 existingMap 一致
+                _hotTrendsCache[date] = rows.map(function(r) {
+                    return {
+                        stock: r.stock,
+                        code: r.code,
+                        volume: r.volume,
+                        yest_volume: r.yest_volume,
+                        change_pct: r.change_pct
+                    };
+                });
+
+                // 云端同步到旧表 hot_stock_trends（market_metrics 由 patchHotFieldBatch 负责，此处不再写入）
                 const sb = getSupabase();
                 const batchSize = 500;
                 if (_hotTrendsTableAvailable) {
                     for (let i = 0; i < rows.length; i += batchSize) {
                         const { error } = await sb.from('hot_stock_trends')
                             .upsert(rows.slice(i, i + batchSize), { onConflict: 'date,stock' });
-                        if (error) throw error;
-                    }
-                }
-
-                // 同步到 market_metrics(scope='hot')：字段映射 date/stock/volume/yest_volume/change_pct
-                if (_marketMetricsTableAvailable) {
-                    const metricsRows = rows.map(function(row) {
-                        return {
-                            date: row.date,
-                            stock: row.stock,
-                            code: row.code || '',
-                            volume: row.volume || '',
-                            yest_volume: row.yest_volume || '',
-                            change_pct: row.change_pct || '',
-                            scope: 'hot',
-                            source: 'main',
-                            updated_at: now,
-                            updated_by: 'main'
-                        };
-                    });
-                    for (let i = 0; i < metricsRows.length; i += batchSize) {
-                        const { error } = await sb.from('market_metrics')
-                            .upsert(metricsRows.slice(i, i + batchSize), { onConflict: 'date,stock,scope' });
                         if (error) throw error;
                     }
                 }
