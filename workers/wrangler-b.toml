@@ -1,0 +1,17 @@
+name = "bidding-board-worker-b"
+main = "bidding-board-worker-b.js"
+compatibility_date = "2026-07-31"
+
+[triggers]
+crons = [
+  "25 1 * * 1-5",
+  "26 1 * * 1-5",
+  "40 1 * * 1-5",
+  "0 8 * * 1-5",
+]
+
+# 需通过 wrangler secret put 设置：
+#   SUPABASE_ANON_KEY
+#   FUYAO_API_KEY   # 仅用于交易日历校验；校验失败会自动回退本地日历
+#   NUMCAT_API_KEY
+#   FETCH_TOKEN
