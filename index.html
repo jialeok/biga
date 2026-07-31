@@ -9267,6 +9267,12 @@
             if (dataSource === 'hot' && _hotTrendsCache && _hotTrendsCache[date]) {
                 return _readHistoryValueFrom(_hotTrendsCache[date], stockName, field);
             }
+            // [DEBUG] 三处缓存均未命中，记录关键信息帮助定位"刷新后消失"
+            _dbgLogVerbose('[HIST-MISS] date=' + date + ' stock=' + stockName + ' field=' + field +
+                ' dataSource=' + dataSource +
+                ' primaryRows=' + (primaryCache[date] ? primaryCache[date].length : 'null') +
+                ' fallbackRows=' + (fallbackCache[date] ? fallbackCache[date].length : 'null') +
+                ' hotTrendsRows=' + ((_hotTrendsCache && _hotTrendsCache[date]) ? _hotTrendsCache[date].length : 'null'));
             return null;
         }
 
@@ -10564,14 +10570,18 @@
             // 2) 读取 market_metrics(scope='hot')（影子记录/指标数据）
             offset = 0;
             let metricsError = null;
+            let metricsRowsRead = 0;
             try {
                 while (true) {
                     const { data, error } = await sb.from('market_metrics')
                         .select('date,stock,code,volume,yest_volume,change_pct')
                         .eq('scope', 'hot')
+                        .order('date', { ascending: true })
+                        .order('stock', { ascending: true })
                         .range(offset, offset + pageSize - 1);
                     if (error) throw error;
                     if (!data || data.length === 0) break;
+                    metricsRowsRead += data.length;
                     data.forEach(function(row) {
                         if (!cloudByDate[row.date]) cloudByDate[row.date] = {};
                         const nameTrim = (row.stock || '').trim();
@@ -10674,7 +10684,18 @@
             } else {
                 _hotAuctionData = result;
             }
-            console.log('hot_stocks 加载完成:', Object.keys(result).length, '个日期');
+            // [DEBUG] 输出 _hotFullRowCache 中各日期的影子/正式记录数，帮助排查"刷新后消失"
+            const _fullCacheSummary = {};
+            Object.keys(_hotFullRowCache).forEach(function(d) {
+                const rows = _hotFullRowCache[d] || [];
+                const watchlistSet = _hotWatchlistIndex[d] || new Set();
+                const watchlistCount = rows.filter(function(r) { return r && r.stock && watchlistSet.has(r.stock.trim()); }).length;
+                _fullCacheSummary[d] = { total: rows.length, watchlist: watchlistCount };
+            });
+            console.log('hot_stocks 加载完成:', Object.keys(result).length, '个日期' +
+                ' | market_metrics读取=' + metricsRowsRead + '行' +
+                ' | _hotFullRowCache日期=' + Object.keys(_hotFullRowCache).length,
+                _fullCacheSummary);
         }
 
         // 从 hot_stocks_highlights 表加载所有预计算高光（小表，快）
@@ -12012,6 +12033,13 @@
                     _mergeHotPatchLocal(date, op.stock, op.cleanPatch);
                 });
 
+                // [DEBUG] 记录进入云端同步前的表就绪状态，帮助定位"刷新后消失"问题
+                _dbgLog('[PATCH-HOT] date=' + date + ' 待写入 metrics=' + metricsRows.length +
+                    ' watchlist=' + watchlistRows.length +
+                    ' _hotAuctionTableAvailable=' + _hotAuctionTableAvailable +
+                    ' _marketMetricsTableAvailable=' + _marketMetricsTableAvailable +
+                    ' 样本=' + (metricsRows[0] && metricsRows[0].stock || 'N/A'));
+
                 // 云端同步：等待表就绪最多 5 秒
                 if (!_hotAuctionTableAvailable && !_marketMetricsTableAvailable) {
                     const waitStart = Date.now();
@@ -12032,10 +12060,20 @@
                         .upsert(watchlistRows, { onConflict: 'date,stock' });
                     if (error) throw error;
                 }
-                if (_marketMetricsTableAvailable && metricsRows.length > 0) {
+                // [BUG-FIX] 即使 _marketMetricsTableAvailable 标记尚未就绪，也直接尝试写入：
+                // 初始化完成前该标记可能为 false，导致历史断点补全等按钮的数据只进本地缓存、
+                // 不进云端，刷新后丢失。直接尝试写入，失败时再根据错误类型更新标记。
+                if (metricsRows.length > 0) {
                     const { error } = await sb.from('market_metrics')
                         .upsert(metricsRows, { onConflict: 'date,stock,scope' });
-                    if (error) throw error;
+                    if (error) {
+                        if (error.message && error.message.indexOf('relation') >= 0) {
+                            _marketMetricsTableAvailable = false;
+                        }
+                        throw error;
+                    }
+                    _marketMetricsTableAvailable = true;
+                    _dbgLog('[PATCH-HOT] market_metrics 写入成功 date=' + date + ' rows=' + metricsRows.length);
                 }
 
                 return { ok: true, rows: localOps.length };
@@ -18720,14 +18758,18 @@
                 const patchErrors = [];
                 const patchTasks = [];
                 const gapDateKeys = Object.keys(patchesByDate);
+                _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') 开始上报 | 目标日期=' + gapDateKeys.join(',') +
+                    ' | patchesByDate=' + JSON.stringify(patchesByDate));
                 for (let di = 0; di < gapDateKeys.length; di++) {
                     const dt = gapDateKeys[di];
                     patchTasks.push(
                         patchHotFieldBatch(dt, patchesByDate[dt]).then(function(res) {
+                            _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') patchHotFieldBatch 返回 date=' + dt + ' res=' + JSON.stringify({ ok: res && res.ok, rows: res && res.rows, cloudSkipped: res && res.cloudSkipped, error: res && res.error && res.error.message }));
                             if (res && res.ok === false) {
                                 patchErrors.push(dt + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
                             }
                         }).catch(function(e) {
+                            _dbgLog('[HOT-BTN] 历史断点涨幅(' + modeLabel + ') patchHotFieldBatch 异常 date=' + dt + ' err=' + (e && e.message || e));
                             patchErrors.push(dt + ': ' + (e && e.message ? e.message : String(e)));
                         })
                     );
@@ -18895,14 +18937,18 @@
                 const patchErrors = [];
                 const patchTasks = [];
                 const gapDateKeys = Object.keys(patchesByDate);
+                _dbgLog('[HOT-BTN] 历史断点昨日成交量 开始上报 | 目标日期=' + gapDateKeys.join(',') +
+                    ' | patchesByDate=' + JSON.stringify(patchesByDate));
                 for (let di = 0; di < gapDateKeys.length; di++) {
                     const dt = gapDateKeys[di];
                     patchTasks.push(
                         patchHotFieldBatch(dt, patchesByDate[dt]).then(function(res) {
+                            _dbgLog('[HOT-BTN] 历史断点昨日成交量 patchHotFieldBatch 返回 date=' + dt + ' res=' + JSON.stringify({ ok: res && res.ok, rows: res && res.rows, cloudSkipped: res && res.cloudSkipped, error: res && res.error && res.error.message }));
                             if (res && res.ok === false) {
                                 patchErrors.push(dt + ': ' + (res.error && res.error.message ? res.error.message : '写入失败'));
                             }
                         }).catch(function(e) {
+                            _dbgLog('[HOT-BTN] 历史断点昨日成交量 patchHotFieldBatch 异常 date=' + dt + ' err=' + (e && e.message || e));
                             patchErrors.push(dt + ': ' + (e && e.message ? e.message : String(e)));
                         })
                     );
