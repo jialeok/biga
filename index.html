@@ -9126,7 +9126,8 @@
                         selected: row.selected || false,
                         bought: row.bought || false,
                         sold: row.sold || false,
-                        fixed: row.fixed || false
+                        fixed: row.fixed || false,
+                        in_watchlist: true // 【BUG-FIX 窜日期】watchlist 表来的行标记为正式成员
                     };
                     newWatchlistSet.add(key);
                 });
@@ -9178,7 +9179,8 @@
                         changePct: row.change_pct || '', // camelCase 别名
                         time930: row.time930 || '',
                         seal_count: row.seal_count || '',
-                        source: row.source || 'manual'
+                        source: row.source || 'manual',
+                        in_watchlist: false // 【BUG-FIX 窜日期】metrics 影子记录标记为非正式成员
                     };
                     // 注意：影子记录不加入 newWatchlistSet
                 });
@@ -10261,7 +10263,8 @@
                             selected: row.selected || false,
                             bought: row.bought || false,
                             sold: row.sold || false,
-                            fixed: row.fixed || false
+                            fixed: row.fixed || false,
+                            in_watchlist: true // 【BUG-FIX 窜日期】watchlist 表来的行标记为正式成员
                         };
                         if (!newWatchlistIndex[row.date]) newWatchlistIndex[row.date] = new Set();
                         newWatchlistIndex[row.date].add(key);
@@ -10324,7 +10327,8 @@
                             changePct: row.change_pct || '', // camelCase 别名
                             time930: row.time930 || '',
                             seal_count: row.seal_count || '',
-                            source: row.source || 'manual'
+                            source: row.source || 'manual',
+                            in_watchlist: false // 【BUG-FIX 窜日期】metrics 影子记录标记为非正式成员
                         };
                         // 注意：影子记录不加入 newWatchlistIndex
                     });
@@ -12177,7 +12181,13 @@
             if (idx >= 0) {
                 Object.keys(cleanPatch).forEach(function(k) { list[idx][k] = cleanPatch[k]; });
             } else {
-                const row = Object.assign({ stock: nameTrim }, cleanPatch);
+                // 【BUG-FIX 窜日期】新建行时必须检查是否为正式成员。
+                // 之前新建行不携带 in_watchlist 字段，而 _extractWatchlistNamesFromRows
+                // 只有 in_watchlist===false 才跳过 → 无标记的行被误认为正式成员 →
+                // 被写入 auction_watchlist → 7月31日猫抓补全的yesterday数据窜到7月30日watchlist。
+                // 修复：不在 _auctionWatchlistIndex[date] 里的股票，新建行时标记 in_watchlist:false。
+                const isFormal = _isAuctionWatchlistStock(date, nameTrim);
+                const row = Object.assign({ stock: nameTrim, in_watchlist: isFormal }, cleanPatch);
                 list.push(row);
             }
         }
