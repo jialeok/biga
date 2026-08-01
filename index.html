@@ -9146,9 +9146,26 @@
                     const key = (row.stock || '').trim();
                     if (!key) return;
                     if (cloudByStock[key]) {
-                        // 该股票同时在 watchlist 里：只补充 metrics 特有字段
+                        // 该股票同时在 watchlist 里：补充 metrics 特有字段（time930/seal_count），
+                        // 并在 watchlist 行的 volume/yest_volume/change_pct 为空时回退取 metrics 的值。
+                        // 【BUG-FIX】worker morning 把 watchlist 的 volume/yest_volume/change_pct 写成空串，
+                        // 真实值只写到了 market_metrics；如果这里不回退，刷新后趋势图会读空值消失。
                         if (row.time930 !== undefined && row.time930 !== null && row.time930 !== '') cloudByStock[key].time930 = row.time930;
                         if (row.seal_count !== undefined && row.seal_count !== null && row.seal_count !== '') cloudByStock[key].seal_count = row.seal_count;
+                        if (row.volume !== undefined && row.volume !== null && String(row.volume).trim() !== '' &&
+                            (!cloudByStock[key].volume || String(cloudByStock[key].volume).trim() === '')) {
+                            cloudByStock[key].volume = row.volume;
+                        }
+                        if (row.yest_volume !== undefined && row.yest_volume !== null && String(row.yest_volume).trim() !== '' &&
+                            (!cloudByStock[key].yest_volume || String(cloudByStock[key].yest_volume).trim() === '')) {
+                            cloudByStock[key].yest_volume = row.yest_volume;
+                            cloudByStock[key].yestVolume = row.yest_volume; // camelCase 别名同步
+                        }
+                        if (row.change_pct !== undefined && row.change_pct !== null && String(row.change_pct).trim() !== '' &&
+                            (!cloudByStock[key].change_pct || String(cloudByStock[key].change_pct).trim() === '')) {
+                            cloudByStock[key].change_pct = row.change_pct;
+                            cloudByStock[key].changePct = row.change_pct; // camelCase 别名同步
+                        }
                         return;
                     }
                     cloudByStock[key] = {
@@ -10275,9 +10292,26 @@
                         if (!key) return;
                         const existing = cloudByDate[row.date][key];
                         if (existing) {
-                            // 该股票同时在 watchlist 里：只补充 metrics 特有字段
+                            // 该股票同时在 watchlist 里：补充 metrics 特有字段（time930/seal_count），
+                            // 并在 watchlist 行的 volume/yest_volume/change_pct 为空时回退取 metrics 的值。
+                            // 【BUG-FIX】worker morning 把 watchlist 的 volume/yest_volume/change_pct 写成空串，
+                            // 真实值只写到了 market_metrics；如果这里不回退，刷新后趋势图会读空值消失。
                             if (row.time930 !== undefined && row.time930 !== null && row.time930 !== '') existing.time930 = row.time930;
                             if (row.seal_count !== undefined && row.seal_count !== null && row.seal_count !== '') existing.seal_count = row.seal_count;
+                            if (row.volume !== undefined && row.volume !== null && String(row.volume).trim() !== '' &&
+                                (!existing.volume || String(existing.volume).trim() === '')) {
+                                existing.volume = row.volume;
+                            }
+                            if (row.yest_volume !== undefined && row.yest_volume !== null && String(row.yest_volume).trim() !== '' &&
+                                (!existing.yest_volume || String(existing.yest_volume).trim() === '')) {
+                                existing.yest_volume = row.yest_volume;
+                                existing.yestVolume = row.yest_volume; // camelCase 别名同步
+                            }
+                            if (row.change_pct !== undefined && row.change_pct !== null && String(row.change_pct).trim() !== '' &&
+                                (!existing.change_pct || String(existing.change_pct).trim() === '')) {
+                                existing.change_pct = row.change_pct;
+                                existing.changePct = row.change_pct; // camelCase 别名同步
+                            }
                             return;
                         }
                         cloudByDate[row.date][key] = {
@@ -38042,6 +38076,10 @@
         function isAutoHoliday(dateStr) {
             const tradingDays = getTradingDays();
             if (tradingDays.includes(dateStr)) return false;
+            // 【修复】tradingDays 为空（交易日历未加载）时，不自动把工作日识别为假期。
+            // 否则 isTradingDay 对所有工作日返回 false，getPreviousTradingDay 返回 null，
+            // 趋势图只能画到当天一个点，历史4天全部断点。此时只靠周末判断更安全。
+            if (tradingDays.length === 0) return false;
             const today = _getLocalTodayStr ? _getLocalTodayStr() : new Date().toISOString().slice(0, 10);
             const oneYearAgo = (function() {
                 const d = new Date(today + 'T00:00:00');

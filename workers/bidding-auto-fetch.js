@@ -435,17 +435,16 @@ async function runMorning(env) {
   }
 
   // 2. 写入 auction_watchlist（当日竞价列表）
+  // 【BUG-FIX】不写 volume/yest_volume/change_pct/note/topics 字段：
+  // 这些字段的真实值由步骤4写入 market_metrics 表。如果这里把空串写进 watchlist，
+  // 后续每个交易日的 morning 都会用空串覆盖用户在前端手动编辑过的值。
+  // Supabase upsert 只更新 row 中包含的字段，省略字段 = 保留原值。
   logs.push('步骤2：写入 auction_watchlist...');
   const nowIso = new Date().toISOString();
   const watchlistRows = constituents.map(c => ({
     date: today,
     stock: c.name,
     code: c.code,
-    volume: '',
-    yest_volume: '',
-    note: '',
-    change_pct: '',
-    topics: '',
     source: 'worker',
     obs_auto_added: false,
     updated_at: nowIso,
