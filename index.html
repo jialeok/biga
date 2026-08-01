@@ -9066,8 +9066,10 @@
                     }, function(payload) {
                         if (_justPushedAuction) return; // 自己刚推的，忽略
                         const row = payload.new || payload.old;
-                        // 只处理 scope='auction' 的变更，避免 hot 分组趋势互相触发
-                        if (!row || !row.date || row.scope !== 'auction') return;
+                        // 处理 scope='auction' 的变更；也处理 scope='hot'——
+                        // auction 合并以 hot 作为 yest_volume/volume/change_pct 的二级回退，
+                        // hot 写入新值时 auction 看板也需重拉刷新（统一防抖池，不会与 hot 分组互相循环）。
+                        if (!row || !row.date || (row.scope !== 'auction' && row.scope !== 'hot')) return;
                         _debounceAuctionRealtime(row.date);
                     })
                     .subscribe();
@@ -9199,6 +9201,37 @@
             } catch (e) {
                 _marketMetricsTableAvailable = false;
             }
+
+            // 3) 读取 market_metrics(scope='hot') 作为 yest_volume/volume/change_pct 的二级回退
+            // 【BUG-FIX】auction scope 部分行 yest_volume 为空，但 hot scope 同一股票同一日有值——
+            //   yest_volume 是市场客观值（前一日完整成交量），与 tab 归属无关，可安全回退。
+            //   只给已存在的行补值，不新增行（hot 影子记录不进入 auction 列表）。
+            try {
+                const { data: hotData, error: hotError } = await sb.from('market_metrics')
+                    .select('stock,volume,yest_volume,change_pct')
+                    .eq('date', date)
+                    .eq('scope', 'hot');
+                if (!hotError && hotData) {
+                    hotData.forEach(function(row) {
+                        const key = (row.stock || '').trim();
+                        if (!key) return;
+                        const existing = cloudByStock[key];
+                        if (!existing) return;
+                        if (row.volume != null && String(row.volume).trim() !== '' &&
+                            (!existing.volume || String(existing.volume).trim() === '')) existing.volume = row.volume;
+                        if (row.yest_volume != null && String(row.yest_volume).trim() !== '' &&
+                            (!existing.yest_volume || String(existing.yest_volume).trim() === '')) {
+                            existing.yest_volume = row.yest_volume;
+                            existing.yestVolume = row.yest_volume;
+                        }
+                        if (row.change_pct != null && String(row.change_pct).trim() !== '' &&
+                            (!existing.change_pct || String(existing.change_pct).trim() === '')) {
+                            existing.change_pct = row.change_pct;
+                            existing.changePct = row.change_pct;
+                        }
+                    });
+                }
+            } catch (e) { /* hot 回退失败不影响主流程 */ }
 
             if (Object.keys(cloudByStock).length === 0) return;
 
@@ -10349,6 +10382,44 @@
                 metricsError = e;
                 _marketMetricsTableAvailable = false;
             }
+
+            // 3) 读取 market_metrics(scope='hot') 作为 yest_volume/volume/change_pct 的二级回退（全表）
+            // 【BUG-FIX】auction scope 部分行 yest_volume 为空，但 hot scope 同一股票同一日有值——
+            //   yest_volume 是市场客观值（前一日完整成交量），与 tab 归属无关，可安全回退。
+            //   只给已存在的行补值，不新增行（hot 影子记录不进入 auction 列表）。
+            try {
+                offset = 0;
+                while (true) {
+                    const { data: hotData, error: hotError } = await sb.from('market_metrics')
+                        .select('date,stock,volume,yest_volume,change_pct')
+                        .eq('scope', 'hot')
+                        .range(offset, offset + pageSize - 1);
+                    if (hotError) throw hotError;
+                    if (!hotData || hotData.length === 0) break;
+                    hotData.forEach(function(row) {
+                        const d = row.date;
+                        if (!cloudByDate[d]) return;
+                        const key = (row.stock || '').trim();
+                        if (!key) return;
+                        const existing = cloudByDate[d][key];
+                        if (!existing) return;
+                        if (row.volume != null && String(row.volume).trim() !== '' &&
+                            (!existing.volume || String(existing.volume).trim() === '')) existing.volume = row.volume;
+                        if (row.yest_volume != null && String(row.yest_volume).trim() !== '' &&
+                            (!existing.yest_volume || String(existing.yest_volume).trim() === '')) {
+                            existing.yest_volume = row.yest_volume;
+                            existing.yestVolume = row.yest_volume;
+                        }
+                        if (row.change_pct != null && String(row.change_pct).trim() !== '' &&
+                            (!existing.change_pct || String(existing.change_pct).trim() === '')) {
+                            existing.change_pct = row.change_pct;
+                            existing.changePct = row.change_pct;
+                        }
+                    });
+                    if (hotData.length < pageSize) break;
+                    offset += pageSize;
+                }
+            } catch (e) { _dbgLog('[AUCTION-PULL] hot 二级回退失败（不影响主流程）' + (e && e.message || e)); }
 
             if (watchlistError && metricsError) {
                 throw watchlistError;
