@@ -8858,6 +8858,19 @@
             if (!date) return;
             _auctionWatchlistIndex[date] = new Set((stockNames || []).map(function(n) { return (n || '').trim(); }).filter(Boolean));
         }
+        // 方案2：序列化正式成员索引为 {date:[stock,...]}，供导出备份携带。
+        // 行对象不携带 in_watchlist 字段，索引是正式/影子身份的唯一权威来源，
+        // 备份必须把索引一起导出，否则恢复时无法区分正式成员和影子记录。
+        function _serializeAuctionWatchlistIndex() {
+            const out = {};
+            Object.keys(_auctionWatchlistIndex).forEach(function(date) {
+                const set = _auctionWatchlistIndex[date];
+                if (set && set.size > 0) {
+                    out[date] = Array.from(set).map(function(n) { return (n || '').trim(); }).filter(Boolean);
+                }
+            });
+            return out;
+        }
         function _addAuctionWatchlistMember(date, stockName) {
             if (!date || !stockName) return;
             if (!_auctionWatchlistIndex[date]) _auctionWatchlistIndex[date] = new Set();
@@ -9126,8 +9139,7 @@
                         selected: row.selected || false,
                         bought: row.bought || false,
                         sold: row.sold || false,
-                        fixed: row.fixed || false,
-                        in_watchlist: true // 【BUG-FIX 窜日期】watchlist 表来的行标记为正式成员
+                        fixed: row.fixed || false
                     };
                     newWatchlistSet.add(key);
                 });
@@ -9179,8 +9191,7 @@
                         changePct: row.change_pct || '', // camelCase 别名
                         time930: row.time930 || '',
                         seal_count: row.seal_count || '',
-                        source: row.source || 'manual',
-                        in_watchlist: false // 【BUG-FIX 窜日期】metrics 影子记录标记为非正式成员
+                        source: row.source || 'manual'
                     };
                     // 注意：影子记录不加入 newWatchlistSet
                 });
@@ -10263,8 +10274,7 @@
                             selected: row.selected || false,
                             bought: row.bought || false,
                             sold: row.sold || false,
-                            fixed: row.fixed || false,
-                            in_watchlist: true // 【BUG-FIX 窜日期】watchlist 表来的行标记为正式成员
+                            fixed: row.fixed || false
                         };
                         if (!newWatchlistIndex[row.date]) newWatchlistIndex[row.date] = new Set();
                         newWatchlistIndex[row.date].add(key);
@@ -10327,8 +10337,7 @@
                             changePct: row.change_pct || '', // camelCase 别名
                             time930: row.time930 || '',
                             seal_count: row.seal_count || '',
-                            source: row.source || 'manual',
-                            in_watchlist: false // 【BUG-FIX 窜日期】metrics 影子记录标记为非正式成员
+                            source: row.source || 'manual'
                         };
                         // 注意：影子记录不加入 newWatchlistIndex
                     });
@@ -12181,13 +12190,7 @@
             if (idx >= 0) {
                 Object.keys(cleanPatch).forEach(function(k) { list[idx][k] = cleanPatch[k]; });
             } else {
-                // 【BUG-FIX 窜日期】新建行时必须检查是否为正式成员。
-                // 之前新建行不携带 in_watchlist 字段，而 _extractWatchlistNamesFromRows
-                // 只有 in_watchlist===false 才跳过 → 无标记的行被误认为正式成员 →
-                // 被写入 auction_watchlist → 7月31日猫抓补全的yesterday数据窜到7月30日watchlist。
-                // 修复：不在 _auctionWatchlistIndex[date] 里的股票，新建行时标记 in_watchlist:false。
-                const isFormal = _isAuctionWatchlistStock(date, nameTrim);
-                const row = Object.assign({ stock: nameTrim, in_watchlist: isFormal }, cleanPatch);
+                const row = Object.assign({ stock: nameTrim }, cleanPatch);
                 list.push(row);
             }
         }
@@ -13371,9 +13374,13 @@
                 const auctionData = getAuctionData();
                 const backupKey = type === 'import' ? 'auctionData_import_backup' : 'auctionData_save_backup';
                 // 只备份这一天的数据（若这一天当前没有数据，存空数组，表示"备份时这天是空的"）
+                // 方案2：同时备份该日期的正式成员索引，撤回时用它恢复索引，
+                // 避免用 _extractWatchlistNamesFromRows 从行数据猜测导致影子记录被误提升为正式成员。
+                const wset = _auctionWatchlistIndex[targetDate];
                 const dayBackup = {
                     date: targetDate,
-                    data: auctionData[targetDate] || null
+                    data: auctionData[targetDate] || null,
+                    watchlist: (wset && wset.size > 0) ? Array.from(wset) : null
                 };
                 localStorage.setItem(backupKey, JSON.stringify(dayBackup));
                 localStorage.setItem(backupKey + '_time', new Date().toISOString());
@@ -13464,12 +13471,16 @@
                 // 备份时这一天本来就没有数据，撤回即恢复为"没有"
                 deleteAuctionDateData(backupDate, 'restore');
             } else {
-                // 方案2：备份恢复的数据视为用户当时的正式列表；行对象不携带 in_watchlist，
-                // 通过 _setAuctionWatchlistForDate 整日期替换索引（兼容旧备份可能携带的 in_watchlist 字段，
-                // 显式 false 的行视为影子记录，不登记到索引）
+                // 方案2：优先用备份时保存的 watchlist 索引恢复正式成员名单。
+                // 行对象不携带 in_watchlist 字段，索引是正式/影子身份的唯一权威来源。
+                // 旧备份无 watchlist 字段时，回退到 _extractWatchlistNamesFromRows（兼容旧数据可能携带的 in_watchlist 字段）。
                 if (Array.isArray(backupDayData)) {
-                    const formalNames = _extractWatchlistNamesFromRows(backupDayData);
-                    _setAuctionWatchlistForDate(backupDate, formalNames);
+                    const backupWatchlist = backupPayload.watchlist;
+                    if (Array.isArray(backupWatchlist) && backupWatchlist.length > 0) {
+                        _setAuctionWatchlistForDate(backupDate, backupWatchlist);
+                    } else {
+                        _setAuctionWatchlistForDate(backupDate, _extractWatchlistNamesFromRows(backupDayData));
+                    }
                 }
                 setAuctionDateData(backupDate, backupDayData, 'restore');
                 // 把这一天的所有数据字段 patch 到云端（camelCase → snake_case）
@@ -39205,6 +39216,7 @@
                 pattern: getPatternData(),
                 bidding: getBiddingData(),
                 auction: getAuctionData(),
+                auctionWatchlist: _serializeAuctionWatchlistIndex(),
                 tagTitles: getTagTitlesData(),
                 duibanData: JSON.parse(localStorage.getItem('duibanData') || '{}'),
                 duibanComment: JSON.parse(localStorage.getItem('duibanComment') || '{}'),
@@ -39320,6 +39332,7 @@
                 pattern: allData.pattern || {},
                 bidding: allData.bidding || {},
                 auction: allData.auction || {},
+                auctionWatchlist: _serializeAuctionWatchlistIndex(),
                 tagTitles: allData.tagTitles || {},
                 duibanData: JSON.parse(localStorage.getItem('duibanData') || '{}'),
                 duibanComment: JSON.parse(localStorage.getItem('duibanComment') || '{}'),
@@ -39415,12 +39428,18 @@
                         // 重新制造"两份状态不同步"。改为清空 _auctionMemCache 后把导入数据逐日期灌进去，保持引用不变。
                         clearAllAuctionDates('handleFileImport');
                         const importedAuctionData = imported.auction || {};
+                        // 方案2：优先用备份文件携带的 auctionWatchlist 索引重建正式成员名单。
+                        // 行对象不携带 in_watchlist 字段，索引是正式/影子身份的唯一权威来源。
+                        // 旧备份无此字段时，回退到 _extractWatchlistNamesFromRows（兼容旧数据可能携带的 in_watchlist 字段）。
+                        const importedWatchlistIdx = imported.auctionWatchlist || {};
                         Object.keys(importedAuctionData).forEach(function(d) {
                             const rows = importedAuctionData[d] || [];
-                            // 方案2：文件导入的数据默认视为用户想恢复的正式列表；
-                            // 用 _extractWatchlistNamesFromRows 提取正式成员（兼容旧数据可能携带的 in_watchlist 字段，
-                            // 显式 false 的行视为影子记录，不登记到索引）
-                            _setAuctionWatchlistForDate(d, _extractWatchlistNamesFromRows(rows));
+                            const idxForDate = importedWatchlistIdx[d];
+                            if (Array.isArray(idxForDate) && idxForDate.length > 0) {
+                                _setAuctionWatchlistForDate(d, idxForDate);
+                            } else {
+                                _setAuctionWatchlistForDate(d, _extractWatchlistNamesFromRows(rows));
+                            }
                             setAuctionDateData(d, rows, 'handleFileImport');
                         });
                         // 阶段八：stocks / rank / multi / hotspot / pattern / tagTitles
@@ -39649,6 +39668,7 @@
                 try {
                     const imported = JSON.parse(text);
                     const importedAuction = imported.auction || {};
+                    const importedWatchlistIdx = imported.auctionWatchlist || {};
                     const importedDates = Object.keys(importedAuction);
 
                     if (importedDates.length === 0) {
@@ -39681,9 +39701,15 @@
                         // 阶段四 Bug 3 修复：直接写 _auctionMemCache（即 allData.auction），
                         // 并走 patchAuctionFieldBatch 把数据字段同步到云端
                         const rows = Array.isArray(importedAuction[date]) ? importedAuction[date] : [];
-                        // 方案2：补全缺失日期的旧备份数据默认视为正式列表；
-                        // 用 _extractWatchlistNamesFromRows 提取正式成员（兼容旧数据，显式 false 保留为影子）
-                        _setAuctionWatchlistForDate(date, _extractWatchlistNamesFromRows(rows));
+                        // 方案2：优先用备份文件携带的 auctionWatchlist 索引重建正式成员名单。
+                        // 行对象不携带 in_watchlist 字段，索引是正式/影子身份的唯一权威来源。
+                        // 旧备份无此字段时，回退到 _extractWatchlistNamesFromRows。
+                        const idxForDate = (importedWatchlistIdx && importedWatchlistIdx[date]) || null;
+                        if (Array.isArray(idxForDate) && idxForDate.length > 0) {
+                            _setAuctionWatchlistForDate(date, idxForDate);
+                        } else {
+                            _setAuctionWatchlistForDate(date, _extractWatchlistNamesFromRows(rows));
+                        }
                         setAuctionDateData(date, rows, 'handleFileImport');
                         // 用户主动确认了"补全缺失日期"操作，标记这些日期为脏，
                         // 允许下次推送时用补全后的本地数据覆盖云端（云端该日期本来就是空的）
