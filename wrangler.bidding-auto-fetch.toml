@@ -16,4 +16,5 @@ TZ = "Asia/Shanghai"
 #   wrangler secret put NUMCAT_API_KEY --config wrangler.bidding-auto-fetch.toml
 #   wrangler secret put SUPABASE_SERVICE_ROLE_KEY --config wrangler.bidding-auto-fetch.toml
 #   wrangler secret put SUPABASE_ANON_KEY --config wrangler.bidding-auto-fetch.toml
+#   wrangler secret put FUYAO_API_KEY_HISTORY --config wrangler.bidding-auto-fetch.toml
 #   wrangler secret put FETCH_TOKEN --config wrangler.bidding-auto-fetch.toml

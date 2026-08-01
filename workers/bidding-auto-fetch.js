@@ -3,23 +3,27 @@
  *
  * 交易日每天自动执行两个时段：
  *   1. 9:25（北京时间，UTC 01:25）
- *      - 同花顺 fuyao：获取最近多板（883410.TI）成分股 → 写入 auction_watchlist
+ *      - 同花顺 fuyao ths-stock-list：获取最近多板（883410.TI）成分股 → 写入 auction_watchlist
  *      - 猫抓 numcat daily_auc（recentdays=5）：一次性获取5个交易日的竞价量+竞价涨幅+竞昨成交比
  *        → volume(万) = auc_vol / 100
- *        → changePct = "+X.XX%"
+ *        → changePct(当天临时) = "+X.XX%"（竞价涨幅，16:00 被 snapshot 覆盖）
  *        → yestVolume(万) = auc_vol / auc_to_pre_vol_pct（反推昨日全天成交量）
  *        → 写入 market_metrics(scope='auction')
+ *      - 同花顺 fuyao historical（并发50只，adjust=none）：获取4个历史交易日收盘价
+ *        → pct_chg = (close - prev_close) / prev_close * 100（不复权，口径和 snapshot 一致）
+ *        → 覆盖 market_metrics.change_pct（历史4天）
  *
  *   2. 16:00（北京时间，UTC 08:00）
- *      - 同花顺 fuyao snapshot：获取收盘涨幅 → 覆盖 market_metrics.change_pct
+ *      - 同花顺 fuyao snapshot：获取当天收盘涨幅 → 覆盖 market_metrics.change_pct(当天)
  *
- * numcat 额度：每天仅 9:25 消耗 1 次，16:00 用同花顺不消耗 numcat。
+ * numcat 额度：每天仅 9:25 消耗 1 次，历史涨幅和当天收盘涨幅全走同花顺（新账号 FUYAO_API_KEY_HISTORY）。
  *
  * 环境变量（通过 wrangler secret 设置）：
- *   NUMCAT_API_KEY           - 猫抓 API Key
+ *   NUMCAT_API_KEY            - 猫抓 API Key
  *   SUPABASE_SERVICE_ROLE_KEY - Supabase service_role key（读写表）
- *   SUPABASE_ANON_KEY        - Supabase anon key（fuyao-proxy 鉴权）
- *   FETCH_TOKEN              - 手动触发调试用 token
+ *   SUPABASE_ANON_KEY         - Supabase anon key（fuyao-proxy 鉴权）
+ *   FUYAO_API_KEY_HISTORY     - 同花顺新账号 key（直连 historical，避免拖慢主账号）
+ *   FETCH_TOKEN               - 手动触发调试用 token
  *
  * 手动触发：GET /fetch?token=<FETCH_TOKEN>&point=morning|close|auto
  */
@@ -28,6 +32,9 @@
 const CONFIG = {
   SUPABASE_URL: 'https://tonqfgeyxnnwicjopshn.supabase.co',
   FUYAO_PROXY_BASE: 'https://tonqfgeyxnnwicjopshn.supabase.co/functions/v1/fuyao-proxy',
+
+  // fuyao 直连（历史K线用新账号 key，避免拖慢主账号）
+  FUYAO_DIRECT_BASE: 'https://fuyao.aicubes.cn',
 
   // 最近多板指数
   LADDER_THSCODE: '883410.TI',
@@ -38,6 +45,9 @@ const CONFIG = {
 
   // fuyao snapshot 批量大小
   SNAPSHOT_BATCH_SIZE: 40,
+
+  // fuyao historical 并发数（同时发起的请求数，避免被限流）
+  HISTORICAL_CONCURRENCY: 10,
 };
 
 // 已知节假日（A股休市），与 bidding-board-worker-b.js 保持一致
@@ -237,6 +247,101 @@ function tickerToThscode(code) {
   if (c.startsWith('6') || c.startsWith('9')) return c + '.SH';
   if (c.startsWith('4') || c.startsWith('8')) return c + '.BJ';
   return c + '.SZ';
+}
+
+// 毫秒时间戳 → "YYYY-MM-DD"（按 Asia/Shanghai 时区）
+function msToDateStr(ms) {
+  // fuyao date_ms 是 Asia/Shanghai 时区当日零点对应的毫秒时间戳
+  // 加 8 小时偏移后用 UTC 方法解析，避免 Worker 运行时本地时区干扰
+  const d = new Date(ms + 8 * 3600 * 1000);
+  return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+}
+
+// "YYYY-MM-DD" → 当日零点（Asia/Shanghai）的毫秒时间戳
+function dateStrToMs(dateStr) {
+  // dateStr 视为北京零点 → 对应 UTC 毫秒 = Date.parse(dateStr + 'T00:00:00+08:00')
+  return Date.parse(dateStr + 'T00:00:00+08:00');
+}
+
+// 直连 fuyao（用新账号 key，绕过 supabase proxy）
+// 返回 { thscode, items: [{ dateStr, close }] } 失败返回 { thscode, error }
+async function fuyaoDirectHistorical(env, thscode, startMs, endMs) {
+  const apiKey = env.FUYAO_API_KEY_HISTORY || env.FUYAO_API_KEY;
+  if (!apiKey) {
+    return { thscode, error: '缺少 FUYAO_API_KEY_HISTORY' };
+  }
+  const url = new URL(CONFIG.FUYAO_DIRECT_BASE + '/api/a-share/prices/historical');
+  url.searchParams.set('thscode', thscode);
+  url.searchParams.set('interval', '1d');
+  url.searchParams.set('start', String(startMs));
+  url.searchParams.set('end', String(endMs));
+  url.searchParams.set('adjust', 'none'); // 不复权，和 snapshot 口径一致
+  try {
+    const resp = await fetch(url.toString(), { headers: { 'X-api-key': apiKey } });
+    const json = await resp.json();
+    if (json.code !== 0) {
+      return { thscode, error: 'fuyao historical code=' + json.code + ' ' + (json.message || '') };
+    }
+    const items = ((json.data && json.data.item) || []).map(it => ({
+      dateStr: msToDateStr(it.date_ms),
+      close: Number(it.close_price)
+    })).filter(it => !isNaN(it.close));
+    // 按日期升序，确保 prev_close 错位计算正确
+    items.sort((a, b) => a.dateStr < b.dateStr ? -1 : (a.dateStr > b.dateStr ? 1 : 0));
+    return { thscode, items };
+  } catch (e) {
+    return { thscode, error: e.message };
+  }
+}
+
+// 并发抓取所有成分股的历史K线，计算4个历史交易日的收盘涨幅
+// 返回 { dateStr: { code: "+X.XX%" } }
+async function fetchHistoricalPctChg(env, constituents, historicalDates) {
+  if (!constituents.length || !historicalDates.length) return {};
+  const result = {}; // dateStr → { code: pctStr }
+  historicalDates.forEach(d => { result[d] = {}; });
+
+  // 窗口：最早历史日 -7天（覆盖前一日收盘用于 pct_chg 计算） ~ 今天
+  const earliest = historicalDates.slice().sort()[0];
+  const startMs = dateStrToMs(earliest) - 7 * 24 * 3600 * 1000;
+  const endMs = Date.now();
+
+  const targetSet = new Set(historicalDates);
+  let successCount = 0, failCount = 0;
+
+  // 分批并发（每批 HISTORICAL_CONCURRENCY 个）
+  const concurrency = CONFIG.HISTORICAL_CONCURRENCY;
+  for (let i = 0; i < constituents.length; i += concurrency) {
+    const chunk = constituents.slice(i, i + concurrency);
+    const promises = chunk.map(c => {
+      const thscode = tickerToThscode(c.code);
+      if (!thscode) return Promise.resolve(null);
+      return fuyaoDirectHistorical(env, thscode, startMs, endMs);
+    });
+    const results = await Promise.all(promises);
+    results.forEach((r, idx) => {
+      if (!r) return;
+      const code = chunk[idx].code;
+      if (r.error) {
+        failCount++;
+        return;
+      }
+      // 逐日算 pct_chg = (close[i] - close[i-1]) / close[i-1] * 100
+      for (let j = 1; j < r.items.length; j++) {
+        const dateStr = r.items[j].dateStr;
+        if (!targetSet.has(dateStr)) continue;
+        const prevClose = r.items[j - 1].close;
+        const currClose = r.items[j].close;
+        if (!prevClose || isNaN(prevClose) || prevClose === 0) continue;
+        const pct = (currClose - prevClose) / prevClose * 100;
+        if (isNaN(pct)) continue;
+        result[dateStr][code] = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+      }
+      successCount++;
+    });
+  }
+
+  return { byDate: result, successCount, failCount };
 }
 
 // ══════════════════════════ numcat 接口 ══════════════════════════
@@ -447,6 +552,37 @@ async function runMorning(env) {
   });
 
   logs.push('解析完成: ' + parsedCount + '条, 涉及 ' + Object.keys(metricsByDate).length + ' 个交易日, 反推昨日成交量 ' + yestVolDerivedCount + ' 条');
+
+  // 5. fuyao historical 并发抓4个历史交易日的收盘涨幅，覆盖 numcat 的竞价涨幅
+  //    当天(D)涨幅先用 numcat auc_pct_chg 临时占位，16:00 由 snapshot 覆盖
+  //    历史日(D-1~D-4)用 fuyao 不复权收盘价算 pct_chg，口径和 16:00 snapshot 一致
+  const historicalDates = Object.keys(metricsByDate).filter(d => d < today).sort();
+  let histPctStats = null;
+  if (historicalDates.length > 0) {
+    logs.push('步骤5：fuyao historical 并发抓取 ' + historicalDates.length + ' 个历史交易日收盘涨幅...');
+    try {
+      histPctStats = await fetchHistoricalPctChg(env, constituents, historicalDates);
+      logs.push('fuyao historical: 成功 ' + histPctStats.successCount + ' 只, 失败 ' + histPctStats.failCount + ' 只');
+      // 合并：覆盖历史日的 change_pct
+      let mergedCount = 0;
+      historicalDates.forEach(d => {
+        const pctMap = histPctStats.byDate[d] || {};
+        if (metricsByDate[d]) {
+          metricsByDate[d].forEach(m => {
+            if (pctMap[m.code]) {
+              m.change_pct = pctMap[m.code];
+              mergedCount++;
+            }
+          });
+        }
+      });
+      logs.push('历史涨幅合并 ' + mergedCount + ' 条');
+    } catch (e) {
+      logs.push('fuyao historical 失败(保留 numcat 竞价涨幅): ' + e.message);
+    }
+  } else {
+    logs.push('步骤5：无历史交易日，跳过 fuyao historical');
+  }
 
   // 写入 market_metrics
   let totalMetricsWritten = 0;
