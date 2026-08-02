@@ -8800,6 +8800,8 @@
         let _highlightsChannel = null; // daily_highlights 表的 Realtime 订阅
         let _stockTopicsChannel = null; // stock_topics 表的 Realtime 订阅
         let _cloudTopicsCache = null; // 从 stock_topics 表加载的题材缓存 {stock: Set(topics)}
+        let _scMapChannel = null; // stockcodemap 表的 Realtime 订阅
+        let _scMapCache = null; // 从 stockcodemap 表加载的代码映射内存缓存 {stock: code}（唯一真相源=云端 stockcodemap 表）
         let _biddingTableAvailable = false; // bidding_data 表是否可用
         let _biddingRealtimeChannel = null; // bidding_data 表的 Realtime 订阅
         let _marketMetricsRealtimeChannel = null; // market_metrics 表的 Realtime 订阅
@@ -8933,6 +8935,7 @@
             stopSessionPoll();
             startAuctionRealtime(); // 同时启动 auction_watchlist / market_metrics 表的 Realtime 订阅
             startStockTopicsRealtime(); // 同时启动 stock_topics 表的 Realtime 订阅（题材库）
+            startStockCodeMapRealtime(); // 同时启动 stockcodemap 表的 Realtime 订阅（股票代码映射唯一真相源）
             startBiddingRealtime(); // 同时启动 bidding_data 表的 Realtime 订阅（竞价变化看板）
             startJiwangRealtime(); // 同时启动 jiwang_data 表的 Realtime 订阅（记忘看板）
             startEmotionRealtime(); // 同时启动 emotion_data 表的 Realtime 订阅（情绪看板）
@@ -9441,6 +9444,103 @@
             if (_stockTopicsChannel) {
                 try { getSupabase().removeChannel(_stockTopicsChannel); } catch(e) {}
                 _stockTopicsChannel = null;
+            }
+        }
+
+        // ===== stockcodemap 表操作（股票名↔代码映射唯一真相源，取代旧的本地 localStorage.stockCodeMap）=====
+        // 内存缓存 _scMapCache 保留（读取性能），但不再落 localStorage；跨设备一致性靠 Realtime 订阅维护。
+
+        // 全量加载 stockcodemap 到内存缓存，返回 {stockName: code}
+        async function pullStockCodeMapFromCloud() {
+            const sb = getSupabase();
+            const allRows = [];
+            let from = 0;
+            const pageSize = 1000;
+            while (true) {
+                const { data, error } = await sb.from('stockcodemap')
+                    .select('stock,code')
+                    .range(from, from + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                allRows.push(...data);
+                if (data.length < pageSize) break;
+                from += pageSize;
+            }
+            const result = {};
+            allRows.forEach(function(row) {
+                if (row && row.stock && row.code) {
+                    result[row.stock.trim()] = row.code.trim();
+                }
+            });
+            return result;
+        }
+
+        // 从云端加载 stockcodemap 到内存缓存（非阻塞，失败只打日志，缓存保持为空对象兜底）
+        async function loadCloudStockCodeMap() {
+            try {
+                _scMapCache = await pullStockCodeMapFromCloud();
+                console.log('stockcodemap 加载完成:', Object.keys(_scMapCache).length, '只股票');
+            } catch (e) {
+                console.warn('loadCloudStockCodeMap 失败:', e && e.message);
+                if (!_scMapCache) _scMapCache = {};
+            }
+        }
+
+        // 同步读取单只股票代码（渲染/业务逻辑路径用，读内存缓存，不发请求）
+        function getStockCode(name) {
+            if (!name) return '';
+            const n = String(name).trim();
+            if (_scMapCache && _scMapCache[n]) return _scMapCache[n];
+            return '';
+        }
+
+        // upsert 一批 {stock, code} 到云端 stockcodemap，并同步更新内存缓存
+        async function upsertStockCodeMap(pairs) {
+            if (!pairs || pairs.length === 0) return;
+            const sb = getSupabase();
+            const now = new Date().toISOString();
+            const rows = pairs
+                .filter(function(p) { return p && p.stock && p.code; })
+                .map(function(p) { return { stock: p.stock.trim(), code: String(p.code).trim(), updated_at: now }; })
+                .filter(function(p) { return p.stock && p.code; });
+            if (rows.length === 0) return;
+            const { error } = await sb.from('stockcodemap')
+                .upsert(rows, { onConflict: 'stock' });
+            if (error) throw error;
+            if (!_scMapCache) _scMapCache = {};
+            rows.forEach(function(r) { _scMapCache[r.stock] = r.code; });
+        }
+
+        // 启动 stockcodemap 表的 Realtime 订阅（跨设备同步，直接更新内存缓存，无需整表重拉）
+        function startStockCodeMapRealtime() {
+            stopStockCodeMapRealtime();
+            try {
+                const sb = getSupabase();
+                _scMapChannel = sb
+                    .channel('stockcodemap_changes')
+                    .on('postgres_changes', {
+                        event: '*', schema: 'public', table: 'stockcodemap'
+                    }, function(payload) {
+                        if (!_scMapCache) _scMapCache = {};
+                        if (payload.eventType === 'DELETE') {
+                            const oldStock = payload.old && payload.old.stock;
+                            if (oldStock) delete _scMapCache[oldStock.trim()];
+                        } else {
+                            const row = payload.new;
+                            if (row && row.stock && row.code) {
+                                _scMapCache[row.stock.trim()] = String(row.code).trim();
+                            }
+                        }
+                    })
+                    .subscribe();
+                console.log('stockcodemap Realtime 订阅已启动');
+            } catch (e) { _dbgLog('[AUCTION-ERR] stockcodemap Realtime 订阅失败 ' + (e && e.message || e)); }
+        }
+
+        function stopStockCodeMapRealtime() {
+            if (_scMapChannel) {
+                try { getSupabase().removeChannel(_scMapChannel); } catch(e) {}
+                _scMapChannel = null;
             }
         }
 
@@ -10243,6 +10343,9 @@
 
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
+
+            // 预加载云端股票代码映射（非阻塞，唯一真相源=stockcodemap 表）
+            loadCloudStockCodeMap().then(function() { if (typeof renderAuction === 'function') renderAuction(); }).catch(function() {});
         }
 
         // ============================================================
@@ -10635,8 +10738,8 @@
             const cloudByDate = {};
             // 保存旧的本地数据，用于合并 note/changePct/topics（云端有值才覆盖，避免抓取程序空字段覆盖主程序编辑）
             const oldLocalData = _hotAuctionData || {};
-            // [BUG-FIX] 从本地 stockCodeMap 拿 name→code 映射，云端 code 为空时做回填。
-            const scMap = loadAllData().stockCodeMap || {};
+            // [BUG-FIX] 从 stockcodemap 云端表拿 name→code 映射，云端 code 为空时做回填。
+            const scMap = _scMapCache || {};
             let offset = 0;
             const pageSize = 1000;
 
@@ -11071,7 +11174,7 @@
             // 3. market_metrics 是主数据源，由 patchHotFieldBatch 写入，Realtime 会自动触发 _hotTrendsCache 刷新。
             _justPushedHotTrends = true;
             try {
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const now = new Date().toISOString();
                 if (!_hotTrendsCache[date]) _hotTrendsCache[date] = [];
 
@@ -11599,7 +11702,7 @@
             const cloudStocks = new Set((cloudRows || []).map(function(r) { return (r.stock || '').trim(); }));
 
             const now = new Date().toISOString();
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
 
             // 1. 云端有但本地无的股票：从 auction_watchlist 物理删除
             const toRemove = [];
@@ -11818,7 +11921,7 @@
             const cloudStocks = new Set((cloudRows || []).map(function(r) { return (r.stock || '').trim(); }));
 
             const now = new Date().toISOString();
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
 
             // 1. 云端有但本地无的股票：从 hot_stocks 物理删除
             const toRemove = [];
@@ -11920,7 +12023,7 @@
             _openHotAuctionShield();
             try {
             const sb = getSupabase();
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
             const now = new Date().toISOString();
             // 判断依据：该股票是否已经是"当前 hotAuctionData[date] 正式列表"的成员。
             // 正式列表成员 → hot_stocks；不在正式列表里的股票 → market_metrics(scope='hot')。
@@ -12395,7 +12498,7 @@
             _openAuctionShield();
             try {
             const sb = getSupabase();
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
             const now = new Date().toISOString();
             // 方案2：用 _auctionWatchlistIndex 判断正式成员（替代旧 in_watchlist===true 判断）
             const watchlistSet = _getAuctionWatchlistSet(date);
@@ -12471,7 +12574,7 @@
         // 拆表后：code 是公共字段，patchAuctionFieldBatch 会同时写入 auction_watchlist 与 market_metrics。
         async function pushAuctionCodeToCloud(date) {
             if (!_auctionTableAvailable && !_marketMetricsTableAvailable) return;
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
             // 方案2：用 _auctionWatchlistIndex 判断正式成员，只推送正式成员的 code
             const watchlistSet = _getAuctionWatchlistSet(date);
             const auctionList = (getAuctionData()[date] || []).filter(function(s) { return s && s.stock && watchlistSet.has(s.stock.trim()); });
@@ -12523,7 +12626,7 @@
                 return;
             }
             const sb = getSupabase();
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
             const now = new Date().toISOString();
             let watchlistRows = 0;
             let metricsRows = 0;
@@ -12728,7 +12831,7 @@
                 const cloudObj = data.data;
 
                 // 将云端数据写入 localStorage（覆盖本地）
-                const moduleKeys = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'tradingDays', 'stockCodeMap'];
+                const moduleKeys = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'tradingDays'];
                 const DV = 'v42';
                 moduleKeys.forEach(key => {
                     if (cloudObj[key] !== undefined) {
@@ -12919,6 +13022,8 @@
                 updateCloudSyncUI('synced');
             // 预加载云端题材库（非阻塞，完成后重建缓存并刷新第二页）
             loadCloudTopics().then(function() { invalidateTopicCache(); buildTopicCache(); renderAuction(); }).catch(function() {});
+            // 重新加载云端股票代码映射
+            loadCloudStockCodeMap().then(function() { if (typeof renderAuction === 'function') renderAuction(); }).catch(function() {});
             } catch (e) {
                 _dbgLog('[AUCTION-ERR] manualPullCloud ' + (e && e.message || e));
                 updateCloudSyncUI('offline');
@@ -13094,7 +13199,6 @@
                     auction: _auctionTableAvailable ? {} : (allData.auction || {}),
                     tagTitles: allData.tagTitles || {},
                     holidays: allData.holidays || [],
-                    stockCodeMap: allData.stockCodeMap || {},
                     duibanData: JSON.parse(localStorage.getItem('duibanData') || '{}'),
                     duibanComment: JSON.parse(localStorage.getItem('duibanComment') || '{}'),
                     stockEtfData: JSON.parse(localStorage.getItem('stockEtfData') || '{}'),
@@ -13181,7 +13285,7 @@
         }
 
         const DATA_VERSION = 'v42';
-        const MODULE_KEYS = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'tradingDays', 'stockCodeMap'];
+        const MODULE_KEYS = ['stocks', 'auction', 'jiwang', 'rank', 'multi', 'hotspot', 'pattern', 'bidding', 'tagTitles', 'holidays', 'tradingDays'];
 
         // 一次性清理：早期测试阶段遗留的陈旧 lastEditedDate（如 2025-01-02）会导致
         // 应用一直卡在那个日期。这里清除"去年今日"之前的值，让它退回默认走"今天"。
@@ -13368,7 +13472,7 @@
                     allData = {
                         stocks: _stocksMemCache, jiwang: _jiwangMemCache, rank: _rankMemCache, multi: _multiMemCache,
                         hotspot: _hotspotMemCache, pattern: _patternMemCache, bidding: _biddingMemCache, tagTitles: _tagTitlesMemCache,
-                        auction: _auctionMemCache, holidays: [], tradingDays: [], stockCodeMap: {}
+                        auction: _auctionMemCache, holidays: [], tradingDays: []
                     };
                 }
             }
@@ -13555,7 +13659,7 @@
                 }
                 setAuctionDateData(backupDate, backupDayData, 'restore');
                 // 把这一天的所有数据字段 patch 到云端（camelCase → snake_case）
-                const scMap = (allData && allData.stockCodeMap) || {};
+                const scMap = _scMapCache || {};
                 const patches = (Array.isArray(backupDayData) ? backupDayData : [])
                     .filter(function(s) { return s && s.stock; })
                     .map(function(item) {
@@ -14357,7 +14461,7 @@
             const formContainer = document.getElementById('hotFormContainer');
             const rows = formContainer.querySelectorAll('.auction-form-row');
             const existingList = getHotAuctionData()[currentDate] || [];
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
             const hotList = [];
             rows.forEach((row, index) => {
                 const stockInput = row.querySelector(`[name="hot-stock-${index}"]`);
@@ -14377,7 +14481,7 @@
                         changePct = parsed.changePct;
                         topics = parsed.topics;
                     }
-                    // [BUG-FIX] 保存表单时必须保留股票代码：优先取现有行的 code，再取 stockCodeMap，
+                    // [BUG-FIX] 保存表单时必须保留股票代码：优先取现有行的 code，再取 stockcodemap，
                     // 再取云端全量快照缓存里的 code，避免保存动作把同花顺/猫抓已回填的 code 冲掉。
                     let code = (existingItem ? (existingItem.code || '').trim() : '') || (scMap[stock] || '').trim();
                     if (!code) {
@@ -14430,7 +14534,7 @@
             }
             backupHotStocksData('import');
             buildTopicCache();
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
             const lines = pasteText.split(/\r?\n/);
             const hotData = getHotAuctionData();
             const existingList = hotData[currentDate] || [];
@@ -14553,7 +14657,7 @@
                 } else {
                     const historyTopics = getStockHistoryTopics(dataItem.stock);
                     var parsedHist = parseNoteToFields(historyTopics);
-                    // [BUG-FIX] 新股票回填代码：优先 stockCodeMap，再云端快照缓存。
+                    // [BUG-FIX] 新股票回填代码：优先 stockcodemap，再云端快照缓存。
                     const cached = (_hotFullRowCache[currentDate] || []).find(function(r) { return r && r.stock === dataItem.stock; });
                     hotList.push({
                         ...dataItem,
@@ -14613,7 +14717,7 @@
                         historyParsed.topics.split(/[,，、;；]/).forEach(function(t) { t = t.trim(); if (t) allTopics2.add(t); });
                         finalTopics = Array.from(allTopics2).join(',');
                     }
-                    // [BUG-FIX] 新股票回填代码：优先 stockCodeMap，再云端快照缓存。
+                    // [BUG-FIX] 新股票回填代码：优先 stockcodemap，再云端快照缓存。
                     const cached2 = (_hotFullRowCache[currentDate] || []).find(function(r) { return r && r.stock === noteItem.stock; });
                     hotList.push({
                         stock: noteItem.stock, volume: '', yestVolume: '',
@@ -14649,7 +14753,7 @@
             // 与早盘竞价的粘贴导入补齐同一逻辑，两个 tab 才能真正共享同一份题材库。
             // 规则：新旧题材合并去重，全部保留，不设数量上限（pushStockTopicsToCloud 内部已处理合并）。
             (function() {
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 hotList.forEach(function(item) {
                     if (!item || !item.stock || !item.topics) return;
                     const nameTrim = item.stock.trim();
@@ -15031,7 +15135,7 @@
             const on = document.getElementById('stockCodeMapToggle_hot').checked;
             document.getElementById('stockCodeMapBody_hot').style.display = on ? 'block' : 'none';
             if (on) {
-                const map = loadAllData().stockCodeMap || {};
+                const map = _scMapCache || {};
                 const cnt = Object.keys(map).length;
                 setStockCodeMapStatusHot(cnt > 0 ? `当前映射已有 ${cnt} 只` : '当前映射为空', false);
             }
@@ -15042,14 +15146,15 @@
             el.textContent = msg;
             el.style.color = isErr ? '#dc2626' : '#059669';
         }
-        // 导入代码映射（热门股票独立版本：写入共享 stockCodeMap + 把股票加到 _hotAuctionData[currentDate]）
-        function importStockCodeMapHot() {
+        // 导入代码映射（热门股票独立版本：写入云端 stockcodemap + 把股票加到 _hotAuctionData[currentDate]）
+        async function importStockCodeMapHot() {
             const ta = document.getElementById('stockCodeMapInput_hot');
             if (!ta) return;
             const raw = ta.value.trim();
             if (!raw) { setStockCodeMapStatusHot('请先粘贴数据', true); ta.focus(); return; }
-            const map = loadAllData().stockCodeMap || {};
+            const map = Object.assign({}, _scMapCache || {});
             const newNames = [];
+            const scPairs = [];
             let count = 0;
             raw.split(/\r?\n/).forEach(line => {
                 line = line.trim();
@@ -15068,12 +15173,15 @@
                 else { name = cells[0].trim(); code = cells[1].trim(); }
                 if (!name) return;
                 map[name] = code;
+                if (code) scPairs.push({ stock: name, code: code });
                 newNames.push(name);
                 count++;
             });
-            allData.stockCodeMap = map;
-            saveModule('stockCodeMap');
-            scheduleCloudPush();
+            try {
+                await upsertStockCodeMap(scPairs);
+            } catch (e) {
+                _dbgLog('[AUCTION-ERR] importStockCodeMapHot upsertStockCodeMap ' + (e && e.message || e));
+            }
 
             // 同步到今日热门股票列表：将导入的名称追加到 _hotAuctionData[currentDate]（已存在的不重复添加）
             let addedToHot = 0;
@@ -15116,15 +15224,13 @@
             setStockCodeMapStatusHot(`✅ 已导入 ${count} 条映射，${addedToHot} 只已加入今日热门股票列表` +
                 (codePatches && codePatches.length ? `，已回填 ${codePatches.length} 只股票的代码` : ''), false);
         }
-        // 清空映射（热门股票独立版本：清空共享 stockCodeMap + 清空 textarea）
+        // 清空映射（热门股票独立版本：清空内存缓存显示，云端 stockcodemap 是唯一真相源不主动清空）
         function clearStockCodeMapHot() {
             if (!confirm('确定清空股票代码映射？清空后抓取程序将读不到代码。')) return;
-            allData.stockCodeMap = {};
-            saveModule('stockCodeMap');
-            scheduleCloudPush();
+            showToast('股票代码映射为云端唯一真相源，如需删除请到云端 stockcodemap 表操作');
             const ta = document.getElementById('stockCodeMapInput_hot');
             if (ta) ta.value = '';
-            setStockCodeMapStatusHot('已清空股票代码映射', false);
+            setStockCodeMapStatusHot('已清空输入框（云端映射未删除）', false);
         }
 
         // 通过同花顺 fuyao 标的检索接口，按名称补全缺失的 6 位股票代码
@@ -15153,7 +15259,7 @@
         async function autoCompleteMissingStockCodes(dataSource) {
             const ds = dataSource === 'hot' ? 'hot' : 'auction';
             const list = (getGroupData(ds)[currentDate] || []).filter(function(r) { return r && r.stock; });
-            const scMap = loadAllData().stockCodeMap || {};
+            const scMap = _scMapCache || {};
             const missing = list.filter(function(r) {
                 const existing = (r.code || '').trim() || scMap[r.stock.trim()];
                 return !existing;
@@ -15165,6 +15271,7 @@
 
             let completed = 0, failed = 0;
             const patches = [];
+            const scPairs = [];
             for (let i = 0; i < missing.length; i++) {
                 const item = missing[i];
                 const name = item.stock.trim();
@@ -15172,6 +15279,7 @@
                 if (code) {
                     scMap[name] = code;
                     patches.push({ stock: name, code: code });
+                    scPairs.push({ stock: name, code: code });
                     completed++;
                 } else {
                     failed++;
@@ -15179,8 +15287,11 @@
             }
 
             if (patches.length > 0) {
-                allData.stockCodeMap = scMap;
-                saveModule('stockCodeMap');
+                try {
+                    await upsertStockCodeMap(scPairs);
+                } catch (e) {
+                    _dbgLog('[AUCTION-ERR] autoCompleteMissingStockCodes upsertStockCodeMap ' + (e && e.message || e));
+                }
                 if (ds === 'hot') {
                     await patchHotFieldBatch(currentDate, patches);
                 } else {
@@ -15202,7 +15313,7 @@
             const on = document.getElementById('stockCodeMapToggle').checked;
             document.getElementById('stockCodeMapBody').style.display = on ? 'block' : 'none';
             if (on) {
-                const map = loadAllData().stockCodeMap || {};
+                const map = _scMapCache || {};
                 const cnt = Object.keys(map).length;
                 setStockCodeMapStatus(cnt > 0 ? `当前映射已有 ${cnt} 只` : '当前映射为空', false);
             }
@@ -15213,14 +15324,15 @@
             el.textContent = msg;
             el.style.color = isErr ? '#dc2626' : '#059669';
         }
-        function importStockCodeMap() {
+        async function importStockCodeMap() {
             const targetDate = auctionStore ? auctionStore.currentDate : currentDate;
             const ta = document.getElementById('stockCodeMapInput');
             if (!ta) return;
             const raw = ta.value.trim();
             if (!raw) { setStockCodeMapStatus('请先粘贴数据', true); ta.focus(); return; }
-            const map = loadAllData().stockCodeMap || {};
+            const map = Object.assign({}, _scMapCache || {});
             const newNames = []; // 本次导入的名称（用于同步到今日竞价列表）
+            const scPairs = [];
             let count = 0;
             raw.split(/\r?\n/).forEach(line => {
                 line = line.trim();
@@ -15241,11 +15353,15 @@
                 else { name = cells[0].trim(); code = cells[1].trim(); }
                 if (!name) return;
                 map[name] = code;
+                if (code) scPairs.push({ stock: name, code: code });
                 newNames.push(name);
                 count++;
             });
-            allData.stockCodeMap = map;
-            saveModule('stockCodeMap');
+            try {
+                await upsertStockCodeMap(scPairs);
+            } catch (e) {
+                _dbgLog('[AUCTION-ERR] importStockCodeMap upsertStockCodeMap ' + (e && e.message || e));
+            }
 
             // 同步到今日竞价列表：将导入的名称追加到 auction[targetDate]（已存在的不重复添加）
             let addedToAuction = 0;
@@ -15274,7 +15390,7 @@
                 // 阶段四 Bug 3 修复：新增的股票也走 patchAuctionFieldBatch 上报到云端（带 code 字段），
                 // 不再依赖 saveModule('auction') 落 localStorage
                 if (newStocksAdded.length > 0) {
-                    const scMap = allData.stockCodeMap || {};
+                    const scMap = _scMapCache || {};
                     const patches = newStocksAdded.map(function(name) {
                         return { stock: name, code: scMap[name] || '', volume: '', yest_volume: '', note: '', change_pct: '', topics: '', selected: false, bought: false, sold: false, fixed: false };
                     });
@@ -15293,10 +15409,8 @@
         }
         function clearStockCodeMap() {
             if (!confirm('确定清空股票代码映射？清空后抓取程序将读不到代码。')) return;
-            allData.stockCodeMap = {};
-            saveModule('stockCodeMap');
-            scheduleCloudPush();
-            setStockCodeMapStatus('已清空映射', false);
+            showToast('股票代码映射为云端唯一真相源，如需删除请到云端 stockcodemap 表操作');
+            setStockCodeMapStatus('已清空输入框（云端映射未删除）', false);
         }
 
         // 删除早盘竞价行
@@ -15667,7 +15781,7 @@
             // 粘贴导入是全量数据写入，覆盖所有业务字段；正式成员身份由 _auctionWatchlistIndex
             // 管理，syncAuctionListForDate 负责同步正式列表到云端 auction_watchlist
             (function() {
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const patches = auctionList.filter(function(s) { return s && s.stock; }).map(function(item) {
                     const nameTrim = item.stock.trim();
                     return {
@@ -16300,20 +16414,21 @@
                 });
                 _dbgLogVerbose('[LADDER] 覆盖后 newList 共 ' + newList.length + ' 只，其中 obsAutoAdded=' + newList.filter(function(r){return r.obsAutoAdded===true;}).length + ' 只');
 
-                // 更新 stockCodeMap（name → code）
-                const scMap = loadAllData().stockCodeMap || {};
+                // 更新 stockcodemap（name → code，云端唯一真相源）
+                const scMap = _scMapCache || {};
                 let mapUpdated = false;
+                const scPairs = [];
                 constituents.forEach(function(c) {
                     const name = (c.name || '').trim();
                     const code = extractCodeFromFuyaoItem(c);
                     if (name && code && scMap[name] !== code) {
                         scMap[name] = code;
+                        scPairs.push({ stock: name, code: code });
                         mapUpdated = true;
                     }
                 });
                 if (mapUpdated) {
-                    allData.stockCodeMap = scMap;
-                    saveModule('stockCodeMap');
+                    upsertStockCodeMap(scPairs).catch(function(e) { _dbgLog('[AUCTION-ERR] fetchLadderConstituentsMain upsertStockCodeMap ' + (e && e.message || e)); });
                 }
 
                 setAuctionDateData(targetDate, newList, 'fetchLadderConstituentsMain');
@@ -16526,7 +16641,7 @@
                 // yesterdayList 始终基于 todayList（当前显示的表格），保留 auctionData[yesterday] 原有同名股票的业务字段
                 const yesterdayList = buildYesterdayListFromToday(todayList, auctionData, yesterday);
                 const yesterdayListWasEmpty = (auctionData[yesterday] || []).length === 0;
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 // 收集需要查询的股票代码（today + yesterday 合并去重）
                 const codeToName = {}; // ticker -> name
@@ -16675,7 +16790,7 @@
                     setApiStatus('thsApiStatus', '❌ 当日列表为空，请先获取最近多板', false);
                     return;
                 }
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const codeToName = {};
                 todayList.forEach(function(s) {
                     if (!s || !s.stock) return;
@@ -16758,7 +16873,7 @@
                 // yesterdayList 始终基于 todayList（当前显示的表格），保留 auctionData[yesterday] 原有同名股票的业务字段
                 const yesterdayList = buildYesterdayListFromToday(todayList, auctionData, yesterday);
                 const yesterdayListWasEmpty = (auctionData[yesterday] || []).length === 0;
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const codeToName = {};
                 yesterdayList.forEach(function(s) {
                     if (!s || !s.stock) return;
@@ -16865,7 +16980,7 @@
                 }
 
                 // 收集 thscode
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const stockMap = {}; // thscode -> stock 对象
                 const thscodes = [];
                 todayList.forEach(function(s) {
@@ -16995,7 +17110,7 @@
                     return;
                 }
 
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const windowDates = [];
                 let d = today;
                 for (let i = 0; i < 5 && d; i++) { windowDates.unshift(d); d = getPreviousTradingDay(d); }
@@ -17210,7 +17325,7 @@
                     return;
                 }
 
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const windowDates = [];
                 let d = today;
                 for (let i = 0; i < 5 && d; i++) { windowDates.unshift(d); d = getPreviousTradingDay(d); }
@@ -17431,7 +17546,7 @@
                 }
 
                 // 收集股票代码
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const codes = [];
                 const codeToStock = {};
                 todayList.forEach(function(s) {
@@ -17548,7 +17663,7 @@
                 }
 
                 // 收集股票代码
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const codes = [];
                 fullList.forEach(function(s) {
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
@@ -17753,22 +17868,22 @@
 
                 const withCodeCount = newList.filter(function(s) { return s && s.code; }).length;
 
-                // 更新 stockCodeMap（name → code，全局共享）
-                const scMap = loadAllData().stockCodeMap || {};
+                // 更新 stockcodemap（name → code，云端唯一真相源）
+                const scMap = _scMapCache || {};
                 let mapUpdated = false;
+                const scPairs = [];
                 constituents.forEach(function(c) {
                     const name = (c.name || '').trim();
                     const code = extractCodeFromFuyaoItem(c);
                     if (name && code && scMap[name] !== code) {
                         scMap[name] = code;
+                        scPairs.push({ stock: name, code: code });
                         mapUpdated = true;
                     }
                 });
-                _dbgLog('[HOT-SKYROCKET] 合并后 newList=' + newList.length + ' 有代码=' + withCodeCount + ' stockCodeMap更新=' + mapUpdated);
+                _dbgLog('[HOT-SKYROCKET] 合并后 newList=' + newList.length + ' 有代码=' + withCodeCount + ' stockcodemap更新=' + mapUpdated);
                 if (mapUpdated) {
-                    allData.stockCodeMap = scMap;
-                    saveModule('stockCodeMap');
-                    scheduleCloudPush();
+                    upsertStockCodeMap(scPairs).catch(function(e) { _dbgLog('[AUCTION-ERR] HOT-SKYROCKET upsertStockCodeMap ' + (e && e.message || e)); });
                 }
 
                 _dbgLog('[HOT-SKYROCKET] 写入 hotAuctionData[' + targetDate + '] 行数=' + newList.length + ' 有代码=' + withCodeCount);
@@ -17902,23 +18017,23 @@
                     _dbgLog('[LADDER] 以下股票无法提取代码: ' + missingCodeNames.join(','));
                 }
 
-                // 更新共享代码映射
-                const scMap = loadAllData().stockCodeMap || {};
+                // 更新共享代码映射（云端 stockcodemap 唯一真相源）
+                const scMap = _scMapCache || {};
                 let mapUpdated = false;
+                const scPairs = [];
                 constituents.forEach(function(c) {
                     const name = (c.name || '').trim();
                     const code = extractCodeFromFuyaoItem(c);
                     if (name && code && scMap[name] !== code) {
                         scMap[name] = code;
+                        scPairs.push({ stock: name, code: code });
                         mapUpdated = true;
                     }
                 });
                 const withCodeCount2 = newList.filter(function(s) { return s && s.code; }).length;
-                _dbgLog('[LADDER] 合并后 newList=' + newList.length + ' 有代码=' + withCodeCount2 + ' stockCodeMap更新=' + mapUpdated);
+                _dbgLog('[LADDER] 合并后 newList=' + newList.length + ' 有代码=' + withCodeCount2 + ' stockcodemap更新=' + mapUpdated);
                 if (mapUpdated) {
-                    allData.stockCodeMap = scMap;
-                    saveModule('stockCodeMap');
-                    scheduleCloudPush();
+                    upsertStockCodeMap(scPairs).catch(function(e) { _dbgLog('[AUCTION-ERR] LADDER upsertStockCodeMap ' + (e && e.message || e)); });
                 }
 
                 _dbgLog('[LADDER] 写入 hotAuctionData[' + targetDate + '] 行数=' + newList.length + ' 有代码=' + withCodeCount2);
@@ -17972,7 +18087,7 @@
                 // yesterdayList 始终基于 todayList（当前显示的表格），保留 hotAuctionData[yesterday] 原有同名股票的业务字段
                 const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
                 const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
                 const _cloudTasks = [];
@@ -18026,7 +18141,7 @@
 
                 const allCodes = Object.keys(codeToName);
                 if (allCodes.length === 0) {
-                    console.log('[HotBothYestVol] 无可用代码：todayList=' + todayList.length + ' yesterdayList=' + yesterdayList.length + ' stockCodeMap=' + Object.keys(scMap).length);
+                    console.log('[HotBothYestVol] 无可用代码：todayList=' + todayList.length + ' yesterdayList=' + yesterdayList.length + ' stockcodemap=' + Object.keys(scMap).length);
                     setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺少代码映射，请先通过「昨日涨停连板」「获取飙升+热股」导入股票，或导入代码映射）', false);
                     return;
                 }
@@ -18186,7 +18301,7 @@
                     setApiStatus('thsApiStatusHot', '❌ 当日列表为空，请先通过「昨日涨停连板」或「获取飙升+热股」导入股票', false);
                     return;
                 }
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
                 const _cloudTasks = [];
@@ -18249,7 +18364,7 @@
                 }
                 if (allCodes.length === 0) {
                     console.log('[HotTodayYestVol] 无可用代码：todayList=' + todayList.length +
-                        ' 需补yest=' + _needYest.length + ' stockCodeMap=' + Object.keys(scMap).length +
+                        ' 需补yest=' + _needYest.length + ' stockcodemap=' + Object.keys(scMap).length +
                         ' 无代码股票=' + _noCodeStocks.join(','));
                     setApiStatus('thsApiStatusHot',
                         '❌ 没有可补全的股票：' + _needYest.length + ' 只缺昨日成交量，但全部 ' + todayList.length +
@@ -18373,7 +18488,7 @@
                 // yesterdayList 始终基于 todayList（当前显示的表格），保留 hotAuctionData[yesterday] 原有同名股票的业务字段
                 const yesterdayList = buildYesterdayListFromToday(todayList, hotAuctionData, yesterday);
                 const yesterdayListWasEmpty = (hotAuctionData[yesterday] || []).length === 0;
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
                 const _cloudTasks = [];
@@ -18418,7 +18533,7 @@
                 });
                 const allCodes = Object.keys(codeToName);
                 if (allCodes.length === 0) {
-                    console.log('[HotYestYestVol] 无可用代码：yesterdayList=' + yesterdayList.length + ' stockCodeMap=' + Object.keys(scMap).length);
+                    console.log('[HotYestYestVol] 无可用代码：yesterdayList=' + yesterdayList.length + ' stockcodemap=' + Object.keys(scMap).length);
                     setApiStatus('thsApiStatusHot', '❌ 没有可补全的股票（缺代码映射，请先通过「昨日涨停连板」「获取飙升+热股」导入股票，或导入代码映射）', false);
                     return;
                 }
@@ -18547,7 +18662,7 @@
                 }
 
                 // 收集 thscode
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 // [BUG-FIX] 收集所有云端写入Promise，统一await并收集错误
                 const _cloudTasks = [];
@@ -18719,7 +18834,7 @@
                     return;
                 }
 
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 // 近5个交易日（含今天），正序 [T-4 ... T]
                 const windowDates = [];
                 let d = today;
@@ -18961,7 +19076,7 @@
                     return;
                 }
 
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const windowDates = [];
                 let d = today;
                 for (let i = 0; i < 5 && d; i++) { windowDates.unshift(d); d = getPreviousTradingDay(d); }
@@ -19178,7 +19293,7 @@
                     ? buildYesterdayListFromToday(todayList, hotAuctionData, dayBefore)
                     : [];
                 const dayBeforeListWasEmpty = opts.fillDayBefore && (hotAuctionData[dayBefore] || []).length === 0;
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 // [BUG-FIX/恢复] 从云端全量快照缓存恢复缺失的 code，再收集请求代码。
                 // 返回patches数组以便持久化恢复的code到云端（对齐同花顺版本逻辑）
@@ -19229,7 +19344,7 @@
                 if (needDayBefore) collectCodes(dayBeforeList);
 
                 if (allCodesSet.size === 0) {
-                    console.log('[NUMCAT-DEBUG-HOT] 无可用代码：todayList=' + todayList.length + ' stockCodeMap=' + Object.keys(scMap).length);
+                    console.log('[NUMCAT-DEBUG-HOT] 无可用代码：todayList=' + todayList.length + ' stockcodemap=' + Object.keys(scMap).length);
                     setApiStatus('numcatApiStatusHot', '❌ 没有可补全的股票（缺少代码映射，请先通过「昨日涨停连板」「获取飙升+热股」导入股票，或导入代码映射）', false);
                     return;
                 }
@@ -19328,26 +19443,26 @@
                 });
                 _dbgLog('[NUMCAT-DEBUG-HOT] 接口 name->symbol 映射条目=' + Object.keys(apiNameToCode).length);
 
-                // [BUG-FIX] 把接口返回的 name->symbol 映射持久化到共享 stockCodeMap，
-                // 这样即使云端 hot_stocks 行的 code 被冲掉，本地仍有代码映射，
+                // [BUG-FIX] 把接口返回的 name->symbol 映射持久化到云端 stockcodemap（唯一真相源），
+                // 这样即使云端 hot_stocks 行的 code 被冲掉，stockcodemap 仍有代码映射，
                 // 同花顺/猫抓后续补全都能直接读到代码，不需要重新拉取。
                 let _apiMapPersistCount = 0;
                 if (Object.keys(apiNameToCode).length > 0) {
-                    const scMap = loadAllData().stockCodeMap || {};
+                    const scMap = _scMapCache || {};
                     let _dirty = false;
+                    const scPairs = [];
                     Object.keys(apiNameToCode).forEach(function(name) {
                         const code = apiNameToCode[name];
                         if (code && !((scMap[name] || '').trim())) {
                             scMap[name] = code;
+                            scPairs.push({ stock: name, code: code });
                             _dirty = true;
                             _apiMapPersistCount++;
                         }
                     });
                     if (_dirty) {
-                        allData.stockCodeMap = scMap;
-                        saveModule('stockCodeMap');
-                        scheduleCloudPush();
-                        _dbgLog('[NUMCAT-DEBUG-HOT] 自动写入 stockCodeMap ' + _apiMapPersistCount + ' 条');
+                        upsertStockCodeMap(scPairs).catch(function(e) { _dbgLog('[AUCTION-ERR] NUMCAT-DEBUG-HOT upsertStockCodeMap ' + (e && e.message || e)); });
+                        _dbgLog('[NUMCAT-DEBUG-HOT] 自动写入 stockcodemap ' + _apiMapPersistCount + ' 条');
                     }
                 }
 
@@ -19648,14 +19763,14 @@
                 push('');
 
                 const hotAuctionData = getHotAuctionData();
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const scMapSize = Object.keys(scMap).length;
 
                 // ---- 今日列表体检 ----
                 const todayList = (hotAuctionData[today] || []).filter(function(s) { return s && s.stock; });
 
                 // ---- 代码映射体检 ----
-                push('【代码映射】stockCodeMap 条目数=' + scMapSize);
+                push('【代码映射】stockcodemap 条目数=' + scMapSize);
                 let todayCodeInRow = 0, todayCodeInMap = 0, todayCodeMissing = 0;
                 todayList.forEach(function(s) {
                     const hasRowCode = !!((s.code || '').trim());
@@ -19664,7 +19779,7 @@
                     else if (hasMapCode) todayCodeInMap++;
                     else todayCodeMissing++;
                 });
-                push('　　行内已有 code：' + todayCodeInRow + ' 只 | 仅在 stockCodeMap：' + todayCodeInMap + ' 只 | 完全无代码：' + todayCodeMissing + ' 只');
+                push('　　行内已有 code：' + todayCodeInRow + ' 只 | 仅在 stockcodemap：' + todayCodeInMap + ' 只 | 完全无代码：' + todayCodeMissing + ' 只');
                 // [增强诊断] 同时检查云端全量快照里的 code 状态，帮助定位"保存后 code 消失"类问题。
                 const todayCache = _hotFullRowCache[today] || [];
                 let cloudHasCode = 0, cloudMissingCode = 0, memoryCloudCodeMismatch = 0;
@@ -19680,11 +19795,11 @@
                 push('　　云端快照有 code：' + cloudHasCode + ' 只 | 云端快照缺 code：' + cloudMissingCode + ' 只 | 内存与云端 code 不一致：' + memoryCloudCodeMismatch + ' 只');
                 if (scMapSize > 0) {
                     const sample = Object.keys(scMap).slice(0, 10).map(function(n) { return n + '=' + scMap[n]; }).join('、');
-                    push('　　stockCodeMap 前 10 条样例：' + sample + (scMapSize > 10 ? ' ...（共' + scMapSize + '条）' : ''));
+                    push('　　stockcodemap 前 10 条样例：' + sample + (scMapSize > 10 ? ' ...（共' + scMapSize + '条）' : ''));
                 }
                 if (todayCodeMissing > 0) {
                     push('　　💡 修复建议：');
-                    if (todayCodeInMap > 0) push('　　　1) 点「保存」可把 stockCodeMap 中的代码写回云端；');
+                    if (todayCodeInMap > 0) push('　　　1) 点「保存」可把 stockcodemap 中的代码写回云端；');
                     push('　　　' + (todayCodeInMap > 0 ? '2' : '1') + ') 点「昨日涨停连板」「获取飙升+热股」或「导入代码映射」获取代码；');
                     push('　　　' + (todayCodeInMap > 0 ? '3' : '2') + ') 若仍缺代码，可先用猫抓「连抓三天补全」从接口返回中自动映射。');
                 }
@@ -19923,7 +20038,7 @@
                 }
 
                 // 收集股票代码
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const codes = [];
                 const codeToStock = {};
                 todayList.forEach(function(s) {
@@ -20035,7 +20150,7 @@
                 }
 
                 // 收集股票代码
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const codes = [];
                 fullList.forEach(function(s) {
                     const code = (s.code || scMap[s.stock.trim()] || '').trim();
@@ -20175,7 +20290,7 @@
                     ? buildYesterdayListFromToday(todayList, auctionData, dayBefore)
                     : [];
                 const dayBeforeListWasEmpty = opts.fillDayBefore && (auctionData[dayBefore] || []).length === 0;
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 const needToday = opts.fillToday && todayList.length > 0;
                 const needYesterday = opts.fillYesterday && yesterdayList.length > 0;
@@ -20534,7 +20649,7 @@
                 push('');
 
                 const auctionData = getAuctionData();
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
 
                 // ---- 今日列表体检 ----
                 // 方案2：用 _auctionWatchlistIndex 判断正式成员，影子记录 = 不在索引里的行
@@ -25160,7 +25275,7 @@
 
                     // 同步推送到 stock_topics 表（按 stock 维度，跨日期共享），避免下次打开时题材丢失
                     const topicsArr = extractTopics(normalizedNote);
-                    const scMap = loadAllData().stockCodeMap || {};
+                    const scMap = _scMapCache || {};
                     const stockCode = scMap[stockName.trim()] || (item ? (item.code || '') : '');
                     pushStockTopicsToCloud(stockName, topicsArr, stockCode).catch(function(e) {
                         console.warn('pushStockTopicsToCloud 失败（openAuctionNoteEditFromPage2）:', e);
@@ -27073,7 +27188,8 @@
                     if (!existingNames.has(name)) {
                         // 不在当日列表中 → 自动添加
                         // 方案2：行对象不携带 in_watchlist，通过 _addAuctionWatchlistMember 登记为正式成员
-                        dayList.push({ stock: name, volume: '', yestVolume: '', note: '', obsAutoAdded: true });
+                        // [CODEMAP-FIX] 从 stockcodemap 内存缓存补 code，避免观察组继承的股票长期缺代码
+                        dayList.push({ stock: name, code: getStockCode(name), volume: '', yestVolume: '', note: '', obsAutoAdded: true });
                         _addAuctionWatchlistMember(date, name);
                         autoAddedSet.add(name);
                         hasNew = true;
@@ -27234,6 +27350,11 @@
                         _dbgLogVerbose('[BOUGHT-ENSURE] ⚠️ 修正已有行字段 ' + name + ' | 旧 isFormal=' + _isFormal + ' obsAutoAdded=' + existingRow.obsAutoAdded);
                         _addAuctionWatchlistMember(date, name);
                         existingRow.obsAutoAdded = true;
+                        // [CODEMAP-FIX] 顺带补 code（如果这一行本来就缺）
+                        if (!((existingRow.code || '').trim())) {
+                            const _mapCode = getStockCode(name);
+                            if (_mapCode) existingRow.code = _mapCode;
+                        }
                         // 方案 B：不再写 selected/bought/sold —— 标签由 deriveAuctionTagState 在渲染时派生
                         hasNew = true;
                         addedCount++;
@@ -27246,7 +27367,8 @@
                 // 昨日"买"/"持"/"卖"→今日补入观察组（标签由 deriveAuctionTagState 在渲染时派生）。
                 // 方案 B：不再写 selected/bought/sold —— 标签由 stocksData 的前一日记录在渲染时派生。
                 // 方案2：行对象不携带 in_watchlist，通过 _addAuctionWatchlistMember 登记为正式成员
-                dayList.push({ stock: name, volume: '', yestVolume: '', note: '', obsAutoAdded: true });
+                // [CODEMAP-FIX] 从 stockcodemap 内存缓存补 code，避免买入继承的股票长期缺代码
+                dayList.push({ stock: name, code: getStockCode(name), volume: '', yestVolume: '', note: '', obsAutoAdded: true });
                 _addAuctionWatchlistMember(date, name);
                 autoAddedSet.add(name);
                 hasNew = true;
@@ -27559,7 +27681,7 @@
 
                 // 同步推送到 stock_topics 表（按 stock 维度，跨日期共享），避免下次打开时题材丢失
                 const topicsArr = extractTopics(normalizedNote);
-                const scMap = loadAllData().stockCodeMap || {};
+                const scMap = _scMapCache || {};
                 const stockCode = scMap[stockName.trim()] || auctionList[index].code || '';
                 pushStockTopicsToCloud(stockName, topicsArr, stockCode).catch(function(e) {
                     console.warn('pushStockTopicsToCloud 失败（showAuctionNoteInput）:', e);
@@ -39786,7 +39908,7 @@
                         // 允许下次推送时用补全后的本地数据覆盖云端（云端该日期本来就是空的）
                         markAuctionDirty(date);
                         // 同步数据字段到云端（camelCase → snake_case）
-                        const scMap = (allData && allData.stockCodeMap) || {};
+                        const scMap = _scMapCache || {};
                         const dayList = Array.isArray(importedAuction[date]) ? importedAuction[date] : [];
                         const patches = dayList
                             .filter(function(s) { return s && s.stock; })
