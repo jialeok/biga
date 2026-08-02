@@ -401,10 +401,72 @@ async function upsertMarketMetrics(env, rows) {
   }
 }
 
-async function updateStockCodeMap(env, pairs) {
-  // pairs: [{ name, code }] → 写入 stock_topics 表的 code 列（前端 stockCodeMap 来源）
-  // 实际上 stockCodeMap 存在 localStorage，这里只需确保 auction_watchlist 的 code 列正确即可
-  // 前端 loadHotStocksFromCloud / pullFromCloud 会从 auction_watchlist 读取 code 回填 stockCodeMap
+// 从 stockcodemap 表按股票名批量查 code（唯一真相源，供 obs 股票补抓身份用）
+async function fetchCodesByNames(env, names) {
+  if (!names || names.length === 0) return {};
+  const result = {};
+  const BATCH = 100;
+  for (let i = 0; i < names.length; i += BATCH) {
+    const chunk = names.slice(i, i + BATCH);
+    const inList = chunk.map(n => encodeURIComponent('"' + String(n).replace(/"/g, '\\"') + '"')).join(',');
+    const url = CONFIG.SUPABASE_URL + '/rest/v1/stockcodemap?stock=in.(' + inList + ')&select=stock,code';
+    try {
+      const resp = await fetch(url, { headers: sbHeaders(env) });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        console.warn('[CODEMAP] 查询失败: HTTP ' + resp.status + ': ' + text.slice(0, 200));
+        continue;
+      }
+      const rows = await resp.json();
+      (rows || []).forEach(row => {
+        if (row && row.stock && row.code) result[String(row.stock).trim()] = String(row.code).trim();
+      });
+    } catch (e) {
+      console.warn('[CODEMAP] 查询异常: ' + e.message);
+    }
+  }
+  return result;
+}
+
+// upsert 批量 {stock, code} 到 stockcodemap（worker 拿到新 code 时写回唯一真相源）
+async function upsertStockCodeMap(env, pairs) {
+  if (!pairs || pairs.length === 0) return;
+  const rows = pairs
+    .filter(p => p && p.stock && p.code)
+    .map(p => ({ stock: String(p.stock).trim(), code: String(p.code).trim(), updated_at: new Date().toISOString() }))
+    .filter(p => p.stock && p.code);
+  if (rows.length === 0) return;
+  const url = CONFIG.SUPABASE_URL + '/rest/v1/stockcodemap?on_conflict=stock';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: Object.assign(sbHeaders(env), { 'Prefer': 'resolution=merge-duplicates, return=minimal' }),
+    body: JSON.stringify(rows)
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    console.warn('[CODEMAP] upsert 失败: HTTP ' + resp.status + ': ' + text.slice(0, 300));
+  }
+}
+
+// 取指定日期的上一交易日（优先走 fuyao 交易日历，失败时回退本地周末/节假日判断）
+async function getPreviousTradingDay(env, dateStr) {
+  try {
+    const dates = await fuyaoCalendarTradingDays(env);
+    const before = dates.filter(d => d < dateStr);
+    if (before.length > 0) return before[before.length - 1];
+  } catch (e) {
+    console.warn('[PREV-TD] fuyao 交易日历失败，回退本地日历: ' + e.message);
+  }
+  // 本地回退：从 dateStr 往前找，跳过周末和已知节假日。用 UTC 方法避免 Worker 运行时时区干扰
+  // （dateStr 本身语义是北京日期，按北京零点解析，逐日 -1 用 UTC 字段输出，与 normalizeDate/msToDateStr 风格一致）
+  let ms = Date.parse(dateStr + 'T00:00:00+08:00');
+  for (let i = 0; i < 30; i++) {
+    ms -= 24 * 3600 * 1000;
+    const d = new Date(ms);
+    const s = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+    if (localIsTradingDay(s)) return s;
+  }
+  return null;
 }
 
 // ══════════════════════════ 主流程 ══════════════════════════
@@ -458,9 +520,70 @@ async function runMorning(env) {
     return { ok: false, today, error: '写入 auction_watchlist 失败: ' + e.message, logs };
   }
 
-  // 3. 调 numcat daily_auc 获取5天竞价数据
+  // 2.5 成分股 code 同步到 stockcodemap（唯一真相源），供前端/后续 obs 补抓复用
+  try {
+    const codePairs = constituents.map(c => ({ stock: c.name, code: c.code }));
+    await upsertStockCodeMap(env, codePairs);
+    logs.push('步骤2.5：stockcodemap 同步成分股 code ' + codePairs.length + ' 条');
+  } catch (e) {
+    logs.push('步骤2.5：stockcodemap 同步失败(不阻断): ' + e.message);
+  }
+
+  // 2.6 读取上一交易日"竞/昨"高光股票（daily_highlights），查 stockcodemap 补 code，
+  //     一并纳入本次 numcat/auction_watchlist 抓取，解决 obs 股票（非最近多板成分股）当天无数据的问题
+  let obsNameToCode = {};
+  try {
+    const prevDay = await getPreviousTradingDay(env, today);
+    if (prevDay) {
+      const hlUrl = CONFIG.SUPABASE_URL + '/rest/v1/daily_highlights?date=eq.' + encodeURIComponent(prevDay) +
+        '&jing_yest_highlight=eq.true&select=stock';
+      const hlResp = await fetch(hlUrl, { headers: sbHeaders(env) });
+      if (hlResp.ok) {
+        const hlRows = await hlResp.json();
+        const obsNames = (hlRows || []).map(r => (r.stock || '').trim()).filter(Boolean);
+        if (obsNames.length > 0) {
+          obsNameToCode = await fetchCodesByNames(env, obsNames);
+          logs.push('步骤2.6：prevDay=' + prevDay + ' 高光 ' + obsNames.length + ' 只，stockcodemap 查到 code ' + Object.keys(obsNameToCode).length + ' 只');
+        } else {
+          logs.push('步骤2.6：prevDay=' + prevDay + ' 无高光股票，跳过 obs 补抓');
+        }
+      } else {
+        logs.push('步骤2.6：daily_highlights 读取失败 HTTP ' + hlResp.status);
+      }
+    } else {
+      logs.push('步骤2.6：无法确定上一交易日，跳过 obs 补抓');
+    }
+  } catch (e) {
+    logs.push('步骤2.6：obs 补抓失败(不阻断): ' + e.message);
+  }
+  // obs 股票（"竞/昨"高光但不在最近多板成分股里的）单独列出，后面写身份行、拼 numcat symbols、建反查表都复用这份
+  const constituentNameSet = new Set(constituents.map(c => c.name));
+  const obsOnlyList = Object.entries(obsNameToCode)
+    .filter(([name]) => !constituentNameSet.has(name))
+    .map(([name, code]) => ({ name, code }));
+
+  // obs 股票也写一份 auction_watchlist 身份行，obs_auto_added=true 标记来源
+  if (obsOnlyList.length > 0) {
+    try {
+      const obsWatchlistRows = obsOnlyList.map(o => ({
+        date: today,
+        stock: o.name,
+        code: o.code,
+        source: 'obs_inherit',
+        obs_auto_added: true,
+        updated_at: nowIso,
+        updated_by: 'auto-fetch-worker'
+      }));
+      await upsertAuctionWatchlist(env, obsWatchlistRows);
+      logs.push('步骤2.6：obs 股票写入 auction_watchlist 身份行 ' + obsWatchlistRows.length + ' 条');
+    } catch (e) {
+      logs.push('步骤2.6：obs auction_watchlist 写入失败(不阻断): ' + e.message);
+    }
+  }
+
+  // 3. 调 numcat daily_auc 获取5天竞价数据（成分股 + obs 股票一次性抓）
   logs.push('步骤3：调用 numcat daily_auc (recentdays=' + CONFIG.NUMCAT_RECENT_DAYS + ')...');
-  const symbols = constituents.map(c => c.code).join(',');
+  const symbols = constituents.map(c => c.code).concat(obsOnlyList.map(o => o.code)).join(',');
   let numcatData;
   try {
     numcatData = await numcatDailyAuc(env, symbols, CONFIG.NUMCAT_RECENT_DAYS);
@@ -471,7 +594,7 @@ async function runMorning(env) {
 
   const fields = numcatData.fields || [];
   const items = numcatData.items || [];
-  logs.push('numcat 返回 fields=' + JSON.stringify(fields) + ' items=' + items.length + '行');
+  logs.push('numcat 返回 fields=' + JSON.stringify(fields) + ' items=' + items.length + '行 (含 obs ' + obsOnlyList.length + ' 只)');
 
   const symIdx = fields.indexOf('symbol');
   const nameIdx = fields.indexOf('name');
@@ -488,6 +611,8 @@ async function runMorning(env) {
   logs.push('步骤4：解析数据并写入 market_metrics...');
   const codeToName = {};
   constituents.forEach(c => { codeToName[c.code] = c.name; });
+  // obs 股票（非成分股）也纳入反查表，否则 numcat 返回的 obs 数据行找不到股票名会被丢弃
+  obsOnlyList.forEach(o => { if (!codeToName[o.code]) codeToName[o.code] = o.name; });
 
   // 按 tradedate 分组：dateStr → [{ stock, code, volume, changePct, yestVolume }]
   const metricsByDate = {};
@@ -555,12 +680,14 @@ async function runMorning(env) {
   // 5. fuyao historical 并发抓4个历史交易日的收盘涨幅，覆盖 numcat 的竞价涨幅
   //    当天(D)涨幅先用 numcat auc_pct_chg 临时占位，16:00 由 snapshot 覆盖
   //    历史日(D-1~D-4)用 fuyao 不复权收盘价算 pct_chg，口径和 16:00 snapshot 一致
+  //    obs 股票（非成分股）一并纳入，否则只有 D 日的 numcat 竞价涨幅、缺 D-1~D-4 历史涨幅
   const historicalDates = Object.keys(metricsByDate).filter(d => d < today).sort();
+  const constituentsForHistorical = constituents.concat(obsOnlyList);
   let histPctStats = null;
   if (historicalDates.length > 0) {
-    logs.push('步骤5：fuyao historical 并发抓取 ' + historicalDates.length + ' 个历史交易日收盘涨幅...');
+    logs.push('步骤5：fuyao historical 并发抓取 ' + historicalDates.length + ' 个历史交易日收盘涨幅 (含 obs 共' + constituentsForHistorical.length + '只)...');
     try {
-      histPctStats = await fetchHistoricalPctChg(env, constituents, historicalDates);
+      histPctStats = await fetchHistoricalPctChg(env, constituentsForHistorical, historicalDates);
       logs.push('fuyao historical: 成功 ' + histPctStats.successCount + ' 只, 失败 ' + histPctStats.failCount + ' 只');
       // 合并：覆盖历史日的 change_pct
       let mergedCount = 0;
@@ -651,6 +778,31 @@ async function runClose(env) {
   if (watchlist.length === 0) {
     logs.push('当日列表为空，跳过');
     return { ok: true, today, skipped: true, reason: '当日列表为空', logs };
+  }
+
+  // 1.5 auction_watchlist.code 为空的行，从 stockcodemap（唯一真相源）兜底补齐，
+  //     并写回 auction_watchlist，避免同一只股票每天收盘都要重新兜底
+  const missingCodeRows = watchlist.filter(w => !w.code);
+  if (missingCodeRows.length > 0) {
+    try {
+      const missingNames = missingCodeRows.map(w => w.stock).filter(Boolean);
+      const codeMap = await fetchCodesByNames(env, missingNames);
+      let filledCount = 0;
+      const backfillRows = [];
+      watchlist.forEach(w => {
+        if (!w.code && codeMap[w.stock]) {
+          w.code = codeMap[w.stock];
+          filledCount++;
+          backfillRows.push({ date: today, stock: w.stock, code: w.code, updated_at: new Date().toISOString() });
+        }
+      });
+      if (backfillRows.length > 0) {
+        await upsertAuctionWatchlist(env, backfillRows);
+      }
+      logs.push('步骤1.5：stockcodemap 兜底补 code ' + filledCount + '/' + missingCodeRows.length + ' 只');
+    } catch (e) {
+      logs.push('步骤1.5：stockcodemap 兜底失败(不阻断): ' + e.message);
+    }
   }
 
   // 2. fuyao snapshot 批量获取收盘涨幅
