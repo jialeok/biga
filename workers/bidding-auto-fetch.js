@@ -132,6 +132,31 @@ async function isTradingDay(env, dateStr) {
   }
 }
 
+// 取"截止到 todayStr（含）"最近 n 个真实交易日，升序返回 ["YYYY-MM-DD", ...]
+// 【FIX 2026-08-03】用于替代 numcat recentdays，明确知道本次请求到底要哪几天，
+// 优先走 fuyao 交易日历（准确对齐节假日/临时休市），失败时回退本地节假日表推算。
+async function getRecentTradingDays(env, todayStr, n) {
+  try {
+    const dates = await fuyaoCalendarTradingDays(env);
+    const upToToday = dates.filter(d => d <= todayStr);
+    if (upToToday.length > 0) {
+      return upToToday.slice(-n);
+    }
+  } catch (e) {
+    console.warn('[RECENT-TD] fuyao 交易日历失败，回退本地日历: ' + e.message);
+  }
+  // 本地回退：从 todayStr 往前数，跳过周末和已知节假日
+  const result = [];
+  let ms = Date.parse(todayStr + 'T00:00:00+08:00');
+  for (let i = 0; i < 60 && result.length < n; i++) {
+    const d = new Date(ms);
+    const s = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+    if (localIsTradingDay(s)) result.unshift(s);
+    ms -= 24 * 3600 * 1000;
+  }
+  return result;
+}
+
 function sbHeaders(env) {
   const key = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_ANON_KEY;
   return {
@@ -346,15 +371,21 @@ async function fetchHistoricalPctChg(env, constituents, historicalDates) {
 
 // ══════════════════════════ numcat 接口 ══════════════════════════
 
-async function numcatDailyAuc(env, symbols, recentDays) {
-  // 一次调用拿 recentDays 个交易日的竞价数据
+async function numcatDailyAuc(env, symbols, startDateYMD, endDateYMD) {
+  // 【FIX 2026-08-03】改用显式 startdate/enddate（YYYYMMDD），不再用 recentdays。
+  // recentdays 是"猫抓自己认为最近 N 个有数据的交易日"，不保证严格对齐 A股交易日历，
+  // 也不保证包含"今天"（尤其 9:25 请求时，猫抓可能还没来得及把当天数据入库，
+  // 于是 recentdays=5 返回的是过去5个某些日子，今天缺失且没有任何报错/日志线索）。
+  // 前端手动"连抓三天补全"按钮一直用的是 startdate+enddate（显式日期），这里保持一致，
+  // 这样才能明确知道"这次请求到底要哪几天"，返回缺哪天也能立刻定位。
   const body = {
     apiname: 'daily_auc',
     apikey: env.NUMCAT_API_KEY,
     fields: 'symbol,name,tradedate,auc_vol,auc_pct_chg,auc_to_pre_vol_pct',
     params: {
       symbols: symbols,
-      recentdays: recentDays
+      startdate: startDateYMD,
+      enddate: endDateYMD
     }
   };
   const resp = await fetch(CONFIG.NUMCAT_DAILY_AUC_URL, {
@@ -390,9 +421,13 @@ async function upsertAuctionWatchlist(env, rows) {
 async function upsertMarketMetrics(env, rows) {
   if (!rows || rows.length === 0) return;
   const url = CONFIG.SUPABASE_URL + '/rest/v1/market_metrics?on_conflict=date,stock,scope';
+  // 【FIX 2026-08-03】加 missing=default：批次里某一行没带某个字段时，
+  // 保留该字段云端原值，而不是被 upsert 成列默认值（通常是 NULL）。
+  // 必须配合"每个批次内所有行 key 集合一致"使用（PostgREST 要求批量 insert 的 JSON 数组 key 统一，
+  // key 不一致的行，多出/缺失的 key 会被忽略而不是报错，行为不可预期）。
   const resp = await fetch(url, {
     method: 'POST',
-    headers: Object.assign(sbHeaders(env), { 'Prefer': 'resolution=merge-duplicates, return=minimal' }),
+    headers: Object.assign(sbHeaders(env), { 'Prefer': 'resolution=merge-duplicates, missing=default, return=minimal' }),
     body: JSON.stringify(rows)
   });
   if (!resp.ok) {
@@ -401,72 +436,10 @@ async function upsertMarketMetrics(env, rows) {
   }
 }
 
-// 从 stockcodemap 表按股票名批量查 code（唯一真相源，供 obs 股票补抓身份用）
-async function fetchCodesByNames(env, names) {
-  if (!names || names.length === 0) return {};
-  const result = {};
-  const BATCH = 100;
-  for (let i = 0; i < names.length; i += BATCH) {
-    const chunk = names.slice(i, i + BATCH);
-    const inList = chunk.map(n => encodeURIComponent('"' + String(n).replace(/"/g, '\\"') + '"')).join(',');
-    const url = CONFIG.SUPABASE_URL + '/rest/v1/stockcodemap?stock=in.(' + inList + ')&select=stock,code';
-    try {
-      const resp = await fetch(url, { headers: sbHeaders(env) });
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
-        console.warn('[CODEMAP] 查询失败: HTTP ' + resp.status + ': ' + text.slice(0, 200));
-        continue;
-      }
-      const rows = await resp.json();
-      (rows || []).forEach(row => {
-        if (row && row.stock && row.code) result[String(row.stock).trim()] = String(row.code).trim();
-      });
-    } catch (e) {
-      console.warn('[CODEMAP] 查询异常: ' + e.message);
-    }
-  }
-  return result;
-}
-
-// upsert 批量 {stock, code} 到 stockcodemap（worker 拿到新 code 时写回唯一真相源）
-async function upsertStockCodeMap(env, pairs) {
-  if (!pairs || pairs.length === 0) return;
-  const rows = pairs
-    .filter(p => p && p.stock && p.code)
-    .map(p => ({ stock: String(p.stock).trim(), code: String(p.code).trim(), updated_at: new Date().toISOString() }))
-    .filter(p => p.stock && p.code);
-  if (rows.length === 0) return;
-  const url = CONFIG.SUPABASE_URL + '/rest/v1/stockcodemap?on_conflict=stock';
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: Object.assign(sbHeaders(env), { 'Prefer': 'resolution=merge-duplicates, return=minimal' }),
-    body: JSON.stringify(rows)
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    console.warn('[CODEMAP] upsert 失败: HTTP ' + resp.status + ': ' + text.slice(0, 300));
-  }
-}
-
-// 取指定日期的上一交易日（优先走 fuyao 交易日历，失败时回退本地周末/节假日判断）
-async function getPreviousTradingDay(env, dateStr) {
-  try {
-    const dates = await fuyaoCalendarTradingDays(env);
-    const before = dates.filter(d => d < dateStr);
-    if (before.length > 0) return before[before.length - 1];
-  } catch (e) {
-    console.warn('[PREV-TD] fuyao 交易日历失败，回退本地日历: ' + e.message);
-  }
-  // 本地回退：从 dateStr 往前找，跳过周末和已知节假日。用 UTC 方法避免 Worker 运行时时区干扰
-  // （dateStr 本身语义是北京日期，按北京零点解析，逐日 -1 用 UTC 字段输出，与 normalizeDate/msToDateStr 风格一致）
-  let ms = Date.parse(dateStr + 'T00:00:00+08:00');
-  for (let i = 0; i < 30; i++) {
-    ms -= 24 * 3600 * 1000;
-    const d = new Date(ms);
-    const s = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
-    if (localIsTradingDay(s)) return s;
-  }
-  return null;
+async function updateStockCodeMap(env, pairs) {
+  // pairs: [{ name, code }] → 写入 stock_topics 表的 code 列（前端 stockCodeMap 来源）
+  // 实际上 stockCodeMap 存在 localStorage，这里只需确保 auction_watchlist 的 code 列正确即可
+  // 前端 loadHotStocksFromCloud / pullFromCloud 会从 auction_watchlist 读取 code 回填 stockCodeMap
 }
 
 // ══════════════════════════ 主流程 ══════════════════════════
@@ -520,81 +493,76 @@ async function runMorning(env) {
     return { ok: false, today, error: '写入 auction_watchlist 失败: ' + e.message, logs };
   }
 
-  // 2.5 成分股 code 同步到 stockcodemap（唯一真相源），供前端/后续 obs 补抓复用
-  try {
-    const codePairs = constituents.map(c => ({ stock: c.name, code: c.code }));
-    await upsertStockCodeMap(env, codePairs);
-    logs.push('步骤2.5：stockcodemap 同步成分股 code ' + codePairs.length + ' 条');
-  } catch (e) {
-    logs.push('步骤2.5：stockcodemap 同步失败(不阻断): ' + e.message);
+  // 3. 调 numcat daily_auc 获取竞价数据
+  // 【FIX 2026-08-03】先算出"预期要拿到数据的 N 个交易日"（含今天），再用显式 startdate/enddate 请求，
+  // 不再用 recentdays——recentdays 不保证严格对齐交易日历，也不保证包含"今天"
+  // （尤其 9:25 请求时，猫抓可能还没来得及入库当天数据，此前完全没有任何提示）。
+  const expectedDates = await getRecentTradingDays(env, today, CONFIG.NUMCAT_RECENT_DAYS);
+  logs.push('步骤3：预期交易日=' + JSON.stringify(expectedDates));
+  if (expectedDates.length === 0 || expectedDates[expectedDates.length - 1] !== today) {
+    logs.push('⚠️ 预期交易日列表不包含今天(' + today + ')，交易日历可能有问题，仍继续尝试');
   }
-
-  // 2.6 读取上一交易日"竞/昨"高光股票（daily_highlights），查 stockcodemap 补 code，
-  //     一并纳入本次 numcat/auction_watchlist 抓取，解决 obs 股票（非最近多板成分股）当天无数据的问题
-  let obsNameToCode = {};
-  try {
-    const prevDay = await getPreviousTradingDay(env, today);
-    if (prevDay) {
-      const hlUrl = CONFIG.SUPABASE_URL + '/rest/v1/daily_highlights?date=eq.' + encodeURIComponent(prevDay) +
-        '&jing_yest_highlight=eq.true&select=stock';
-      const hlResp = await fetch(hlUrl, { headers: sbHeaders(env) });
-      if (hlResp.ok) {
-        const hlRows = await hlResp.json();
-        const obsNames = (hlRows || []).map(r => (r.stock || '').trim()).filter(Boolean);
-        if (obsNames.length > 0) {
-          obsNameToCode = await fetchCodesByNames(env, obsNames);
-          logs.push('步骤2.6：prevDay=' + prevDay + ' 高光 ' + obsNames.length + ' 只，stockcodemap 查到 code ' + Object.keys(obsNameToCode).length + ' 只');
-        } else {
-          logs.push('步骤2.6：prevDay=' + prevDay + ' 无高光股票，跳过 obs 补抓');
-        }
-      } else {
-        logs.push('步骤2.6：daily_highlights 读取失败 HTTP ' + hlResp.status);
-      }
-    } else {
-      logs.push('步骤2.6：无法确定上一交易日，跳过 obs 补抓');
-    }
-  } catch (e) {
-    logs.push('步骤2.6：obs 补抓失败(不阻断): ' + e.message);
-  }
-  // obs 股票（"竞/昨"高光但不在最近多板成分股里的）单独列出，后面写身份行、拼 numcat symbols、建反查表都复用这份
-  const constituentNameSet = new Set(constituents.map(c => c.name));
-  const obsOnlyList = Object.entries(obsNameToCode)
-    .filter(([name]) => !constituentNameSet.has(name))
-    .map(([name, code]) => ({ name, code }));
-
-  // obs 股票也写一份 auction_watchlist 身份行，obs_auto_added=true 标记来源
-  if (obsOnlyList.length > 0) {
-    try {
-      const obsWatchlistRows = obsOnlyList.map(o => ({
-        date: today,
-        stock: o.name,
-        code: o.code,
-        source: 'obs_inherit',
-        obs_auto_added: true,
-        updated_at: nowIso,
-        updated_by: 'auto-fetch-worker'
-      }));
-      await upsertAuctionWatchlist(env, obsWatchlistRows);
-      logs.push('步骤2.6：obs 股票写入 auction_watchlist 身份行 ' + obsWatchlistRows.length + ' 条');
-    } catch (e) {
-      logs.push('步骤2.6：obs auction_watchlist 写入失败(不阻断): ' + e.message);
-    }
-  }
-
-  // 3. 调 numcat daily_auc 获取5天竞价数据（成分股 + obs 股票一次性抓）
-  logs.push('步骤3：调用 numcat daily_auc (recentdays=' + CONFIG.NUMCAT_RECENT_DAYS + ')...');
-  const symbols = constituents.map(c => c.code).concat(obsOnlyList.map(o => o.code)).join(',');
+  const startYMD = expectedDates.length > 0 ? expectedDates[0].replace(/-/g, '') : today.replace(/-/g, '');
+  const endYMD = today.replace(/-/g, '');
+  logs.push('步骤3：调用 numcat daily_auc (startdate=' + startYMD + ' enddate=' + endYMD + ')...');
+  const symbols = constituents.map(c => c.code).join(',');
   let numcatData;
   try {
-    numcatData = await numcatDailyAuc(env, symbols, CONFIG.NUMCAT_RECENT_DAYS);
+    numcatData = await numcatDailyAuc(env, symbols, startYMD, endYMD);
   } catch (e) {
     logs.push('numcat 调用失败: ' + e.message);
     return { ok: false, today, error: 'numcat 调用失败: ' + e.message, logs };
   }
 
   const fields = numcatData.fields || [];
-  const items = numcatData.items || [];
-  logs.push('numcat 返回 fields=' + JSON.stringify(fields) + ' items=' + items.length + '行 (含 obs ' + obsOnlyList.length + ' 只)');
+  let items = numcatData.items || [];
+  logs.push('numcat 返回 fields=' + JSON.stringify(fields) + ' items=' + items.length + '行');
+
+  // 【FIX 2026-08-03】按预期交易日统计实际返回的行数，缺口清清楚楚打在日志里，
+  // 不再"拿到几天算几天、缺了也不知道"。
+  const dateIdxPre = fields.indexOf('tradedate');
+  const computeGotDates = (rows) => new Set(rows.map(row => compactToDateStr(String(row[dateIdxPre] || '').trim())).filter(Boolean));
+  let missingDatesAfterNumcat = []; // 函数作用域，供最后汇总用
+  if (dateIdxPre >= 0) {
+    let gotDates = computeGotDates(items);
+    let missingDates = expectedDates.filter(d => !gotDates.has(d));
+    if (missingDates.length > 0) {
+      logs.push('⚠️ numcat 缺失交易日: ' + JSON.stringify(missingDates) + '（预期 ' + JSON.stringify(expectedDates) + '，实际含 ' + JSON.stringify(Array.from(gotDates).sort()) + '）');
+    } else {
+      logs.push('numcat 覆盖了全部 ' + expectedDates.length + ' 个预期交易日');
+    }
+
+    // 【FIX 2026-08-03】若"今天"这个交易日缺失，大概率是竞价撮合(9:25整)和 numcat 入库有时间差
+    // （worker cron 恰好也在 9:25 触发，二者几乎同时），做 2 次延迟重试（20秒/40秒），
+    // 只重试"今天"这一天缺失的情况，避免历史日缺失（数据源本身问题）也无谓重试。
+    if (missingDates.includes(today)) {
+      const retryDelaysSec = [20, 40];
+      for (let attempt = 0; attempt < retryDelaysSec.length && missingDates.includes(today); attempt++) {
+        const waitSec = retryDelaysSec[attempt];
+        logs.push('⏳ 今天(' + today + ')数据缺失，' + waitSec + '秒后重试第' + (attempt + 1) + '次...');
+        await new Promise(r => setTimeout(r, waitSec * 1000));
+        try {
+          const retryData = await numcatDailyAuc(env, symbols, startYMD, endYMD);
+          const retryItems = retryData.items || [];
+          const retryGotDates = computeGotDates(retryItems);
+          if (retryGotDates.has(today)) {
+            items = retryItems;
+            gotDates = retryGotDates;
+            missingDates = expectedDates.filter(d => !gotDates.has(d));
+            logs.push('✅ 重试第' + (attempt + 1) + '次成功拿到今天数据，items=' + items.length + '行');
+          } else {
+            logs.push('第' + (attempt + 1) + '次重试仍未拿到今天数据（items=' + retryItems.length + '行）');
+          }
+        } catch (e) {
+          logs.push('第' + (attempt + 1) + '次重试请求失败: ' + e.message);
+        }
+      }
+      if (missingDates.includes(today)) {
+        logs.push('❌ 重试后今天(' + today + ')数据仍缺失，本次不会写入今天的 market_metrics，需要手动补抓');
+      }
+    }
+    missingDatesAfterNumcat = missingDates;
+  }
 
   const symIdx = fields.indexOf('symbol');
   const nameIdx = fields.indexOf('name');
@@ -611,8 +579,6 @@ async function runMorning(env) {
   logs.push('步骤4：解析数据并写入 market_metrics...');
   const codeToName = {};
   constituents.forEach(c => { codeToName[c.code] = c.name; });
-  // obs 股票（非成分股）也纳入反查表，否则 numcat 返回的 obs 数据行找不到股票名会被丢弃
-  obsOnlyList.forEach(o => { if (!codeToName[o.code]) codeToName[o.code] = o.name; });
 
   // 按 tradedate 分组：dateStr → [{ stock, code, volume, changePct, yestVolume }]
   const metricsByDate = {};
@@ -677,32 +643,52 @@ async function runMorning(env) {
 
   logs.push('解析完成: ' + parsedCount + '条, 涉及 ' + Object.keys(metricsByDate).length + ' 个交易日, 反推昨日成交量 ' + yestVolDerivedCount + ' 条');
 
-  // 5. fuyao historical 并发抓4个历史交易日的收盘涨幅，覆盖 numcat 的竞价涨幅
+  // 5. fuyao historical 并发抓历史交易日的收盘涨幅，覆盖/补齐 numcat 的竞价涨幅
   //    当天(D)涨幅先用 numcat auc_pct_chg 临时占位，16:00 由 snapshot 覆盖
   //    历史日(D-1~D-4)用 fuyao 不复权收盘价算 pct_chg，口径和 16:00 snapshot 一致
-  //    obs 股票（非成分股）一并纳入，否则只有 D 日的 numcat 竞价涨幅、缺 D-1~D-4 历史涨幅
-  const historicalDates = Object.keys(metricsByDate).filter(d => d < today).sort();
-  const constituentsForHistorical = constituents.concat(obsOnlyList);
+  //
+  //    【FIX 2026-08-03】原逻辑只对"numcat 有返回、但缺涨幅"的日期做 fuyao 兜底，
+  //    如果 numcat 这一天整个都没返回（比如 7/28 那种情况），这一天压根不会出现在
+  //    metricsByDate 里，historicalDates 也就收集不到它，fuyao 兜底根本不会跑，
+  //    表现就是"5个交易日里有几天完全是空的，没有任何解释"。
+  //    改成：以"预期交易日"为准，不管 numcat 有没有返回都尝试用 fuyao 兜底 change_pct
+  //    （volume/yest_volume 只有 numcat 的 auc_vol/auc_to_pre_vol_pct 能算，fuyao historical
+  //    没有对应数据，这两个字段缺了目前无法从其它数据源补，只能清楚地记录缺口）。
+  const numcatCoveredDates = new Set(Object.keys(metricsByDate));
+  const historicalDates = expectedDates.filter(d => d < today).sort();
+  const phantomDates = historicalDates.filter(d => !numcatCoveredDates.has(d)); // numcat 完全没返回的历史日
+  if (phantomDates.length > 0) {
+    logs.push('⚠️ numcat 完全未返回以下历史交易日（volume/yest_volume 本次无法补齐，change_pct 会尝试用 fuyao historical 兜底）: ' + JSON.stringify(phantomDates));
+  }
   let histPctStats = null;
   if (historicalDates.length > 0) {
-    logs.push('步骤5：fuyao historical 并发抓取 ' + historicalDates.length + ' 个历史交易日收盘涨幅 (含 obs 共' + constituentsForHistorical.length + '只)...');
+    logs.push('步骤5：fuyao historical 并发抓取 ' + historicalDates.length + ' 个历史交易日收盘涨幅...');
     try {
-      histPctStats = await fetchHistoricalPctChg(env, constituentsForHistorical, historicalDates);
+      histPctStats = await fetchHistoricalPctChg(env, constituents, historicalDates);
       logs.push('fuyao historical: 成功 ' + histPctStats.successCount + ' 只, 失败 ' + histPctStats.failCount + ' 只');
-      // 合并：覆盖历史日的 change_pct
+      // 合并：覆盖/补齐历史日的 change_pct
       let mergedCount = 0;
+      let phantomFilledCount = 0;
       historicalDates.forEach(d => {
         const pctMap = histPctStats.byDate[d] || {};
         if (metricsByDate[d]) {
+          // numcat 原本就有这一天的行，覆盖 change_pct
           metricsByDate[d].forEach(m => {
             if (pctMap[m.code]) {
               m.change_pct = pctMap[m.code];
               mergedCount++;
             }
           });
+        } else if (Object.keys(pctMap).length > 0) {
+          // numcat 完全没返回这一天，但 fuyao historical 有数据：
+          // 建一份只带 change_pct（无 volume/yest_volume）的行，好过完全没有
+          metricsByDate[d] = constituents
+            .filter(c => pctMap[c.code])
+            .map(c => ({ stock: c.name, code: c.code, volume: '', yest_volume: '', change_pct: pctMap[c.code] }));
+          phantomFilledCount += metricsByDate[d].length;
         }
       });
-      logs.push('历史涨幅合并 ' + mergedCount + ' 条');
+      logs.push('历史涨幅合并 ' + mergedCount + ' 条' + (phantomFilledCount > 0 ? '，另外用 fuyao 补齐了 numcat 完全缺失日期的涨幅 ' + phantomFilledCount + ' 条（这些行没有 volume/yest_volume）' : ''));
     } catch (e) {
       logs.push('fuyao historical 失败(保留 numcat 竞价涨幅): ' + e.message);
     }
@@ -711,29 +697,57 @@ async function runMorning(env) {
   }
 
   // 写入 market_metrics
+  // 【FIX 2026-08-03】Supabase merge-duplicates upsert 是整行替换，payload 里出现的字段一律覆盖旧值，
+  // 哪怕新值是空字符串。之前 volume/change_pct/yest_volume 算不出来时仍然带着 '' 一起发，
+  // 会把云端原本正常的值冲成空——这是用户反馈"有时候数据反而变空"的一个诱因。
+  // 改成：字段算不出来就不放进 payload 里，配合 missing=default 让 Supabase 保留原值。
+  // PostgREST 批量 insert 要求同一批 JSON 数组里所有对象 key 集合一致，key 不一致会被忽略，
+  // 所以这里按"这一行到底带了哪些字段"分桶，同一桶内 key 完全一致，分开发送。
   let totalMetricsWritten = 0;
   const dateKeys = Object.keys(metricsByDate);
   for (const dateStr of dateKeys) {
-    const rows = metricsByDate[dateStr].map(m => ({
-      date: dateStr,
-      stock: m.stock,
-      code: m.code,
-      volume: m.volume,
-      yest_volume: m.yest_volume,
-      change_pct: m.change_pct,
-      scope: 'auction',
-      source: 'worker',
-      updated_at: nowIso,
-      updated_by: 'auto-fetch-worker'
-    }));
+    const shapeBuckets = {}; // shapeKey → rows[]
+    metricsByDate[dateStr].forEach(m => {
+      const hasVolume = m.volume !== '';
+      const hasYestVolume = m.yest_volume !== '';
+      const hasChangePct = m.change_pct !== '';
+      const shapeKey = (hasVolume ? 'v' : '') + (hasYestVolume ? 'y' : '') + (hasChangePct ? 'p' : '');
+      const row = {
+        date: dateStr,
+        stock: m.stock,
+        code: m.code,
+        scope: 'auction',
+        source: 'worker',
+        updated_at: nowIso,
+        updated_by: 'auto-fetch-worker'
+      };
+      if (hasVolume) row.volume = m.volume;
+      if (hasYestVolume) row.yest_volume = m.yest_volume;
+      if (hasChangePct) row.change_pct = m.change_pct;
+      if (!shapeBuckets[shapeKey]) shapeBuckets[shapeKey] = [];
+      shapeBuckets[shapeKey].push(row);
+    });
     try {
-      await upsertMarketMetrics(env, rows);
-      totalMetricsWritten += rows.length;
-      logs.push('  market_metrics ' + dateStr + ': ' + rows.length + ' 行');
+      let dateWritten = 0;
+      for (const shapeKey of Object.keys(shapeBuckets)) {
+        await upsertMarketMetrics(env, shapeBuckets[shapeKey]);
+        dateWritten += shapeBuckets[shapeKey].length;
+      }
+      totalMetricsWritten += dateWritten;
+      logs.push('  market_metrics ' + dateStr + ': ' + dateWritten + ' 行 (' + Object.keys(shapeBuckets).length + ' 个字段组合批次)');
     } catch (e) {
       logs.push('  market_metrics ' + dateStr + ' 写入失败: ' + e.message);
     }
   }
+
+  // 【FIX 2026-08-03】汇总数据完整性：今天缺失 / 历史日完全缺失(volume+yest_volume 缺) 一次性说清楚，
+  // 不用再从几十行 logs 里自己找。
+  const todayMissing = missingDatesAfterNumcat.includes(today);
+  const summaryParts = [];
+  if (todayMissing) summaryParts.push('❌ 今天(' + today + ')竞价数据缺失，需手动补抓');
+  if (phantomDates.length > 0) summaryParts.push('⚠️ 历史日 volume/yest_volume 缺失: ' + phantomDates.join(', '));
+  const completenessSummary = summaryParts.length > 0 ? summaryParts.join('；') : '✅ 本次 ' + expectedDates.length + ' 个交易日数据完整';
+  logs.push('数据完整性汇总: ' + completenessSummary);
 
   logs.push('完成: auction_watchlist ' + watchlistRows.length + ' 行, market_metrics ' + totalMetricsWritten + ' 行');
   return {
@@ -744,6 +758,10 @@ async function runMorning(env) {
     metricsDates: dateKeys.length,
     metricsWritten: totalMetricsWritten,
     yestVolDerived: yestVolDerivedCount,
+    expectedDates: expectedDates,
+    todayDataMissing: todayMissing,
+    historicalDatesMissingFromNumcat: phantomDates,
+    completenessSummary: completenessSummary,
     logs
   };
 }
@@ -778,31 +796,6 @@ async function runClose(env) {
   if (watchlist.length === 0) {
     logs.push('当日列表为空，跳过');
     return { ok: true, today, skipped: true, reason: '当日列表为空', logs };
-  }
-
-  // 1.5 auction_watchlist.code 为空的行，从 stockcodemap（唯一真相源）兜底补齐，
-  //     并写回 auction_watchlist，避免同一只股票每天收盘都要重新兜底
-  const missingCodeRows = watchlist.filter(w => !w.code);
-  if (missingCodeRows.length > 0) {
-    try {
-      const missingNames = missingCodeRows.map(w => w.stock).filter(Boolean);
-      const codeMap = await fetchCodesByNames(env, missingNames);
-      let filledCount = 0;
-      const backfillRows = [];
-      watchlist.forEach(w => {
-        if (!w.code && codeMap[w.stock]) {
-          w.code = codeMap[w.stock];
-          filledCount++;
-          backfillRows.push({ date: today, stock: w.stock, code: w.code, updated_at: new Date().toISOString() });
-        }
-      });
-      if (backfillRows.length > 0) {
-        await upsertAuctionWatchlist(env, backfillRows);
-      }
-      logs.push('步骤1.5：stockcodemap 兜底补 code ' + filledCount + '/' + missingCodeRows.length + ' 只');
-    } catch (e) {
-      logs.push('步骤1.5：stockcodemap 兜底失败(不阻断): ' + e.message);
-    }
   }
 
   // 2. fuyao snapshot 批量获取收盘涨幅
@@ -862,10 +855,28 @@ export default {
       console.error('[auto-fetch] 无法识别 cron:', event.cron);
       return;
     }
+    // 【FIX 2026-08-04】之前只在报错(catch)时打一行 e.message，正常跑完(哪怕数据不全，
+    // 只要没 throw)整份详细 logs 数组直接被丢弃，Cloudflare Workers Logs 里查不到任何过程。
+    // 改成：不管成功/失败，都把完整 logs 数组 console.log 出来，方便事后在 Workers Logs
+    // 里按 cron 类型的 invocation 翻到今天这次到底发生了什么（预期交易日/缺失交易日/重试情况等）。
     if (point === 'morning') {
-      ctx.waitUntil(runMorning(env).catch(e => console.error('[auto-fetch] morning error:', e.message)));
+      ctx.waitUntil(
+        runMorning(env)
+          .then(result => {
+            console.log('[auto-fetch] runMorning 完成 ok=' + result.ok + ' completenessSummary=' + (result.completenessSummary || ''));
+            console.log('[auto-fetch] runMorning 完整日志:', JSON.stringify(result.logs || []));
+          })
+          .catch(e => console.error('[auto-fetch] morning error:', e.message))
+      );
     } else if (point === 'close') {
-      ctx.waitUntil(runClose(env).catch(e => console.error('[auto-fetch] close error:', e.message)));
+      ctx.waitUntil(
+        runClose(env)
+          .then(result => {
+            console.log('[auto-fetch] runClose 完成 ok=' + result.ok);
+            console.log('[auto-fetch] runClose 完整日志:', JSON.stringify(result.logs || []));
+          })
+          .catch(e => console.error('[auto-fetch] close error:', e.message))
+      );
     }
   },
 
@@ -876,6 +887,10 @@ export default {
       return jsonResponse({ ok: true, service: 'bidding-auto-fetch' });
     }
 
+    // 注：runMorning 内新增的"今天缺失重试"最多会等 20+40=60 秒才返回。
+    // cron 触发走 scheduled() + ctx.waitUntil()，不受此影响；
+    // 但手动访问 /fetch?point=morning 是直接 await 的 HTTP 请求，
+    // 如果触发了重试，浏览器/请求方需要能等待 60 秒以上不超时。
     if (url.pathname === '/fetch') {
       const token = url.searchParams.get('token') || '';
       if (!env.FETCH_TOKEN || token !== env.FETCH_TOKEN) {
