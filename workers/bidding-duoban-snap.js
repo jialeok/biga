@@ -174,7 +174,7 @@ function buildDuobanRow(date, value, existing, logs) {
 }
 
 async function upsertBiddingRow(env, row, logs) {
-  const url = `${env.SUPABASE_URL}/rest/v1/bidding_data`;
+  const url = `${env.SUPABASE_URL}/rest/v1/bidding_data?on_conflict=date,name`;
   const key = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_ANON_KEY;
   logs.push(`upsert date=${row.date} name=${row.name} time930=${row.time930}`);
   const resp = await fetch(url, {
