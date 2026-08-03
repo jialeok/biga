@@ -390,6 +390,17 @@ async function runBidding(env, point, source) {
       const v920 = prev ? parseFloat(prev.time920) : NaN;
       const v925 = parseFloat(r.value);
       if (!isNaN(v920) && !isNaN(v925)) row.change = v925 > v920 ? '增' : (v925 < v920 ? '减' : '平');
+      // 叠加效果：9:25 给「最近多板%」锁定 initial（首次值），9:26 runDuobanSecond 保留 initial 只更新 final
+      if (rowName === CONFIG.ROW_LADDER) {
+        const prevInitial = prev ? prev.time930_initial : null;
+        if (prevInitial !== undefined && prevInitial !== null && String(prevInitial).trim() !== '') {
+          row.time930_initial = prevInitial;
+          row.time930_initial_modifiedAt = (prev && prev.time930_initial_modifiedAt) || now;
+        } else {
+          row.time930_initial = r.value;
+          row.time930_initial_modifiedAt = now;
+        }
+      }
     }
     upsertPayload.push(row);
   });
