@@ -213,9 +213,24 @@ async function fetchLadderConstituents(env) {
   }).filter(s => s.name && s.code);
 }
 
-// fuyao snapshot 批量获取收盘涨幅 → { code: pctStr }
+// fuyao snapshot 批量获取收盘涨幅 → { pctMap: { code: pctStr }, stats: {...} }
+// 【FIX 2026-08-03】原版本整批失败→逐只失败时静默 continue，字段空时静默 return，
+// 调用方拿到空对象也以为"成功但没数据"，无法区分"接口故障"和"真没数据"。
+// 改成：返回 stats 统计（batchFail/singleFail/emptyField/notMatched/success），
+// 让 runClose 能据此判断覆盖率、决定是否重试、是否报失败。
 async function fetchSnapshotChangePct(env, codes) {
   const result = {};
+  const stats = {
+    totalInput: codes.length,
+    batchOk: 0,
+    batchFail: 0,
+    singleOk: 0,
+    singleFail: 0,
+    itemsReturned: 0,
+    emptyField: 0,    // 接口返回了股票但 price_change_ratio_pct 为空
+    notMatched: 0,    // 返回的 thscode 不在本次请求列表里
+    success: 0        // 最终写入 result 的数量
+  };
   const batchSize = CONFIG.SNAPSHOT_BATCH_SIZE;
   for (let i = 0; i < codes.length; i += batchSize) {
     const chunk = codes.slice(i, i + batchSize);
@@ -224,37 +239,57 @@ async function fetchSnapshotChangePct(env, codes) {
     let data;
     try {
       data = await fuyaoProxyGet(env, '/api/a-share/prices/snapshot', { thscodes: thscodes });
+      stats.batchOk++;
     } catch (batchErr) {
       // 整批失败 → 降级逐只
+      stats.batchFail++;
       console.warn('snapshot 批量失败，降级逐只:', batchErr.message);
       for (const code of chunk) {
         const thscode = tickerToThscode(code);
         if (!thscode) continue;
         try {
           const d1 = await fuyaoProxyGet(env, '/api/a-share/prices/snapshot', { thscodes: thscode });
-          ((d1 && d1.item) || []).forEach(it => applySnapshotItem(it, code, result));
-        } catch (e1) { /* 跳过 */ }
+          stats.singleOk++;
+          const items1 = (d1 && d1.item) || [];
+          stats.itemsReturned += items1.length;
+          items1.forEach(it => applySnapshotItem(it, code, result, stats));
+        } catch (e1) {
+          stats.singleFail++;
+          /* 跳过单只失败，不影响其它 */
+        }
       }
       continue;
     }
     const items = (data && data.item) || [];
+    stats.itemsReturned += items.length;
     const codeSet = new Set(chunk);
     items.forEach(it => {
       // snapshot 返回 thscode，需匹配回 code
       const tcode = String(it.thscode || '').replace(/\..*$/, '');
       if (tcode && codeSet.has(tcode)) {
-        applySnapshotItem(it, tcode, result);
+        applySnapshotItem(it, tcode, result, stats);
+      } else {
+        stats.notMatched++;
       }
     });
   }
-  return result;
+  stats.success = Object.keys(result).length;
+  return { pctMap: result, stats };
 }
 
-function applySnapshotItem(it, code, result) {
+// 【FIX 2026-08-03】增加 stats 参数，空值不再静默 return，而是累计 emptyField 计数，
+// 让调用方能区分"接口故障返回空"和"真无数据"。
+function applySnapshotItem(it, code, result, stats) {
   const pct = it.price_change_ratio_pct;
-  if (pct === null || pct === undefined || pct === '') return;
+  if (pct === null || pct === undefined || pct === '') {
+    if (stats) stats.emptyField++;
+    return;
+  }
   const n = Number(pct);
-  if (isNaN(n)) return;
+  if (isNaN(n)) {
+    if (stats) stats.emptyField++;
+    return;
+  }
   // 符号修正（与前端逻辑一致）
   let ratio = n;
   const priceChange = it.price_change !== undefined && it.price_change !== null ? Number(it.price_change) : null;
@@ -793,16 +828,91 @@ async function runClose(env) {
   }
   logs.push('auction_watchlist 读取 ' + watchlist.length + ' 只');
 
+  // 【FIX 2026-08-03 Bug1】原版本 watchlist 为空时返回 ok:true + skipped:true，
+  // scheduled handler 打的日志是 "runClose 完成 ok=true"，看起来完全正常，
+  // 但实际是 morning cron 失败导致 watchlist 没写入，close 啥也没干。
+  // 改成：明确报警返回 ok:false，让 scheduled 日志立刻能看出问题。
   if (watchlist.length === 0) {
-    logs.push('当日列表为空，跳过');
-    return { ok: true, today, skipped: true, reason: '当日列表为空', logs };
+    logs.push('❌ 当日 auction_watchlist 为空，说明今早 morning cron 未成功写入 watchlist，close 无法覆盖涨幅');
+    logs.push('❌ 请检查今早 9:25 morning cron 是否触发、numcat/fuyao 接口是否正常');
+    return {
+      ok: false,
+      today,
+      error: '当日 auction_watchlist 为空（morning cron 可能未成功）',
+      skipped: true,
+      reason: '当日列表为空',
+      logs
+    };
   }
 
   // 2. fuyao snapshot 批量获取收盘涨幅
-  logs.push('步骤2：调用 fuyao snapshot 获取收盘涨幅...');
+  // 【FIX 2026-08-03 Bug2】原版本一次性调 snapshot，pctMap 为空也照样 ok:true。
+  // 但实际遇到过 snapshot 接口在 16:00 整点恰好返回空（限流/收盘数据未结算/接口抖动），
+  // 手动重试第二次才能拿到数据。改成：覆盖率 < 50% 时延迟 60 秒重试一次，
+  // 再不行 120 秒再试一次（cron 走 scheduled + ctx.waitUntil，不受 HTTP 超时影响）。
   const codes = watchlist.map(w => w.code).filter(Boolean);
-  const pctMap = await fetchSnapshotChangePct(env, codes);
-  logs.push('snapshot 返回 ' + Object.keys(pctMap).length + ' 只涨幅');
+  const COVERAGE_THRESHOLD = 0.5; // 低于 50% 视为失败，触发重试
+  const RETRY_DELAYS_SEC = [60, 120];
+
+  let snapshotResult = await fetchSnapshotChangePct(env, codes);
+  let pctMap = snapshotResult.pctMap;
+  let stats = snapshotResult.stats;
+  let coverage = codes.length > 0 ? stats.success / codes.length : 0;
+  logs.push('步骤2：调用 fuyao snapshot 获取收盘涨幅...');
+  logs.push('snapshot 第1次: success=' + stats.success + '/' + codes.length + ' (覆盖率 ' + (coverage * 100).toFixed(1) + '%)'
+    + ' batchOk=' + stats.batchOk + ' batchFail=' + stats.batchFail
+    + ' singleOk=' + stats.singleOk + ' singleFail=' + stats.singleFail
+    + ' itemsReturned=' + stats.itemsReturned
+    + ' emptyField=' + stats.emptyField + ' notMatched=' + stats.notMatched);
+
+  // 覆盖率不足重试
+  for (let attempt = 0; attempt < RETRY_DELAYS_SEC.length && coverage < COVERAGE_THRESHOLD; attempt++) {
+    const waitSec = RETRY_DELAYS_SEC[attempt];
+    logs.push('⏳ snapshot 覆盖率 ' + (coverage * 100).toFixed(1) + '% 低于阈值 ' + (COVERAGE_THRESHOLD * 100) + '%，'
+      + waitSec + '秒后重试第' + (attempt + 1) + '次...');
+    await new Promise(r => setTimeout(r, waitSec * 1000));
+    try {
+      const retryResult = await fetchSnapshotChangePct(env, codes);
+      const retryCoverage = codes.length > 0 ? retryResult.stats.success / codes.length : 0;
+      logs.push('snapshot 第' + (attempt + 2) + '次: success=' + retryResult.stats.success + '/' + codes.length
+        + ' (覆盖率 ' + (retryCoverage * 100).toFixed(1) + '%)'
+        + ' batchOk=' + retryResult.stats.batchOk + ' batchFail=' + retryResult.stats.batchFail
+        + ' singleOk=' + retryResult.stats.singleOk + ' singleFail=' + retryResult.stats.singleFail
+        + ' itemsReturned=' + retryResult.stats.itemsReturned
+        + ' emptyField=' + retryResult.stats.emptyField + ' notMatched=' + retryResult.stats.notMatched);
+      if (retryResult.stats.success > stats.success) {
+        // 重试结果更好，采用重试结果
+        pctMap = retryResult.pctMap;
+        stats = retryResult.stats;
+        coverage = retryCoverage;
+        logs.push('✅ 重试第' + (attempt + 1) + '次结果更好，采用重试结果 (success=' + stats.success + ')');
+      } else {
+        logs.push('第' + (attempt + 1) + '次重试结果未改善 (success=' + retryResult.stats.success + ')');
+      }
+    } catch (e) {
+      logs.push('第' + (attempt + 1) + '次重试请求失败: ' + e.message);
+    }
+  }
+
+  // 覆盖率仍为 0，明确失败
+  if (stats.success === 0) {
+    logs.push('❌ snapshot 接口未返回任何涨幅（可能接口故障/限流/收盘数据未结算），本次未覆盖任何涨幅');
+    return {
+      ok: false,
+      today,
+      error: 'snapshot 接口未返回任何涨幅数据',
+      stocksCount: watchlist.length,
+      snapshotStats: stats,
+      logs
+    };
+  }
+
+  // 覆盖率低但非 0，记录告警但继续写入（部分覆盖好过完全不覆盖）
+  if (coverage < COVERAGE_THRESHOLD) {
+    logs.push('⚠️ snapshot 覆盖率仅 ' + (coverage * 100).toFixed(1) + '%，部分股票涨幅未覆盖（可能停牌/接口部分失败），仍写入已获取的 ' + stats.success + ' 只');
+  } else {
+    logs.push('snapshot 覆盖率 ' + (coverage * 100).toFixed(1) + '%，正常');
+  }
 
   // 3. 写入 market_metrics（只覆盖 change_pct）
   logs.push('步骤3：写入 market_metrics change_pct...');
@@ -826,12 +936,23 @@ async function runClose(env) {
     return { ok: false, today, error: '写入 market_metrics 失败: ' + e.message, logs };
   }
 
+  // 【FIX 2026-08-03】数据完整性汇总，对齐 runMorning 的格式
+  const summaryParts = [];
+  if (coverage < COVERAGE_THRESHOLD) summaryParts.push('⚠️ snapshot 覆盖率低 ' + (coverage * 100).toFixed(1) + '%');
+  const uncoveredCount = watchlist.length - metricsRows.length;
+  if (uncoveredCount > 0) summaryParts.push('未覆盖 ' + uncoveredCount + ' 只（可能停牌/接口未返回）');
+  const completenessSummary = summaryParts.length > 0 ? summaryParts.join('；') : '✅ 涨幅覆盖完整 ' + metricsRows.length + '/' + watchlist.length;
+  logs.push('数据完整性汇总: ' + completenessSummary);
+
   logs.push('完成: 收盘涨幅覆盖 ' + metricsRows.length + ' 只');
   return {
     ok: true,
     today,
     stocksCount: watchlist.length,
     pctUpdated: metricsRows.length,
+    coverage: coverage,
+    snapshotStats: stats,
+    completenessSummary: completenessSummary,
     logs
   };
 }
