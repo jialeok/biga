@@ -739,6 +739,7 @@ async function runMorning(env) {
   // PostgREST 批量 insert 要求同一批 JSON 数组里所有对象 key 集合一致，key 不一致会被忽略，
   // 所以这里按"这一行到底带了哪些字段"分桶，同一桶内 key 完全一致，分开发送。
   let totalMetricsWritten = 0;
+  let metricsWriteFailures = 0; // 【修复4】market_metrics 写入失败批次计数,用于暴露表未就绪/RLS 阻止
   const dateKeys = Object.keys(metricsByDate);
   for (const dateStr of dateKeys) {
     const shapeBuckets = {}; // shapeKey → rows[]
@@ -771,6 +772,7 @@ async function runMorning(env) {
       totalMetricsWritten += dateWritten;
       logs.push('  market_metrics ' + dateStr + ': ' + dateWritten + ' 行 (' + Object.keys(shapeBuckets).length + ' 个字段组合批次)');
     } catch (e) {
+      metricsWriteFailures++;
       logs.push('  market_metrics ' + dateStr + ' 写入失败: ' + e.message);
     }
   }
@@ -781,18 +783,20 @@ async function runMorning(env) {
   const summaryParts = [];
   if (todayMissing) summaryParts.push('❌ 今天(' + today + ')竞价数据缺失，需手动补抓');
   if (phantomDates.length > 0) summaryParts.push('⚠️ 历史日 volume/yest_volume 缺失: ' + phantomDates.join(', '));
+  if (metricsWriteFailures > 0) summaryParts.push('❌ market_metrics 写入失败 ' + metricsWriteFailures + ' 个日期批次(可能表未就绪/RLS 阻止/字段不符),数据未落库');
   const completenessSummary = summaryParts.length > 0 ? summaryParts.join('；') : '✅ 本次 ' + expectedDates.length + ' 个交易日数据完整';
   logs.push('数据完整性汇总: ' + completenessSummary);
 
   logs.push('完成: auction_watchlist ' + watchlistRows.length + ' 行, market_metrics ' + totalMetricsWritten + ' 行');
   return {
-    ok: true,
+    ok: metricsWriteFailures === 0 || totalMetricsWritten > 0,
     today,
     constituentsCount: constituents.length,
     numcatItems: items.length,
     metricsDates: dateKeys.length,
     metricsWritten: totalMetricsWritten,
     yestVolDerived: yestVolDerivedCount,
+    metricsWriteFailures: metricsWriteFailures,
     expectedDates: expectedDates,
     todayDataMissing: todayMissing,
     historicalDatesMissingFromNumcat: phantomDates,
